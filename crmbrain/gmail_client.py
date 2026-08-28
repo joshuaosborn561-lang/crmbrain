@@ -60,6 +60,21 @@ class Gmail:
             headers[item["name"].lower()] = item.get("value", "")
         return headers
 
+    def body_text(self, message: dict) -> str:
+        chunks: list[str] = []
+
+        def walk(part: dict) -> None:
+            data = (part.get("body") or {}).get("data")
+            mime = part.get("mimeType") or ""
+            if data and ("text/plain" in mime or "html" in mime):
+                raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+                chunks.append(raw)
+            for child in part.get("parts") or []:
+                walk(child)
+
+        walk(message.get("payload") or {})
+        return "\n".join(chunks)
+
     def send(self, to: str, subject: str, body: str) -> None:
         msg = MIMEText(body)
         msg["to"] = to

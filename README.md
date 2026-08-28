@@ -11,7 +11,7 @@ Daily grunt work for Josh's HubSpot. HubSpot only holds people he has actually e
 - Allo conversation Josh actually took
 - RVM callback
 
-Gmail never creates a person. It only updates someone already in HubSpot (PandaDoc, payment, Calendly, replies).
+Gmail updates someone already in HubSpot (PandaDoc, payment, replies). A Josh Calendly booking (SalesGlider Intro, etc.) creates the person if they are missing, then enriches through the waterfall MCP.
 
 ## Daily cron (Railway)
 

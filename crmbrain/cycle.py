@@ -82,6 +82,8 @@ def _handle_engagement(
         stage = STAGE["discovery_completed"]
     elif ev.source in {"heyreach", "rvm"} and not stage:
         stage = STAGE["replied"]
+    elif ev.source == "calendly" and not stage:
+        stage = STAGE["discovery_scheduled"]
     if stage:
         deal = hs.upsert_deal(contact, ev, stage)
         report.deals_moved.append(f"{ev.display_name()} -> {stage} ({deal.get('id')})")
@@ -131,7 +133,7 @@ def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> Non
 
 def _brief_from_events(settings: Settings, gmail: Gmail, events: list[Engagement], report: CycleReport) -> None:
     """Upcoming meetings from Calendly-gated Gmail events in the next 48h."""
-    horizon = now_utc() + timedelta(hours=48)
+    horizon = now_utc() + timedelta(days=7)
     for ev in events:
         if ev.stage_hint != STAGE["discovery_scheduled"]:
             continue
@@ -199,6 +201,10 @@ def run(settings: Settings | None = None) -> CycleReport:
             mail_events = gmail_scan.scan(settings, gmail, hs, report)
             for ev in mail_events:
                 if memory.already_processed(ev.source, ev.external_id):
+                    continue
+                if ev.extra.get("create_new"):
+                    ev.source = "calendly"
+                    _handle_engagement(ev, settings, hs, memory, hey, report)
                     continue
                 contact_id = ev.extra.get("hubspot_contact_id")
                 if ev.stage_hint and contact_id:

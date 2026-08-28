@@ -1,7 +1,7 @@
 from crmbrain.config import is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import heuristic_extract, stage_id
-from crmbrain.sources.gmail_scan import _stage_from_mail
+from crmbrain.sources.gmail_scan import _stage_from_mail, is_josh_meeting, parse_calendly
 from crmbrain.ticker import draft_email
 
 
@@ -45,6 +45,17 @@ def test_gmail_pandadoc_and_calendly():
     assert _stage_from_mail("Document completed", "PandaDoc", "has been signed") == "closedwon"
     assert _stage_from_mail("New Event", "Calendly", "accepted") == "qualifiedtobuy"
     assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == "3557889773"
+
+
+def test_josh_calendly_creates_contact():
+    subject = "New Event: Laura Klein - 01:00pm Thu, Sep 3, 2026 - SalesGlider Intro"
+    body = "Invitee: Laura Klein\nInvitee Email: lklein@grnplano.com\nEvent Type: SalesGlider Intro\n"
+    cal = parse_calendly(subject, body)
+    assert cal["email"] == "lklein@grnplano.com"
+    assert cal["first_name"] == "Laura"
+    assert cal["domain"] == "grnplano.com"
+    assert is_josh_meeting(subject, cal["event_type"])
+    assert not is_josh_meeting("New Event: Random Lead", "Client Roofing Campaign")
 
 
 def test_nurture_copy_has_no_dashes():
