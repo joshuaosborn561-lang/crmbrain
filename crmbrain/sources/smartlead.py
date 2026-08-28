@@ -25,6 +25,31 @@ def campaigns(settings: Settings) -> list[dict]:
     return rows if isinstance(rows, list) else []
 
 
+def _last_reply_at(settings: Settings, campaign_id: int, lead_id: int) -> datetime | None:
+    try:
+        payload = _get(
+            settings,
+            f"api/v1/campaigns/{campaign_id}/leads/{lead_id}/message-history",
+        )
+    except Exception:
+        return None
+    history = payload.get("history") if isinstance(payload, dict) else payload
+    latest = None
+    for item in history or []:
+        if str(item.get("type") or "").upper() not in {"REPLY", "RECEIVED", "INBOUND"}:
+            continue
+        raw = item.get("time") or item.get("created_at")
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
 def scan(settings: Settings) -> list[Engagement]:
     """Any positive SalesGlider reply. The key already scopes to SG campaigns."""
     cats = categories(settings)
@@ -39,6 +64,9 @@ def scan(settings: Settings) -> list[Engagement]:
         cid = camp.get("id")
         if not cid:
             continue
+        status = str(camp.get("status") or "").upper()
+        if status not in {"ACTIVE", "STARTED", "INPROGRESS"}:
+            continue
         for cat_id in sorted(positive_ids):
             payload = _get(
                 settings,
@@ -49,20 +77,15 @@ def scan(settings: Settings) -> list[Engagement]:
             for row in rows or []:
                 lead = row.get("lead") or {}
                 email = lead.get("email") or ""
-                if not email:
+                lead_id = lead.get("id")
+                if not email or not lead_id:
                     continue
-                created = row.get("created_at") or lead.get("created_at")
-                occurred = None
-                if created:
-                    try:
-                        occurred = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                    except ValueError:
-                        occurred = None
+                occurred = _last_reply_at(settings, cid, lead_id)
                 out.append(
                     Engagement(
                         source="smartlead",
-                        external_id=str(row.get("campaign_lead_map_id") or lead.get("id") or email),
-                        occurred_at=occurred or datetime.now(timezone.utc),
+                        external_id=str(row.get("campaign_lead_map_id") or lead_id or email),
+                        occurred_at=occurred or datetime.fromtimestamp(0, tz=timezone.utc),
                         first_name=lead.get("first_name") or "",
                         last_name=lead.get("last_name") or "",
                         email=email,

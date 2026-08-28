@@ -54,6 +54,26 @@ INTERNAL_MEETING_HINTS = (
     "josh / cayden",
 )
 
+# Josh's clients. Talk to them, but do not open a new SalesGlider deal.
+CLIENT_HINTS = (
+    "goliath",
+    "vasco",
+    "peterson",
+    "roofs by peterson",
+    "bolder cyber",
+    "parlay",
+    "culture fits",
+    "tech evolution",
+    "techevo",
+    "msrs",
+    "kyle peterson",
+    "corey tapper",
+    "dave ackley",
+    "carlos vasquez",
+    "randy haba",
+    "tj johnson",
+)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -148,6 +168,11 @@ def is_personal(name: str | None = None, phone: str | None = None, email: str | 
     if name and name.strip().lower() in PERSONAL_NAMES:
         return True
     return False
+
+
+def is_client_context(name: str = "", company: str = "", title: str = "") -> bool:
+    blob = f"{name} {company} {title}".lower()
+    return any(h in blob for h in CLIENT_HINTS)
 
 
 def is_internal_meeting(title: str | None, participants: list[str] | None = None) -> bool:

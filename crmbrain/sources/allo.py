@@ -43,7 +43,7 @@ def scan(settings: Settings, gmail: Gmail | None = None) -> list[Engagement]:
             pass
     if gmail:
         for stub in gmail.search(
-            'newer_than:2d (from:allo.ai OR from:withallo.com OR from:callallo.com OR subject:"Allo call" OR subject:"You talked")',
+            'newer_than:2d (from:allo.ai OR from:withallo.com OR from:callallo.com OR from:hello@allo.com OR subject:"Allo call")',
             max_results=20,
         ):
             msg = gmail.get(stub["id"])

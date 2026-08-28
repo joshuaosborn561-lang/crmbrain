@@ -1,4 +1,4 @@
-from crmbrain.config import is_internal_meeting, is_personal
+from crmbrain.config import is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import heuristic_extract, stage_id
 from crmbrain.sources.gmail_scan import _stage_from_mail
@@ -21,6 +21,11 @@ def test_personal_filter():
     assert not is_personal(email="rob@cyberguard360.com", name="Robert Lawson")
 
 
+def test_client_context():
+    assert is_client_context(name="Kyle Peterson", title="Kyle Peterson/Josh Osborn")
+    assert not is_client_context(name="Robert Lawson", company="CyberGuard360")
+
+
 def test_internal_meeting():
     assert is_internal_meeting("Weekly pipeline", ["joshua@salesglidergrowth.com"])
     assert not is_internal_meeting("Robert Lawson and Joshua Osborn", ["rob@cyberguard360.com"])
@@ -32,6 +37,8 @@ def test_stage_signals():
     assert "Baylor" in (facts["relationship_hooks"] or "")
     assert "son" in (facts["family_notes"] or "").lower()
     assert stage_id("paid") == "3482933986"
+    loose = heuristic_extract("If they signed and said let's do it, that still is not a closed deal.")
+    assert loose.get("stage_hint") != "signed"
 
 
 def test_gmail_pandadoc_and_calendly():

@@ -69,10 +69,7 @@ def heuristic_extract(text: str) -> dict[str, Any]:
     if any(w in low for w in ("we're going with someone", "deal is dead", "not moving forward", "out of budget")):
         facts["ticker_reason"] = "deal_died"
         facts["stage_hint"] = "closed_lost"
-    if any(w in low for w in ("send the proposal", "pricing", "pandadoc")):
-        facts["stage_hint"] = facts["stage_hint"] or "proposal_sent"
-    if any(w in low for w in ("signed", "we are in", "let's do it")):
-        facts["stage_hint"] = facts["stage_hint"] or "signed"
+    # Signed / paid / proposal come from Gmail + PandaDoc, not from talk.
     return facts
 
 

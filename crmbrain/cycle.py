@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from crmbrain import briefing, enrichment, intelligence, slack_notify, ticker
-from crmbrain.config import STAGE, Settings, is_personal, lookback_start, now_utc
+from crmbrain.config import STAGE, Settings, is_client_context, is_personal, lookback_start, now_utc
 from crmbrain.gmail_client import Gmail
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
@@ -39,6 +39,10 @@ def _handle_engagement(
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} personal")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "personal"})
         return
+    if not (ev.email or ev.phone or ev.display_name() or ev.linkedin_url):
+        report.junk_blocked.append(f"{ev.source}:{ev.external_id} no identity")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "no_identity"})
+        return
     if ev.source == "cube_acr_meta":
         report.skipped.append(f"cube_acr {ev.external_id} audio has no transcript yet")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_transcript"})
@@ -66,11 +70,17 @@ def _handle_engagement(
 
     hint = facts.get("stage_hint") or ev.stage_hint
     stage = intelligence.stage_id(hint) if hint else ""
-    if ev.source == "smartlead" and not stage:
+    money_stages = {STAGE["signed"], STAGE["paid"], STAGE["proposal_sent"]}
+    if ev.source != "gmail" and stage in money_stages:
+        stage = ""
+    if is_client_context(ev.display_name(), ev.company, ev.raw_subject):
+        report.skipped.append(f"{ev.display_name()} client conversation, notes only")
+        stage = ""
+    elif ev.source == "smartlead" and not stage:
         stage = STAGE["nurture"]
-    if ev.source in {"cube_acr", "fireflies", "allo"} and not stage:
+    elif ev.source in {"cube_acr", "fireflies", "allo"} and not stage:
         stage = STAGE["discovery_completed"]
-    if ev.source in {"heyreach", "rvm"} and not stage:
+    elif ev.source in {"heyreach", "rvm"} and not stage:
         stage = STAGE["replied"]
     if stage:
         deal = hs.upsert_deal(contact, ev, stage)
