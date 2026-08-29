@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from crmbrain.config import STAGE, Settings
+from crmbrain.config import CDT, STAGE, Settings
 from crmbrain.gmail_client import Gmail
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport, Engagement
@@ -66,16 +66,56 @@ def parse_calendly(subject: str, body: str) -> dict[str, str]:
         parts = invitee.split()
         first, last = parts[0], " ".join(parts[1:])
     domain = email.split("@")[1] if "@" in email else ""
+    meeting_at = parse_meeting_at(subject, body)
     return {
         "name": invitee,
         "first_name": first,
         "last_name": last,
         "email": email,
         "event_type": event_type,
-        "when": when,
+        "when": when or (meeting_at.astimezone(CDT).strftime("%a %b %-d %Y %-I:%M%p %Z") if meeting_at else ""),
         "domain": domain,
         "company": _company_from_domain(domain),
+        "meeting_at": meeting_at.isoformat() if meeting_at else "",
     }
+
+
+SUBJECT_WHEN = re.compile(
+    r"(\d{1,2}:\d{2}\s*[ap]m)\s+\w{3},?\s+(\w{3})\s+(\d{1,2}),?\s+(\d{4})",
+    re.I,
+)
+BODY_WHEN = re.compile(
+    r"(\w+day),?\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[ap]m)",
+    re.I,
+)
+
+
+def parse_meeting_at(subject: str, body: str = "") -> datetime | None:
+    """Calendly times are Josh's Chicago clock."""
+    text = f"{subject}\n{body}"
+    m = SUBJECT_WHEN.search(subject) or SUBJECT_WHEN.search(text)
+    if m:
+        stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4))
+        if stamp:
+            return stamp
+    m = BODY_WHEN.search(text)
+    if m:
+        stamp = _parse_clock(m.group(5), m.group(2), m.group(3), m.group(4))
+        if stamp:
+            return stamp
+    return None
+
+
+def _parse_clock(time_part: str, month: str, day: str, year: str) -> datetime | None:
+    clock = re.sub(r"\s+", "", time_part).upper()
+    month = month[:3].title()
+    for fmt in ("%I:%M%p %b %d %Y", "%I:%M%p %B %d %Y"):
+        try:
+            naive = datetime.strptime(f"{clock} {month} {int(day)} {year}", fmt)
+            return naive.replace(tzinfo=CDT)
+        except ValueError:
+            continue
+    return None
 
 
 def is_josh_meeting(subject: str, event_type: str) -> bool:

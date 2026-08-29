@@ -131,22 +131,7 @@ def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> Non
         memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
 
 
-def _brief_from_events(settings: Settings, gmail: Gmail, events: list[Engagement], report: CycleReport) -> None:
-    """Upcoming meetings from Calendly-gated Gmail events in the next 48h."""
-    horizon = now_utc() + timedelta(days=7)
-    for ev in events:
-        if ev.stage_hint != STAGE["discovery_scheduled"]:
-            continue
-        if ev.occurred_at and ev.occurred_at > horizon:
-            continue
-        try:
-            briefing.send(settings, gmail, ev)
-            report.briefs_sent.append(ev.display_name() or ev.email)
-        except Exception as exc:
-            report.errors.append(f"brief {ev.email}: {exc}")
-
-
-def run(settings: Settings | None = None) -> CycleReport:
+def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleReport:
     settings = settings or Settings.from_env()
     report = CycleReport()
     memory = Memory(settings)
@@ -156,9 +141,17 @@ def run(settings: Settings | None = None) -> CycleReport:
         return report
 
     hs = HubSpot(settings)
-    hs.ensure_properties()
+    if not briefs_only:
+        hs.ensure_properties()
     gmail = Gmail(settings) if settings.gmail_refresh_token else None
-    hey = HeyReach(settings) if settings.heyreach_key else None
+    hey = None if briefs_only else (HeyReach(settings) if settings.heyreach_key else None)
+    if briefs_only:
+        if gmail:
+            briefing.send_due(settings, gmail, hs, memory, report)
+        else:
+            report.errors.append("Gmail missing, cannot send briefs")
+        memory.finish_run(run_id, "ok" if not report.errors else "partial", report.as_dict())
+        return report
 
     engagements: list[Engagement] = []
     try:
@@ -218,7 +211,7 @@ def run(settings: Settings | None = None) -> CycleReport:
                         memory.stop_ticker(email=ev.email, hs_contact_id=contact_id)
                 memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject})
                 report.processed.append(f"gmail:{ev.raw_subject[:60]}")
-            _brief_from_events(settings, gmail, mail_events, report)
+            briefing.send_due(settings, gmail, hs, memory, report)
         except Exception as exc:
             report.errors.append(f"gmail: {exc}")
 

@@ -19,11 +19,13 @@ To backfill existing HubSpot gaps:
 python scripts/backfill_contact_fields.py
 ```
 
-## Daily cron (Railway)
+## Cron (Railway)
 
-`0 12,22 * * *` UTC — 7am and 5pm Chicago.
+`0 * * * *` UTC. Full CRM cycle at 7am and 5pm Chicago. Other hours only check for a meeting brief.
 
-Each run:
+One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump.
+
+Full cycle:
 
 1. Reads today's Cube ACR folder transcripts
 2. Pulls that day's Fireflies
@@ -34,7 +36,7 @@ Each run:
 7. Extracts personal details onto the contact
 8. Queues LinkedIn connects on HeyReach 530529 (enrichment waterfall if no URL)
 9. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
-10. Emails meeting briefs to `joshua@salesglidergrowth.com`
+10. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 
 ## Run locally
 

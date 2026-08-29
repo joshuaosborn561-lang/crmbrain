@@ -94,7 +94,21 @@ class HubSpot:
             rows = self._search(
                 "contacts",
                 [{"propertyName": "email", "operator": "EQ", "value": email}],
-                ["email", "firstname", "lastname", "phone", "company", "hs_linkedin_url", "personal_details"],
+                [
+                    "email",
+                    "firstname",
+                    "lastname",
+                    "phone",
+                    "company",
+                    "jobtitle",
+                    "website",
+                    "hs_linkedin_url",
+                    "personal_details",
+                    "family_notes",
+                    "relationship_hooks",
+                    "pain_points",
+                    "gift_ideas",
+                ],
             )
             if rows:
                 return rows[0]
