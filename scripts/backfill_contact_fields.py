@@ -150,6 +150,7 @@ def associate_orphans(settings: Settings, contacts: list[dict], deals: list[dict
             continue
         raw = ((d.get("properties") or {}).get("dealname") or "").split(" - ")[0].strip().lower()
         raw = re.sub(r"\s+", " ", raw)
+        raw = re.sub(r"\s+deal$", "", raw).strip()
         if not raw or "goliath" in raw:
             skipped.append((d["id"], raw or "blank", "no unique person"))
             continue

@@ -129,7 +129,10 @@ def find_mobile(settings: Settings, work_email: str = "", linkedin_url: str = ""
         return ""
     payload: dict[str, str] = {}
     if work_email and "@" in work_email and not should_skip_email(work_email):
-        payload["work_email"] = work_email
+        if domain_of(work_email) in SKIP_EMAIL_DOMAINS:
+            payload["personal_email"] = work_email
+        else:
+            payload["work_email"] = work_email
     li = usable_linkedin(linkedin_url)
     if li:
         payload["profile_url"] = li
