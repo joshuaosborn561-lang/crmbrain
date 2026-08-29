@@ -1,6 +1,12 @@
 from crmbrain.config import is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import heuristic_extract, stage_id
+from crmbrain.leadmagic import (
+    parse_email_response,
+    parse_mobile_response,
+    should_skip_email,
+    usable_linkedin,
+)
 from crmbrain.sources.gmail_scan import _stage_from_mail, is_josh_meeting, parse_calendly
 from crmbrain.ticker import draft_email
 
@@ -56,6 +62,17 @@ def test_josh_calendly_creates_contact():
     assert cal["domain"] == "grnplano.com"
     assert is_josh_meeting(subject, cal["event_type"])
     assert not is_josh_meeting("New Event: Random Lead", "Client Roofing Campaign")
+
+
+def test_leadmagic_parsers_and_guards():
+    assert parse_email_response({"status": "valid", "email": "Bo@Example.com"}) == "bo@example.com"
+    assert parse_email_response({"status": "not_found", "email": "x@y.com"}) == ""
+    assert parse_mobile_response({"mobile_number": "4697011712"}) == "+14697011712"
+    assert parse_mobile_response({"mobile_number": None}) == ""
+    assert usable_linkedin("https://www.linkedin.com/in/dnyanoba-mulgir-93118588") == ""
+    assert usable_linkedin("https://www.linkedin.com/in/lauramklein")
+    assert should_skip_email("booking-bridge-sync-test@salesglidergrowth.com")
+    assert not should_skip_email("lklein@grnplano.com")
 
 
 def test_nurture_copy_has_no_dashes():

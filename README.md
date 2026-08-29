@@ -11,7 +11,13 @@ Daily grunt work for Josh's HubSpot. HubSpot only holds people he has actually e
 - Allo conversation Josh actually took
 - RVM callback
 
-Gmail updates someone already in HubSpot (PandaDoc, payment, replies). A Josh Calendly booking (SalesGlider Intro, etc.) creates the person if they are missing, then enriches through the waterfall MCP.
+Gmail updates someone already in HubSpot (PandaDoc, payment, replies). A Josh Calendly booking (SalesGlider Intro, etc.) creates the person if they are missing, then enriches through the waterfall MCP. If waterfall/Supabase is down, LeadMagic fills empty work emails and mobiles only (never overwrites).
+
+To backfill existing HubSpot gaps:
+
+```bash
+python scripts/backfill_contact_fields.py
+```
 
 ## Daily cron (Railway)
 

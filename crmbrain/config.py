@@ -91,6 +91,7 @@ class Settings:
     heyreach_linkedin_account_id: int
     enrichment_url: str
     enrichment_client_tag: str
+    leadmagic_key: str
     slack_token: str
     slack_channel: str
     supabase_url: str
@@ -121,6 +122,7 @@ class Settings:
                 "https://email-waterfall-production-021b.up.railway.app/mcp",
             ),
             enrichment_client_tag=os.getenv("ENRICHMENT_CLIENT_TAG", "salesglider"),
+            leadmagic_key=os.getenv("LEADMAGIC_API_KEY", ""),
             slack_token=os.getenv("SLACK_BOT_TOKEN", ""),
             slack_channel=os.getenv("SLACK_NURTURE_CHANNEL", "C0BHBDTMRFY"),
             supabase_url=os.getenv("SUPABASE_URL", "https://azpapwtnrbzywlnxxecz.supabase.co"),
