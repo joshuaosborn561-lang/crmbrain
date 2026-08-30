@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from crmbrain.briefing import due_to_send, format_phone, format_when, render
+from crmbrain.briefing import due_to_send, format_phone, format_when, matches_sent_brief, render
 from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import heuristic_extract, stage_id
@@ -106,6 +106,9 @@ def test_one_brief_two_hours_before():
     assert "Offer that fits" in body
     assert format_phone("+1 (469) 701-1712") == "4697011712"
     assert "1:00pm CDT" in format_when(meeting)
+    sent = render(ev)
+    assert matches_sent_brief("Brief: Laura Klein", sent, ev)
+    assert not matches_sent_brief("Brief: Someone Else", "unrelated", ev)
 
 
 def test_leadmagic_parsers_and_guards():

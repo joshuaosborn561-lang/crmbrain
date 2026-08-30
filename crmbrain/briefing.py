@@ -132,6 +132,43 @@ def send(settings: Settings, gmail: Gmail, ev: Engagement, facts: dict | None = 
     gmail.send(settings.josh_brief_email, subject, body)
 
 
+def sent_query(ev: Engagement) -> str:
+    name = ev.display_name() or ev.email or ""
+    return f'in:sent subject:"Brief: {name}" newer_than:21d'
+
+
+def matches_sent_brief(subject: str, body: str, ev: Engagement) -> bool:
+    """True if this Sent message is already the brief for this meeting."""
+    name = (ev.display_name() or "").strip()
+    if name and f"brief: {name}".lower() not in f"{subject} {body}".lower():
+        return False
+    meeting_at = ev.extra.get("meeting_at")
+    if isinstance(meeting_at, datetime):
+        when = format_when(meeting_at)
+        if when and when in f"{subject}\n{body}":
+            return True
+    if ev.email and ev.email.lower() in (body or "").lower():
+        return True
+    return bool(name and subject.lower().startswith("brief:"))
+
+
+def already_sent(gmail: Gmail, ev: Engagement) -> bool:
+    """Durable lock. Railway cron has no disk, and Supabase REST can 503."""
+    try:
+        stubs = gmail.search(sent_query(ev), max_results=10)
+    except Exception:
+        return True
+    for stub in stubs:
+        try:
+            msg = gmail.get(stub["id"])
+            headers = gmail.headers_map(msg)
+            if matches_sent_brief(headers.get("subject", ""), gmail.body_text(msg), ev):
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def collect_upcoming(settings: Settings, gmail: Gmail) -> list[Engagement]:
     """Josh Calendly bookings still ahead. Used only to time the one brief."""
     out: list[Engagement] = []
@@ -198,7 +235,7 @@ def send_due(
         meeting_at = ev.extra.get("meeting_at")
         if not isinstance(meeting_at, datetime) or not due_to_send(meeting_at):
             continue
-        if memory.already_processed("brief", ev.external_id):
+        if memory.already_processed("brief", ev.external_id) or already_sent(gmail, ev):
             report.skipped.append(f"brief already sent {ev.email}")
             continue
         contact = None

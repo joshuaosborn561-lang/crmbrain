@@ -21,9 +21,9 @@ python scripts/backfill_contact_fields.py
 
 ## Cron (Railway)
 
-`0 * * * *` UTC. Full CRM cycle at 7am and 5pm Chicago. Other hours only check for a meeting brief.
+`0 12,22 * * *` UTC — 7am and 5pm Chicago.
 
-One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump.
+One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump. A Sent-folder check stops repeats even if cron is hourly.
 
 Full cycle:
 
