@@ -127,6 +127,21 @@ class HubSpot:
     def in_crm(self, email: str = "", phone: str = "") -> bool:
         return self.find_contact(email=email, phone=phone) is not None
 
+    def iter_contacts(self, properties: list[str]):
+        after = None
+        while True:
+            params: dict[str, Any] = {"limit": 100, "properties": ",".join(properties)}
+            if after:
+                params["after"] = after
+            resp = self.session.get(f"{self.base}/crm/v3/objects/contacts", params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            for row in data.get("results") or []:
+                yield row
+            after = (data.get("paging") or {}).get("next", {}).get("after")
+            if not after:
+                break
+
     def upsert_contact(self, ev: Engagement) -> dict:
         existing = self.find_contact(email=ev.email, phone=ev.phone)
         props = {

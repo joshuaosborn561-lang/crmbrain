@@ -27,12 +27,18 @@ SKIP_EMAILS = {
 
 
 def usable_linkedin(url: str | None) -> str:
-    raw = (url or "").strip()
+    raw = (url or "").strip().split("?")[0].rstrip("/")
     if not raw or JUNK_LINKEDIN in raw.lower():
         return ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{3,}", raw) and "linkedin.com" not in raw.lower():
+        return f"https://www.linkedin.com/in/{raw}"
+    if raw.lower().startswith("in/"):
+        return f"https://www.linkedin.com/{raw}"
     if "linkedin.com/in/" not in raw.lower():
         return ""
-    return raw
+    if raw.startswith("http"):
+        return raw
+    return "https://" + raw.lstrip("/")
 
 
 def domain_of(email: str) -> str:
@@ -148,6 +154,36 @@ def find_mobile(settings: Settings, work_email: str = "", linkedin_url: str = ""
         if resp.status_code >= 400:
             return ""
         return parse_mobile_response(resp.json() if resp.text else {})
+    except Exception:
+        return ""
+
+
+def parse_profile_response(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    url = data.get("profile_url") or data.get("linkedin_url") or data.get("linkedin") or ""
+    return usable_linkedin(str(url) if url else "")
+
+
+def find_profile(settings: Settings, email: str) -> str:
+    """Email → LinkedIn URL. LeadMagic charges only when found."""
+    if not settings.leadmagic_key or not looks_like_email(email) or should_skip_email(email):
+        return ""
+    payload = (
+        {"personal_email": email}
+        if domain_of(email) in SKIP_EMAIL_DOMAINS
+        else {"work_email": email}
+    )
+    try:
+        resp = requests.post(
+            f"{BASE}/people/b2b-profile",
+            headers=_headers(settings),
+            json=payload,
+            timeout=40,
+        )
+        if resp.status_code >= 400:
+            return ""
+        return parse_profile_response(resp.json() if resp.text else {})
     except Exception:
         return ""
 

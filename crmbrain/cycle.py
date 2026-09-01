@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import timedelta
 
 from crmbrain import briefing, enrichment, intelligence, slack_notify, ticker
-from crmbrain.config import STAGE, Settings, is_client_context, is_personal, lookback_start, now_utc
+from crmbrain.config import JOSH_EMAILS, STAGE, Settings, is_client_context, is_personal, lookback_start, now_utc
 from crmbrain.gmail_client import Gmail
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
+from crmbrain.leadmagic import find_profile, should_skip_email, usable_linkedin
 from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartlead
 
 
@@ -97,18 +98,101 @@ def _handle_engagement(
         ticker.enroll(memory, ev, reason, hs_contact_id=contact["id"])
         report.ticker_enrolled.append(f"{ev.display_name()} {reason}")
 
-    if hey and (ev.linkedin_url or ev.email):
-        try:
-            if not ev.linkedin_url:
-                ev = enrichment.enrich(settings, ev)
-            if ev.linkedin_url:
-                hey.add_lead(ev)
-                report.linkedin_queued.append(ev.display_name() or ev.email)
-        except Exception as exc:
-            report.errors.append(f"heyreach {ev.display_name()}: {exc}")
+    _queue_linkedin(settings, hey, ev, hs, memory, report, contact=contact)
 
     memory.mark_processed(ev.source, ev.external_id, {"contact_id": contact["id"]})
     report.processed.append(f"{ev.source}:{ev.external_id}")
+
+
+def _heyreach_id(ev: Engagement) -> str:
+    if ev.email:
+        return ev.email.lower()
+    if usable_linkedin(ev.linkedin_url):
+        return usable_linkedin(ev.linkedin_url).lower()
+    return (ev.display_name() or "").lower()
+
+
+def _queue_linkedin(
+    settings: Settings,
+    hey: HeyReach | None,
+    ev: Engagement,
+    hs: HubSpot,
+    memory: Memory,
+    report: CycleReport,
+    contact: dict | None = None,
+) -> None:
+    """Anyone Josh called, emailed, or talked to on LinkedIn gets a HeyReach invite."""
+    if not hey or ev.source == "heyreach":
+        return
+    if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
+        return
+    if ev.email and (ev.email.lower() in JOSH_EMAILS or should_skip_email(ev.email)):
+        return
+    hid = _heyreach_id(ev)
+    if not hid or memory.already_processed("heyreach", hid):
+        return
+    if contact:
+        props = contact.get("properties") or {}
+        ev.linkedin_url = ev.linkedin_url or props.get("hs_linkedin_url") or ""
+        ev.email = ev.email or props.get("email") or ""
+        ev.company = ev.company or props.get("company") or ""
+        ev.title = ev.title or props.get("jobtitle") or ev.title
+        ev.first_name = ev.first_name or props.get("firstname") or ""
+        ev.last_name = ev.last_name or props.get("lastname") or ""
+    ev.linkedin_url = usable_linkedin(ev.linkedin_url)
+    if not ev.linkedin_url:
+        ev = enrichment.enrich(settings, ev)
+        ev.linkedin_url = usable_linkedin(ev.linkedin_url)
+    if not ev.linkedin_url and ev.email:
+        ev.linkedin_url = find_profile(settings, ev.email)
+    try:
+        status = hey.add_lead(ev)
+    except Exception as exc:
+        report.errors.append(f"heyreach {ev.display_name() or ev.email}: {exc}")
+        return
+    if status != "queued":
+        report.skipped.append(f"heyreach {ev.display_name() or ev.email} {status}")
+        return
+    memory.mark_processed("heyreach", hid, {"linkedin": ev.linkedin_url, "email": ev.email})
+    if ev.linkedin_url and contact and contact.get("id"):
+        try:
+            hs.patch_contact(contact["id"], {"hs_linkedin_url": ev.linkedin_url})
+        except Exception:
+            pass
+    report.linkedin_queued.append(ev.display_name() or ev.email)
+
+
+def _backfill_hubspot_invites(
+    settings: Settings,
+    hs: HubSpot,
+    hey: HeyReach,
+    memory: Memory,
+    report: CycleReport,
+    limit: int = 25,
+) -> None:
+    """HubSpot is engaged people. Queue anyone not already sent to HeyReach."""
+    queued = 0
+    for row in hs.iter_contacts(
+        ["email", "firstname", "lastname", "phone", "company", "jobtitle", "hs_linkedin_url"]
+    ):
+        if queued >= limit:
+            break
+        props = row.get("properties") or {}
+        ev = Engagement(
+            source="hubspot_backfill",
+            external_id=str(row.get("id") or ""),
+            email=props.get("email") or "",
+            first_name=props.get("firstname") or "",
+            last_name=props.get("lastname") or "",
+            phone=props.get("phone") or "",
+            company=props.get("company") or "",
+            title=props.get("jobtitle") or "",
+            linkedin_url=props.get("hs_linkedin_url") or "",
+        )
+        before = len(report.linkedin_queued)
+        _queue_linkedin(settings, hey, ev, hs, memory, report, contact=row)
+        if len(report.linkedin_queued) > before:
+            queued += 1
 
 
 def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> None:
@@ -179,6 +263,11 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         engagements += allo.scan(settings, gmail)
     except Exception as exc:
         report.errors.append(f"allo: {exc}")
+    if gmail:
+        try:
+            engagements += gmail_scan.scan_people(settings, gmail)
+        except Exception as exc:
+            report.errors.append(f"gmail_person: {exc}")
 
     for ev in engagements:
         if not _in_window(ev, settings) and ev.source not in {"heyreach"}:
@@ -209,11 +298,23 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                         report.ticker_enrolled.append(f"{ev.email} no_show")
                     if ev.stage_hint in {STAGE["paid"], STAGE["signed"], STAGE["discovery_scheduled"]}:
                         memory.stop_ticker(email=ev.email, hs_contact_id=contact_id)
+                if contact_id:
+                    try:
+                        found = hs.find_contact(email=ev.email) if ev.email else {"id": contact_id}
+                    except Exception:
+                        found = {"id": contact_id}
+                    _queue_linkedin(settings, hey, ev, hs, memory, report, contact=found)
                 memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject})
                 report.processed.append(f"gmail:{ev.raw_subject[:60]}")
             briefing.send_due(settings, gmail, hs, memory, report)
         except Exception as exc:
             report.errors.append(f"gmail: {exc}")
+
+    if hey:
+        try:
+            _backfill_hubspot_invites(settings, hs, hey, memory, report)
+        except Exception as exc:
+            report.errors.append(f"heyreach backfill: {exc}")
 
     _fire_ticker(settings, memory, report)
     memory.finish_run(run_id, "ok" if not report.errors else "partial", report.as_dict())
