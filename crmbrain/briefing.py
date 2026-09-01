@@ -10,7 +10,7 @@ from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.sources.gmail_scan import is_josh_meeting, parse_calendly, parse_meeting_at
 
-# One brief, about two hours before the call. Hourly cron hits this once.
+# One brief, about two hours before the call. Gmail Sent lock stops repeats.
 LEAD_EARLY = timedelta(hours=2, minutes=30)
 LEAD_LATE = timedelta(hours=1)
 

@@ -19,11 +19,15 @@ To backfill existing HubSpot gaps:
 python scripts/backfill_contact_fields.py
 ```
 
-## Cron (Railway)
+## Railway
 
-`0 12,22 * * *` UTC — 7am and 5pm Chicago.
+Start command: `python -m crmbrain cycle`
 
-One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump. A Sent-folder check stops repeats even if cron is hourly.
+Recommended cron: `0 12,22 * * *` UTC — 7am and 5pm America/Chicago.
+
+HubSpot is engaged-only. Cold outbound stays in Supabase.
+
+One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump. Dedup is not hourly-cron-only: a Gmail Sent-folder check stops repeats even if a run fires twice.
 
 Full cycle:
 
