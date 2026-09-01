@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from crmbrain.config import Settings
+
+
+class Memory:
+    """Idempotency + ticker. Supabase first, local JSON fallback."""
+
+    def __init__(self, settings: Settings, data_dir: Path | None = None):
+        self.settings = settings
+        self.data_dir = data_dir or Path("data")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.path = self.data_dir / "account_memory.json"
+        self._local = self._load_local()
+        self.use_supabase = bool(settings.supabase_url and settings.supabase_key)
+
+    def _load_local(self) -> dict[str, Any]:
+        if self.path.exists():
+            return json.loads(self.path.read_text())
+        return {"processed": [], "ticker": [], "facts": [], "runs": []}
+
+    def save_local(self) -> None:
+        self.path.write_text(json.dumps(self._local, indent=2, default=str))
+
+    def _sb(self, method: str, table: str, **kwargs) -> Any:
+        if not self.use_supabase:
+            return None
+        url = f"{self.settings.supabase_url.rstrip('/')}/rest/v1/{table}"
+        headers = {
+            "apikey": self.settings.supabase_key,
+            "Authorization": f"Bearer {self.settings.supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"supabase {table} {resp.status_code}: {resp.text[:400]}")
+        if not resp.text:
+            return None
+        return resp.json()
+
+    def already_processed(self, source: str, external_id: str) -> bool:
+        key = f"{source}:{external_id}"
+        if key in self._local.get("processed", []):
+            return True
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema(
+                    "GET",
+                    "processed_events",
+                    params={
+                        "source": f"eq.{source}",
+                        "external_id": f"eq.{external_id}",
+                        "select": "id",
+                    },
+                )
+                return bool(rows)
+            except RuntimeError:
+                return False
+        return False
+
+    def _sb_schema(self, method: str, table: str, json_body: Any = None, params: dict | None = None) -> Any:
+        url = f"{self.settings.supabase_url.rstrip('/')}/rest/v1/{table}"
+        headers = {
+            "apikey": self.settings.supabase_key,
+            "Authorization": f"Bearer {self.settings.supabase_key}",
+            "Content-Type": "application/json",
+            "Accept-Profile": "crmbrain",
+            "Content-Profile": "crmbrain",
+            "Prefer": "return=representation,resolution=merge-duplicates",
+        }
+        resp = requests.request(
+            method, url, headers=headers, timeout=30, json=json_body, params=params
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"supabase crmbrain.{table} {resp.status_code}: {resp.text[:400]}")
+        if not resp.content:
+            return None
+        return resp.json()
+
+    def mark_processed(self, source: str, external_id: str, payload: dict | None = None) -> None:
+        key = f"{source}:{external_id}"
+        processed = self._local.setdefault("processed", [])
+        if key not in processed:
+            processed.append(key)
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema(
+                    "POST",
+                    "processed_events",
+                    json_body={"source": source, "external_id": external_id, "payload": payload or {}},
+                )
+            except RuntimeError:
+                pass
+
+    def start_run(self) -> int | None:
+        if not self.use_supabase:
+            return None
+        try:
+            rows = self._sb_schema("POST", "cycle_runs", json_body={"status": "running"})
+            if rows:
+                return rows[0]["id"]
+        except RuntimeError:
+            return None
+        return None
+
+    def finish_run(self, run_id: int | None, status: str, report: dict) -> None:
+        self._local.setdefault("runs", []).append({"status": status, "report": report})
+        self.save_local()
+        if self.use_supabase and run_id is not None:
+            try:
+                self._sb_schema(
+                    "PATCH",
+                    "cycle_runs",
+                    json_body={"status": status, "report": report, "finished_at": "now()"},
+                    params={"id": f"eq.{run_id}"},
+                )
+            except RuntimeError:
+                pass
+
+    def enroll_ticker(self, row: dict) -> None:
+        self._local.setdefault("ticker", []).append(row)
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema("POST", "ticker", json_body=row)
+            except RuntimeError:
+                pass
+
+    def due_ticker(self, now_iso: str) -> list[dict]:
+        local = [
+            t
+            for t in self._local.get("ticker", [])
+            if t.get("status") == "active" and t.get("next_fire_at", "") <= now_iso
+        ]
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema(
+                    "GET",
+                    "ticker",
+                    params={
+                        "status": "eq.active",
+                        "next_fire_at": f"lte.{now_iso}",
+                        "select": "*",
+                    },
+                )
+                return rows or local
+            except RuntimeError:
+                return local
+        return local
+
+    def bump_ticker(self, ticker_id: str, next_fire_at: str, last_fired_at: str) -> None:
+        for t in self._local.get("ticker", []):
+            if str(t.get("id")) == str(ticker_id) or (
+                t.get("email") and t.get("email") == ticker_id
+            ):
+                t["next_fire_at"] = next_fire_at
+                t["last_fired_at"] = last_fired_at
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema(
+                    "PATCH",
+                    "ticker",
+                    json_body={"next_fire_at": next_fire_at, "last_fired_at": last_fired_at},
+                    params={"id": f"eq.{ticker_id}"},
+                )
+            except RuntimeError:
+                pass
+
+    def stop_ticker(self, email: str | None = None, hs_contact_id: str | None = None) -> None:
+        for t in self._local.get("ticker", []):
+            if email and t.get("email") == email:
+                t["status"] = "stopped"
+            if hs_contact_id and t.get("hs_contact_id") == hs_contact_id:
+                t["status"] = "stopped"
+        self.save_local()
+        if self.use_supabase:
+            try:
+                if email:
+                    self._sb_schema(
+                        "PATCH",
+                        "ticker",
+                        json_body={"status": "stopped"},
+                        params={"email": f"eq.{email}", "status": "eq.active"},
+                    )
+                if hs_contact_id:
+                    self._sb_schema(
+                        "PATCH",
+                        "ticker",
+                        json_body={"status": "stopped"},
+                        params={"hs_contact_id": f"eq.{hs_contact_id}", "status": "eq.active"},
+                    )
+            except RuntimeError:
+                pass
+
+    def save_fact(self, fact: dict) -> None:
+        self._local.setdefault("facts", []).append(fact)
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema("POST", "relationship_facts", json_body=fact)
+            except RuntimeError:
+                pass
