@@ -29,7 +29,7 @@ class HeyReach:
 
     def add_lead(self, ev: Engagement) -> str:
         profile = usable_linkedin(ev.linkedin_url)
-        if not profile and not ev.email:
+        if not profile:
             return "skipped:no-linkedin"
         self.ensure_running()
         first = ev.first_name or (ev.display_name().split(" ")[0] if ev.display_name() else "")

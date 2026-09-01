@@ -9,7 +9,7 @@ from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
-from crmbrain.leadmagic import find_profile, should_skip_email, usable_linkedin
+from crmbrain.leadmagic import should_skip_email, usable_linkedin
 from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartlead
 
 
@@ -141,10 +141,7 @@ def _queue_linkedin(
         ev.last_name = ev.last_name or props.get("lastname") or ""
     ev.linkedin_url = usable_linkedin(ev.linkedin_url)
     if not ev.linkedin_url:
-        ev = enrichment.enrich(settings, ev)
-        ev.linkedin_url = usable_linkedin(ev.linkedin_url)
-    if not ev.linkedin_url and ev.email:
-        ev.linkedin_url = find_profile(settings, ev.email)
+        ev = enrichment.fill_linkedin(settings, ev)
     try:
         status = hey.add_lead(ev)
     except Exception as exc:

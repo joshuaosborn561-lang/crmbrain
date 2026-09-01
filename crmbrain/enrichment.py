@@ -5,7 +5,7 @@ import time
 
 from crmbrain.config import Settings
 from crmbrain.http_mcp import McpClient
-from crmbrain.leadmagic import find_email, find_mobile, find_profile, usable_linkedin
+from crmbrain.leadmagic import find_email, find_mobile, usable_linkedin
 from crmbrain.models import Engagement
 
 
@@ -16,7 +16,9 @@ def _client(settings: Settings) -> McpClient:
 
 
 def _apply_row(ev: Engagement, row: dict) -> Engagement:
-    ev.linkedin_url = ev.linkedin_url or usable_linkedin(row.get("linkedin_url") or row.get("linkedin")) or ev.linkedin_url
+    ev.linkedin_url = ev.linkedin_url or usable_linkedin(
+        row.get("linkedin_url") or row.get("linkedin") or row.get("profile_url")
+    ) or ev.linkedin_url
     ev.email = ev.email or row.get("email") or row.get("work_email") or ""
     ev.phone = ev.phone or row.get("cellphone") or row.get("phone") or ""
     ev.company = ev.company or row.get("company_name") or row.get("company") or ""
@@ -41,8 +43,27 @@ def enrich(settings: Settings, ev: Engagement) -> Engagement:
             ev = _enrich_waterfall(settings, ev, domain)
         except Exception:
             pass
-    if (not ev.email or not ev.phone or not usable_linkedin(ev.linkedin_url)) and settings.leadmagic_key:
+    if (not ev.email or not ev.phone) and settings.leadmagic_key:
         ev = _enrich_leadmagic(settings, ev)
+    return ev
+
+
+def fill_linkedin(settings: Settings, ev: Engagement) -> Engagement:
+    """Missing LinkedIn URL comes from the email-waterfall MCP only."""
+    ev.linkedin_url = usable_linkedin(ev.linkedin_url)
+    if ev.linkedin_url:
+        return ev
+    domain = ev.domain
+    if not domain and ev.email and "@" in ev.email:
+        domain = ev.email.split("@")[1]
+        ev.domain = domain
+    if not settings.enrichment_url or not domain:
+        return ev
+    try:
+        ev = _enrich_waterfall(settings, ev, domain)
+    except Exception:
+        pass
+    ev.linkedin_url = usable_linkedin(ev.linkedin_url)
     return ev
 
 
@@ -62,7 +83,10 @@ def _enrich_waterfall(settings: Settings, ev: Engagement, domain: str) -> Engage
                         "company_name": ev.company,
                         "first_name": ev.first_name,
                         "last_name": ev.last_name,
+                        "title": ev.title,
                         "email": ev.email,
+                        "linkedin_url": ev.linkedin_url,
+                        "phone": ev.phone,
                     }
                 ]
             ),
@@ -97,10 +121,6 @@ def _enrich_leadmagic(settings: Settings, ev: Engagement) -> Engagement:
         mobile = find_mobile(settings, ev.email, ev.linkedin_url)
         if mobile:
             ev.phone = mobile
-    if not usable_linkedin(ev.linkedin_url) and ev.email:
-        profile = find_profile(settings, ev.email)
-        if profile:
-            ev.linkedin_url = profile
     return ev
 
 
@@ -118,10 +138,17 @@ def _wait_job(client: McpClient, job_id: str, attempts: int = 12) -> dict:
 def _rows_from_result(result) -> list[dict]:
     if not isinstance(result, dict):
         return []
+    nested = result.get("result") or result.get("data") or result.get("output")
+    if isinstance(nested, dict):
+        inner = _rows_from_result(nested)
+        if inner:
+            return inner
+    if isinstance(nested, list):
+        return [v for v in nested if isinstance(v, dict)]
     for key in ("contacts", "people", "rows", "results", "items"):
         val = result.get(key)
         if isinstance(val, list):
             return [v for v in val if isinstance(v, dict)]
-    if result.get("email") or result.get("linkedin_url"):
+    if result.get("email") or result.get("linkedin_url") or result.get("profile_url"):
         return [result]
     return []

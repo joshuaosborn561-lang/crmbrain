@@ -158,36 +158,6 @@ def find_mobile(settings: Settings, work_email: str = "", linkedin_url: str = ""
         return ""
 
 
-def parse_profile_response(data: dict[str, Any] | None) -> str:
-    if not isinstance(data, dict):
-        return ""
-    url = data.get("profile_url") or data.get("linkedin_url") or data.get("linkedin") or ""
-    return usable_linkedin(str(url) if url else "")
-
-
-def find_profile(settings: Settings, email: str) -> str:
-    """Email → LinkedIn URL. LeadMagic charges only when found."""
-    if not settings.leadmagic_key or not looks_like_email(email) or should_skip_email(email):
-        return ""
-    payload = (
-        {"personal_email": email}
-        if domain_of(email) in SKIP_EMAIL_DOMAINS
-        else {"work_email": email}
-    )
-    try:
-        resp = requests.post(
-            f"{BASE}/people/b2b-profile",
-            headers=_headers(settings),
-            json=payload,
-            timeout=40,
-        )
-        if resp.status_code >= 400:
-            return ""
-        return parse_profile_response(resp.json() if resp.text else {})
-    except Exception:
-        return ""
-
-
 def looks_like_phone(value: str | None) -> bool:
     if not value:
         return False

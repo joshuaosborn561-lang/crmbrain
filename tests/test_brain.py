@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta
 
 from crmbrain.briefing import due_to_send, format_phone, format_when, matches_sent_brief, render
+from crmbrain.enrichment import _apply_row, _rows_from_result
 from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import heuristic_extract, stage_id
 from crmbrain.leadmagic import (
     parse_email_response,
     parse_mobile_response,
-    parse_profile_response,
     should_skip_email,
     usable_linkedin,
 )
@@ -127,10 +127,18 @@ def test_leadmagic_parsers_and_guards():
     assert usable_linkedin("https://www.linkedin.com/in/dnyanoba-mulgir-93118588") == ""
     assert usable_linkedin("https://www.linkedin.com/in/lauramklein")
     assert usable_linkedin("lauramklein") == "https://www.linkedin.com/in/lauramklein"
-    assert parse_profile_response({"profile_url": "lauramklein"}) == "https://www.linkedin.com/in/lauramklein"
-    assert parse_profile_response({"profile_url": None}) == ""
     assert should_skip_email("booking-bridge-sync-test@salesglidergrowth.com")
     assert not should_skip_email("lklein@grnplano.com")
+
+
+def test_waterfall_row_supplies_linkedin():
+    rows = _rows_from_result(
+        {"status": "completed", "result": {"contacts": [{"email": "lklein@grnplano.com", "linkedin_url": "https://www.linkedin.com/in/lauramklein"}]}}
+    )
+    assert rows[0]["linkedin_url"].endswith("lauramklein")
+    ev = Engagement(source="test", external_id="1", email="lklein@grnplano.com")
+    ev = _apply_row(ev, rows[0])
+    assert ev.linkedin_url == "https://www.linkedin.com/in/lauramklein"
 
 
 def test_gmail_counterpart_is_the_other_person():
