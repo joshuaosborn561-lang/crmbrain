@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -244,21 +245,217 @@ def enroll(memory: Memory, ev: Engagement, reason: str, hs_contact_id: str = "",
     return row
 
 
-def draft_email(name: str, company: str, reason: str) -> tuple[str, str]:
-    first = (name or "there").split(" ")[0]
-    subject = {
-        "no_show": "Still around?",
-        "never_booked": "Quick bump",
-        "kicked_can": "Timing better?",
-        "deal_died": "Worth a look?",
-    }.get(reason, "Quick bump")
-    body = (
-        f"Hey {first},\n\n"
-        f"Wanted to bump this in case timing is better on {company or 'your side'}.\n\n"
-        "We are still booking qualified meetings for owners... $2M pipeline and $100K closed from the same motion.\n\n"
-        "I can send a Loom or throw Airpods at a test list if that makes it easy.\n\n"
-        "worth sharing more?"
+# Keyword map for Josh's re-engage verticals. First match wins.
+# Prefix tokens (no space) match roof -> roofing / roofer. Multi-word is substring.
+VERTICALS: tuple[dict, ...] = (
+    {
+        "key": "hvac",
+        "label": "HVAC",
+        "subject": "HVAC update",
+        "client": "HVAC clients",
+        "keywords": ("hvac", "heating and cooling", "air conditioning", "air conditioner", "heat pump"),
+    },
+    {
+        "key": "roofing",
+        "label": "roofing",
+        "subject": "Roofing?",
+        "client": "roofers",
+        "keywords": ("roofing", "roofer", "roofers", "roofs", "roof"),
+    },
+    {
+        "key": "staffing",
+        "label": "staffing",
+        "subject": "Staffing update",
+        "client": "staffing clients",
+        "keywords": (
+            "staffing",
+            "recruiting",
+            "recruiter",
+            "recruiters",
+            "executive search",
+            "talent acquisition",
+        ),
+    },
+    {
+        "key": "msp",
+        "label": "MSP",
+        "subject": "MSP update",
+        "client": "MSP clients",
+        "keywords": (
+            "msp",
+            "managed service",
+            "managed services",
+            "cyber",
+            "it services",
+            "it consulting",
+            "managed it",
+            "infosec",
+        ),
+    },
+    {
+        "key": "construction",
+        "label": "construction",
+        "subject": "Construction update",
+        "client": "construction clients",
+        "keywords": ("construction", "general contractor", "general contracting", "trades"),
+    },
+    {
+        "key": "plumbing",
+        "label": "plumbing",
+        "subject": "Plumbing update",
+        "client": "plumbing clients",
+        "keywords": ("plumbing", "plumber", "plumbers"),
+    },
+    {
+        "key": "electrical",
+        "label": "electrical",
+        "subject": "Electrical update",
+        "client": "electrical clients",
+        "keywords": ("electrical", "electrician", "electricians"),
+    },
+    {
+        "key": "solar",
+        "label": "solar",
+        "subject": "Solar update",
+        "client": "solar clients",
+        "keywords": ("solar", "photovoltaic"),
+    },
+)
+
+_DASHES = ("—", "–", "−")
+
+
+def _no_dashes(text: str) -> str:
+    for dash in _DASHES:
+        text = text.replace(dash, "...")
+    return text
+
+
+def _first_name(name: str) -> str:
+    first = (name or "").strip().split(" ")[0]
+    return first or "there"
+
+
+def _blob(*parts: object) -> str:
+    return " ".join(str(p).strip() for p in parts if p).lower()
+
+
+def _extras_blob(extras: dict | None) -> str:
+    extras = extras or {}
+    nested = extras.get("extra") if isinstance(extras.get("extra"), dict) else {}
+    return _blob(
+        extras.get("company"),
+        extras.get("industry"),
+        extras.get("vertical"),
+        extras.get("campaign_name"),
+        extras.get("campaign"),
+        extras.get("title"),
+        extras.get("jobtitle"),
+        extras.get("summary"),
+        extras.get("raw_subject"),
+        nested.get("campaign_name"),
+        nested.get("campaign"),
+        nested.get("vertical"),
+        nested.get("industry"),
+        nested.get("title"),
+        nested.get("lead_vertical"),
     )
-    if "—" in body or "–" in body or "—" in subject:
-        body = body.replace("—", "...").replace("–", "...")
-    return subject, body
+
+
+_PREFIX_KEYS = {"roof", "cyber", "hvac", "solar"}
+
+
+def _has_keyword(blob: str, keywords: tuple[str, ...]) -> bool:
+    for kw in keywords:
+        if " " in kw:
+            if kw in blob:
+                return True
+            continue
+        pattern = rf"\b{re.escape(kw)}\w*" if kw in _PREFIX_KEYS else rf"\b{re.escape(kw)}\b"
+        if re.search(pattern, blob):
+            return True
+    return False
+
+
+def infer_industry(
+    company: str = "",
+    extras: dict | None = None,
+    industry: str = "",
+) -> dict | None:
+    """Return a VERTICALS row or None. Explicit industry= wins, then keyword map."""
+    extras = extras or {}
+    hinted = (industry or extras.get("industry") or extras.get("vertical") or "").strip().lower()
+    if hinted:
+        for row in VERTICALS:
+            if hinted in {row["key"], row["label"].lower()}:
+                return row
+    blob = _blob(company, _extras_blob(extras))
+    if not blob.strip():
+        return None
+    for row in VERTICALS:
+        if _has_keyword(blob, row["keywords"]):
+            return row
+    return None
+
+
+def _industry_body(first: str, vertical: dict) -> str:
+    label = vertical["label"]
+    client = vertical["client"]
+    if vertical["key"] == "roofing":
+        return (
+            f"Hey {first}, been a bit. We've been building up our roofing pipeline and figured I'd circle back.\n\n"
+            "Quick stats since we last talked, we generated $2M in pipeline last quarter across our trades "
+            "clients and one of our roofers closed $100K in his first 3 months with us. Averaging 14+ replies "
+            "per month now.\n\n"
+            "Happy to run a free 10K lead campaign to show you what it looks like. Or I've got an extra pair "
+            "of AirPods with your name on it if you just want to hop on a call and see if it makes sense.\n\n"
+            "Worth a few minutes to see what's new?\n\n"
+            "Josh Osborn"
+        )
+    return (
+        f"Hey {first}, it's been a few months. Wanted to circle back on what we're doing in {label} now.\n\n"
+        f"Since we talked we've added $2M to our pipeline and one of our {client} closed $100K in their "
+        "first 3 months. We're averaging 14+ replies per month across all verticals.\n\n"
+        "I'll run you a free 10K lead campaign to show you exactly what it looks like for your market. "
+        "Or I can send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\n"
+        "Worth a look?\n\n"
+        "Josh Osborn"
+    )
+
+
+def _general_body(first: str) -> str:
+    return (
+        f"Hey {first}, it's been a few months. Wanted to circle back.\n\n"
+        "Since we talked we've added $2M in pipeline last quarter and one of our clients closed $100K "
+        "in their first 3 months. We're averaging 14+ replies per month.\n\n"
+        "I can send a Loom, run you a free 10K lead campaign, or send a pair of AirPods just for chatting "
+        "15 minutes to see if this makes sense.\n\n"
+        "Worth a look?\n\n"
+        "Josh Osborn"
+    )
+
+
+def _general_subject(first: str, reason: str) -> str:
+    if first and first.lower() != "there" and reason == "no_show":
+        return first
+    return "Quick update"
+
+
+def draft_email(
+    name: str,
+    company: str,
+    reason: str = "",
+    *,
+    industry: str = "",
+    extras: dict | None = None,
+) -> tuple[str, str]:
+    """Josh's #nurture re-engage draft. Template only. Never sends mail."""
+    first = _first_name(name)
+    vertical = infer_industry(company, extras=extras, industry=industry)
+    if vertical:
+        subject = vertical["subject"]
+        body = _industry_body(first, vertical)
+    else:
+        subject = _general_subject(first, reason)
+        body = _general_body(first)
+    return _no_dashes(subject), _no_dashes(body)
