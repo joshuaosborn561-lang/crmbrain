@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -8,9 +9,15 @@ import requests
 
 from crmbrain.config import Settings
 
+logger = logging.getLogger(__name__)
+
 
 class Memory:
-    """Idempotency + ticker. Supabase first, local JSON fallback."""
+    """Idempotency + ticker. Supabase first, local JSON fallback.
+
+    Supabase write/read failures are recorded on ``errors`` so the cycle
+    report can surface them. Local JSON still updates so a cycle can finish.
+    """
 
     def __init__(self, settings: Settings, data_dir: Path | None = None):
         self.settings = settings
@@ -19,6 +26,7 @@ class Memory:
         self.path = self.data_dir / "account_memory.json"
         self._local = self._load_local()
         self.use_supabase = bool(settings.supabase_url and settings.supabase_key)
+        self.errors: list[str] = []
 
     def _load_local(self) -> dict[str, Any]:
         if self.path.exists():
@@ -27,6 +35,17 @@ class Memory:
 
     def save_local(self) -> None:
         self.path.write_text(json.dumps(self._local, indent=2, default=str))
+
+    def _record_error(self, op: str, exc: BaseException) -> None:
+        msg = f"memory {op}: {exc}"
+        logger.warning(msg)
+        if msg not in self.errors:
+            self.errors.append(msg)
+
+    def drain_errors(self) -> list[str]:
+        out = list(self.errors)
+        self.errors.clear()
+        return out
 
     def _sb(self, method: str, table: str, **kwargs) -> Any:
         if not self.use_supabase:
@@ -61,7 +80,8 @@ class Memory:
                     },
                 )
                 return bool(rows)
-            except RuntimeError:
+            except Exception as exc:
+                self._record_error("already_processed", exc)
                 return False
         return False
 
@@ -97,8 +117,8 @@ class Memory:
                     "processed_events",
                     json_body={"source": source, "external_id": external_id, "payload": payload or {}},
                 )
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self._record_error("mark_processed", exc)
 
     def start_run(self) -> int | None:
         if not self.use_supabase:
@@ -107,7 +127,8 @@ class Memory:
             rows = self._sb_schema("POST", "cycle_runs", json_body={"status": "running"})
             if rows:
                 return rows[0]["id"]
-        except RuntimeError:
+        except Exception as exc:
+            self._record_error("start_run", exc)
             return None
         return None
 
@@ -122,8 +143,8 @@ class Memory:
                     json_body={"status": status, "report": report, "finished_at": "now()"},
                     params={"id": f"eq.{run_id}"},
                 )
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self._record_error("finish_run", exc)
 
     def enroll_ticker(self, row: dict) -> None:
         self._local.setdefault("ticker", []).append(row)
@@ -131,8 +152,19 @@ class Memory:
         if self.use_supabase:
             try:
                 self._sb_schema("POST", "ticker", json_body=row)
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self._record_error("enroll_ticker", exc)
+
+    def list_ticker(self) -> list[dict]:
+        local = list(self._local.get("ticker", []))
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema("GET", "ticker", params={"select": "*"})
+                return rows if rows is not None else local
+            except Exception as exc:
+                self._record_error("list_ticker", exc)
+                return local
+        return local
 
     def due_ticker(self, now_iso: str) -> list[dict]:
         local = [
@@ -152,7 +184,8 @@ class Memory:
                     },
                 )
                 return rows or local
-            except RuntimeError:
+            except Exception as exc:
+                self._record_error("due_ticker", exc)
                 return local
         return local
 
@@ -172,8 +205,8 @@ class Memory:
                     json_body={"next_fire_at": next_fire_at, "last_fired_at": last_fired_at},
                     params={"id": f"eq.{ticker_id}"},
                 )
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self._record_error("bump_ticker", exc)
 
     def stop_ticker(self, email: str | None = None, hs_contact_id: str | None = None) -> None:
         for t in self._local.get("ticker", []):
@@ -198,8 +231,8 @@ class Memory:
                         json_body={"status": "stopped"},
                         params={"hs_contact_id": f"eq.{hs_contact_id}", "status": "eq.active"},
                     )
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self._record_error("stop_ticker", exc)
 
     def save_fact(self, fact: dict) -> None:
         self._local.setdefault("facts", []).append(fact)
@@ -207,5 +240,5 @@ class Memory:
         if self.use_supabase:
             try:
                 self._sb_schema("POST", "relationship_facts", json_body=fact)
-            except RuntimeError:
-                pass
+            except Exception as exc:
+                self._record_error("save_fact", exc)

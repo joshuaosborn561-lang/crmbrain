@@ -45,10 +45,12 @@ class CycleReport:
     ticker_drafts: list[str] = field(default_factory=list)
     linkedin_queued: list[str] = field(default_factory=list)
     briefs_sent: list[str] = field(default_factory=list)
+    integrations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, list[str]]:
         return {
+            "integrations": self.integrations,
             "processed": self.processed,
             "skipped": self.skipped,
             "contacts_upserted": self.contacts_upserted,

@@ -192,6 +192,30 @@ def _backfill_hubspot_invites(
             queued += 1
 
 
+def integration_status(settings: Settings) -> list[str]:
+    """Present/missing only. Never include secret values."""
+    gmail = bool(
+        settings.gmail_client_id and settings.gmail_client_secret and settings.gmail_refresh_token
+    )
+    checks = (
+        ("HubSpot", bool(settings.hubspot_token)),
+        ("Gmail", gmail),
+        ("Fireflies", bool(settings.fireflies_key)),
+        ("Smartlead", bool(settings.smartlead_key)),
+        ("HeyReach key", bool(settings.heyreach_key)),
+        ("Slack token", bool(settings.slack_token)),
+        ("Supabase key", bool(settings.supabase_key)),
+        ("Cube folder", bool(settings.cube_folder)),
+    )
+    return [f"{name}: {'present' if ok else 'missing'}" for name, ok in checks]
+
+
+def _flush_memory_errors(memory: Memory, report: CycleReport) -> None:
+    for msg in memory.drain_errors():
+        if msg not in report.errors:
+            report.errors.append(msg)
+
+
 def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> None:
     now = now_utc()
     due = memory.due_ticker(now.isoformat())
@@ -215,8 +239,10 @@ def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> Non
 def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleReport:
     settings = settings or Settings.from_env()
     report = CycleReport()
+    report.integrations.extend(integration_status(settings))
     memory = Memory(settings)
     run_id = memory.start_run()
+    _flush_memory_errors(memory, report)
     if not settings.hubspot_token:
         report.errors.append("HUBSPOT_ACCESS_TOKEN missing")
         return report
@@ -231,7 +257,9 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             briefing.send_due(settings, gmail, hs, memory, report)
         else:
             report.errors.append("Gmail missing, cannot send briefs")
+        _flush_memory_errors(memory, report)
         memory.finish_run(run_id, "ok" if not report.errors else "partial", report.as_dict())
+        _flush_memory_errors(memory, report)
         return report
 
     engagements: list[Engagement] = []
@@ -314,5 +342,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             report.errors.append(f"heyreach backfill: {exc}")
 
     _fire_ticker(settings, memory, report)
+    _flush_memory_errors(memory, report)
     memory.finish_run(run_id, "ok" if not report.errors else "partial", report.as_dict())
+    _flush_memory_errors(memory, report)
     return report

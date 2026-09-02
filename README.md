@@ -19,6 +19,13 @@ To backfill existing HubSpot gaps:
 python scripts/backfill_contact_fields.py
 ```
 
+To enroll historical 90-day nurture ticker rows (dry-run by default; never emails):
+
+```bash
+python scripts/backfill_nurture_ticker.py
+python scripts/backfill_nurture_ticker.py --apply
+```
+
 ## Railway
 
 Start command: `python -m crmbrain cycle`
