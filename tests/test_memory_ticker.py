@@ -114,11 +114,11 @@ def test_cycle_summary_includes_integrations_and_memory_errors(tmp_path: Path, m
 
 def test_integration_status_present_missing_only():
     settings = make_settings(
-        hubspot_token="tok",
-        gmail_client_id="id",
-        gmail_client_secret="sec",
-        gmail_refresh_token="ref",
-        fireflies_key="ff",
+        hubspot_token="hs-secret-value",
+        gmail_client_id="gmail-client-id-value",
+        gmail_client_secret="gmail-client-secret-value",
+        gmail_refresh_token="gmail-refresh-token-value",
+        fireflies_key="ff-secret-value",
         cube_folder="",
     )
     rows = integration_status(settings)
@@ -131,9 +131,10 @@ def test_integration_status_present_missing_only():
     assert "Supabase key: missing" in rows
     assert "Cube folder: missing" in rows
     blob = " ".join(rows)
-    assert "tok" not in blob
-    assert "sec" not in blob
-    assert "ref" not in blob
+    assert "hs-secret-value" not in blob
+    assert "gmail-client-secret-value" not in blob
+    assert "gmail-refresh-token-value" not in blob
+    assert "ff-secret-value" not in blob
 
 
 def test_next_fire_from_signal_future_and_past():
