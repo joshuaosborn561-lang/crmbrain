@@ -4,6 +4,7 @@ import time
 
 from crmbrain.config import Settings
 from crmbrain.http_mcp import McpClient
+from crmbrain.leadmagic import usable_linkedin
 from crmbrain.models import Engagement
 
 
@@ -27,22 +28,27 @@ class HeyReach:
             time.sleep(5)
 
     def add_lead(self, ev: Engagement) -> str:
-        if not ev.linkedin_url:
+        profile = usable_linkedin(ev.linkedin_url)
+        if not profile:
             return "skipped:no-linkedin"
         self.ensure_running()
         first = ev.first_name or (ev.display_name().split(" ")[0] if ev.display_name() else "")
         last = ev.last_name or (" ".join(ev.display_name().split(" ")[1:]) if ev.display_name() else "")
+        lead = {
+            "firstName": first,
+            "lastName": last,
+            "companyName": ev.company,
+        }
+        if profile:
+            lead["profileUrl"] = profile
+        if ev.email:
+            lead["email"] = ev.email
         payload = {
             "campaignId": self.settings.heyreach_campaign_id,
             "accountLeadPairs": [
                 {
                     "linkedInAccountId": self.settings.heyreach_linkedin_account_id,
-                    "lead": {
-                        "profileUrl": ev.linkedin_url,
-                        "firstName": first,
-                        "lastName": last,
-                        "companyName": ev.company,
-                    },
+                    "lead": lead,
                 }
             ],
         }

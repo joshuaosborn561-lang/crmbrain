@@ -27,12 +27,18 @@ SKIP_EMAILS = {
 
 
 def usable_linkedin(url: str | None) -> str:
-    raw = (url or "").strip()
+    raw = (url or "").strip().split("?")[0].rstrip("/")
     if not raw or JUNK_LINKEDIN in raw.lower():
         return ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{3,}", raw) and "linkedin.com" not in raw.lower():
+        return f"https://www.linkedin.com/in/{raw}"
+    if raw.lower().startswith("in/"):
+        return f"https://www.linkedin.com/{raw}"
     if "linkedin.com/in/" not in raw.lower():
         return ""
-    return raw
+    if raw.startswith("http"):
+        return raw
+    return "https://" + raw.lstrip("/")
 
 
 def domain_of(email: str) -> str:

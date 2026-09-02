@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from crmbrain.config import CDT, STAGE, Settings
+from crmbrain.config import CDT, JOSH_EMAILS, STAGE, Settings, is_personal
 from crmbrain.gmail_client import Gmail
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport, Engagement
@@ -24,6 +24,19 @@ SYSTEM_EMAIL_HINTS = (
     "zoom.us",
     "stripe.com",
     "intuit.com",
+)
+NOREPLY_HINTS = (
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "mailer-daemon",
+    "notifications@",
+    "calendar-notification",
+    "no_reply",
+)
+PEOPLE_QUERIES = (
+    "newer_than:2d in:sent -from:calendly.com -from:pandadoc.com -from:docusign.net",
+    "newer_than:2d in:inbox -category:promotions -from:calendly.com -from:noreply",
 )
 
 
@@ -193,6 +206,79 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                         "event_type": cal.get("event_type", ""),
                         "meeting_when": cal.get("when", ""),
                     },
+                )
+            )
+    return out
+
+
+def is_system_address(email: str) -> bool:
+    low = (email or "").lower()
+    if not low or low in JOSH_EMAILS:
+        return True
+    if any(h in low for h in SYSTEM_EMAIL_HINTS) or any(h in low for h in NOREPLY_HINTS):
+        return True
+    return False
+
+
+def parse_person_header(header: str) -> tuple[str, str, str]:
+    """Return first, last, email from a From/To header."""
+    header = header or ""
+    email = (_addresses(header) or [""])[0]
+    name = ""
+    m = re.match(r"\s*\"?([^\"<]+?)\"?\s*<", header)
+    if m:
+        name = m.group(1).strip().strip("'")
+    parts = [p for p in name.split() if p]
+    first = parts[0] if parts else ""
+    last = " ".join(parts[1:]) if len(parts) > 1 else ""
+    return first, last, email
+
+
+def counterpart_from_headers(sender: str, to: str, cc: str = "") -> tuple[str, str, str]:
+    """The other person on a Josh email. Sent → To. Inbox → From."""
+    from_first, from_last, from_email = parse_person_header(sender)
+    if from_email and from_email.lower() not in JOSH_EMAILS and not is_system_address(from_email):
+        return from_first, from_last, from_email
+    for header in (to, cc):
+        first, last, email = parse_person_header(header)
+        if email and not is_system_address(email):
+            return first, last, email
+    return "", "", ""
+
+
+def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
+    """Josh emailed someone, or a real person emailed Josh. That is engagement."""
+    seen: set[str] = set()
+    out: list[Engagement] = []
+    for query in PEOPLE_QUERIES:
+        for stub in gmail.search(query, max_results=40):
+            mid = stub["id"]
+            if mid in seen:
+                continue
+            seen.add(mid)
+            msg = gmail.get(mid)
+            headers = gmail.headers_map(msg)
+            first, last, email = counterpart_from_headers(
+                headers.get("from", ""),
+                headers.get("to", ""),
+                headers.get("cc", ""),
+            )
+            if not email or is_personal(name=f"{first} {last}", email=email):
+                continue
+            domain = email.split("@")[1] if "@" in email else ""
+            out.append(
+                Engagement(
+                    source="gmail_person",
+                    external_id=mid,
+                    occurred_at=datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc),
+                    email=email,
+                    first_name=first,
+                    last_name=last,
+                    name=f"{first} {last}".strip(),
+                    domain=domain,
+                    company=_company_from_domain(domain),
+                    raw_subject=headers.get("subject", ""),
+                    summary=msg.get("snippet", "")[:400],
                 )
             )
     return out

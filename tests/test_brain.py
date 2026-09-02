@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from crmbrain.briefing import due_to_send, format_phone, format_when, matches_sent_brief, render
+from crmbrain.enrichment import _apply_row, _rows_from_result
 from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import heuristic_extract, stage_id
@@ -11,7 +12,14 @@ from crmbrain.leadmagic import (
     usable_linkedin,
 )
 from crmbrain.models import Engagement
-from crmbrain.sources.gmail_scan import _stage_from_mail, is_josh_meeting, parse_calendly, parse_meeting_at
+from crmbrain.sources.gmail_scan import (
+    _stage_from_mail,
+    counterpart_from_headers,
+    is_josh_meeting,
+    is_system_address,
+    parse_calendly,
+    parse_meeting_at,
+)
 from crmbrain.ticker import draft_email
 
 
@@ -118,8 +126,37 @@ def test_leadmagic_parsers_and_guards():
     assert parse_mobile_response({"mobile_number": None}) == ""
     assert usable_linkedin("https://www.linkedin.com/in/dnyanoba-mulgir-93118588") == ""
     assert usable_linkedin("https://www.linkedin.com/in/lauramklein")
+    assert usable_linkedin("lauramklein") == "https://www.linkedin.com/in/lauramklein"
     assert should_skip_email("booking-bridge-sync-test@salesglidergrowth.com")
     assert not should_skip_email("lklein@grnplano.com")
+
+
+def test_waterfall_row_supplies_linkedin():
+    rows = _rows_from_result(
+        {"status": "completed", "result": {"contacts": [{"email": "lklein@grnplano.com", "linkedin_url": "https://www.linkedin.com/in/lauramklein"}]}}
+    )
+    assert rows[0]["linkedin_url"].endswith("lauramklein")
+    ev = Engagement(source="test", external_id="1", email="lklein@grnplano.com")
+    ev = _apply_row(ev, rows[0])
+    assert ev.linkedin_url == "https://www.linkedin.com/in/lauramklein"
+
+
+def test_gmail_counterpart_is_the_other_person():
+    first, last, email = counterpart_from_headers(
+        "Joshua Osborn <joshua@salesglidergrowth.com>",
+        "Laura Klein <lklein@grnplano.com>",
+    )
+    assert email == "lklein@grnplano.com"
+    assert first == "Laura"
+    assert last == "Klein"
+    inbox_first, inbox_last, inbox_email = counterpart_from_headers(
+        "Laura Klein <lklein@grnplano.com>",
+        "joshua@salesglidergrowth.com",
+    )
+    assert inbox_email == "lklein@grnplano.com"
+    assert is_system_address("noreply@calendly.com")
+    assert is_system_address("joshua@salesglidergrowth.com")
+    assert not is_system_address("lklein@grnplano.com")
 
 
 def test_nurture_copy_has_no_dashes():

@@ -38,7 +38,7 @@ Full cycle:
 5. Creates / updates HubSpot contacts and notes
 6. Moves deals only on evidence
 7. Extracts personal details onto the contact
-8. Queues LinkedIn connects on HeyReach 530529 (enrichment waterfall if no URL)
+8. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
 9. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
 10. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 
