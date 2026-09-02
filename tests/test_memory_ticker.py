@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from crmbrain.config import STAGE, Settings
-from crmbrain.cycle import integration_status, run as cycle_run
+from crmbrain.cycle import _fire_ticker, integration_status, run as cycle_run
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport
 from crmbrain.ticker import (
@@ -207,6 +207,35 @@ def test_backfill_dry_run_does_not_write(tmp_path: Path):
     assert written["enrolled"] == 2
     emails = {t.get("email") for t in memory._local["ticker"]}
     assert emails == {"skip@example.com", "ann@example.com", "bob@example.com"}
+
+
+def test_fire_ticker_posts_subject_and_body_for_approval(tmp_path: Path, monkeypatch):
+    posted: list[str] = []
+    monkeypatch.setattr("crmbrain.slack_notify.post", lambda _settings, text: posted.append(text))
+    settings = make_settings()
+    memory = Memory(settings, data_dir=tmp_path)
+    memory._local["ticker"] = [
+        {
+            "id": "t-roof",
+            "name": "Jackie Darkazalli",
+            "email": "jackie@kellyroofing.com",
+            "company": "Kelly Roofing",
+            "reason": "kicked_can",
+            "status": "active",
+            "next_fire_at": "2020-01-01T00:00:00+00:00",
+        }
+    ]
+    report = CycleReport()
+    _fire_ticker(settings, memory, report)
+    assert posted
+    text = posted[0]
+    assert "90-day ticker (approve before send)" in text
+    assert "To: jackie@kellyroofing.com" in text
+    assert "Why: kicked_can" in text
+    assert "Subject: Roofing?" in text
+    assert "Josh Osborn" in text
+    assert "$100K" in text
+    assert report.ticker_drafts == ["jackie@kellyroofing.com"]
 
 
 def test_backfill_script_dry_run_prints_counts_without_writing(tmp_path: Path):

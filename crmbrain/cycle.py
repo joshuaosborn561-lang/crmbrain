@@ -220,7 +220,12 @@ def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> Non
     now = now_utc()
     due = memory.due_ticker(now.isoformat())
     for row in due:
-        subject, body = ticker.draft_email(row.get("name") or "", row.get("company") or "", row.get("reason") or "")
+        subject, body = ticker.draft_email(
+            row.get("name") or "",
+            row.get("company") or "",
+            row.get("reason") or "",
+            extras=row,
+        )
         text = (
             f"90-day ticker (approve before send)\n"
             f"To: {row.get('email') or row.get('phone')}\n"

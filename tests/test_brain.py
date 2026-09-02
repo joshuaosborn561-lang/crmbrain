@@ -20,7 +20,7 @@ from crmbrain.sources.gmail_scan import (
     parse_calendly,
     parse_meeting_at,
 )
-from crmbrain.ticker import draft_email
+from crmbrain.ticker import draft_email, infer_industry
 
 
 def test_clean_drive_id():
@@ -163,4 +163,62 @@ def test_nurture_copy_has_no_dashes():
     subject, body = draft_email("Jackie Darkazalli", "Kelly Roofing", "kicked_can")
     assert "—" not in subject + body
     assert "–" not in subject + body
-    assert "worth sharing more?" in body
+    assert "Josh Osborn" in body
+
+
+def test_nurture_roofing_uses_roi_case_study():
+    subject, body = draft_email("Jackie Darkazalli", "Kelly Roofing", "kicked_can")
+    assert subject == "Roofing?"
+    assert "roofing pipeline" in body.lower() or "roofers" in body.lower()
+    assert "$2M" in body
+    assert "$100K" in body
+    assert "14+" in body
+    assert "AirPods" in body
+    assert "Josh Osborn" in body
+    assert "Quick bump" not in subject
+    assert infer_industry("Kelly Roofing")["key"] == "roofing"
+
+
+def test_nurture_hvac_from_company_or_campaign():
+    subject, body = draft_email("Joel Stewart", "The Chill Brothers", "never_booked")
+    assert subject == "Quick update"
+    assert "pipeline last quarter" in body
+    assert "14+" in body
+
+    subject, body = draft_email(
+        "Joel Stewart",
+        "The Chill Brothers",
+        "never_booked",
+        extras={"campaign_name": "SG HVAC owners"},
+    )
+    assert subject == "HVAC update"
+    assert "what we're doing in HVAC" in body
+    assert "HVAC clients" in body
+    assert "$100K" in body
+    assert "free 10K" in body
+    assert infer_industry("The Chill Brothers", extras={"vertical": "HVAC"})["key"] == "hvac"
+
+
+def test_nurture_generalized_when_industry_unknown():
+    subject, body = draft_email("Pat Lee", "Acme Holdings", "never_booked")
+    assert subject == "Quick update"
+    assert infer_industry("Acme Holdings") is None
+    assert "$2M" in body and "pipeline last quarter" in body
+    assert "$100K" in body and "first 3 months" in body
+    assert "14+" in body
+    assert "Loom" in body
+    assert "10K" in body
+    assert "AirPods" in body
+    assert "Josh Osborn" in body
+    assert "HVAC" not in body
+    assert "roofing" not in body.lower()
+    no_show_subject, _ = draft_email("Pat Lee", "Acme Holdings", "no_show")
+    assert no_show_subject == "Pat"
+
+
+def test_nurture_industry_from_title_and_explicit():
+    assert infer_industry("GRN Plano", extras={"title": "President, Executive Search"})["key"] == "staffing"
+    assert infer_industry("CyberGuard360")["key"] == "msp"
+    subject, body = draft_email("Rob", "Northside GC", extras={"industry": "construction"})
+    assert subject == "Construction update"
+    assert "construction" in body.lower()
