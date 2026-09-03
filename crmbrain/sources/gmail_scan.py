@@ -54,9 +54,13 @@ def _stage_from_mail(subject: str, sender: str, snippet: str) -> str:
         return STAGE["signed"]
     if "pandadoc" in blob and any(w in blob for w in ("sent you", "viewed", "document was sent")):
         return STAGE["proposal_sent"]
-    if "calendly" in blob and any(w in blob for w in ("canceled", "cancelled", "no-show", "no show")):
+    if any(h in blob for h in ("calendly", "calendar-notification", "zoom.us")) and any(
+        w in blob for w in ("canceled", "cancelled", "no-show", "no show")
+    ):
         return STAGE["no_show"]
-    if "calendly" in blob and any(w in blob for w in ("new event", "accepted", "confirmed", "invitee")):
+    if any(h in blob for h in ("calendly", "calendar-notification", "zoom.us")) and any(
+        w in blob for w in ("new event", "accepted", "confirmed", "invitee", "invitation", "scheduled")
+    ):
         return STAGE["discovery_scheduled"]
     return ""
 

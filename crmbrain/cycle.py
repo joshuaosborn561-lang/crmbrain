@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from crmbrain import briefing, enrichment, intelligence, slack_notify, ticker
-from crmbrain.config import JOSH_EMAILS, STAGE, Settings, is_client_context, is_personal, lookback_start, now_utc
+from crmbrain import briefing, enrichment, intelligence, policy, prune, slack_notify, ticker
+from crmbrain.config import JOSH_EMAILS, STAGE, Settings, is_personal, lookback_start, now_utc
 from crmbrain.gmail_client import Gmail
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
@@ -16,8 +16,8 @@ from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartle
 def _in_window(ev: Engagement, settings: Settings) -> bool:
     start = lookback_start(settings.lookback_hours)
     if ev.source == "smartlead":
-        # Positive replies stay working until they are in HubSpot. First cycle
-        # still respects lookback so we do not dump the whole history.
+        # Positive replies stay on the ticker. First cycle still respects
+        # lookback so we do not dump the whole history.
         if ev.occurred_at and ev.occurred_at < start:
             return False
     if ev.occurred_at and ev.occurred_at < start:
@@ -33,13 +33,11 @@ def _handle_engagement(
     hey: HeyReach | None,
     report: CycleReport,
 ) -> None:
-    if memory.already_processed(ev.source, ev.external_id):
-        report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
-        return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
-        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} personal")
-        memory.mark_processed(ev.source, ev.external_id, {"skip": "personal"})
-        return
+        if not policy.personal_allowed_for_sales_intro(ev):
+            report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} personal")
+            memory.mark_processed(ev.source, ev.external_id, {"skip": "personal"})
+            return
     if not (ev.email or ev.phone or ev.display_name() or ev.linkedin_url):
         report.junk_blocked.append(f"{ev.source}:{ev.external_id} no identity")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_identity"})
@@ -49,47 +47,41 @@ def _handle_engagement(
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_transcript"})
         return
 
+    already = hs.find_contact(email=ev.email, phone=ev.phone)
+    if not policy.may_write_hubspot(ev, already is not None):
+        if memory.already_processed(ev.source, ev.external_id):
+            report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
+            return
+        reason = ev.ticker_reason or facts_reason_for_ticker(ev)
+        if policy.should_enroll_ticker_without_hubspot(ev) and reason:
+            ticker.enroll(memory, ev, reason)
+            report.ticker_enrolled.append(f"{ev.display_name() or ev.email} {reason}")
+        _queue_linkedin(settings, hey, ev, hs, memory, report, contact=None)
+        report.skipped.append(
+            f"{ev.source}:{ev.display_name() or ev.email or ev.phone} no meeting, skip HubSpot"
+        )
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "no_meeting_hubspot"})
+        report.processed.append(f"{ev.source}:{ev.external_id}")
+        return
+
+    if memory.already_processed(ev.source, ev.external_id):
+        if ev.source in {"fireflies", "cube_acr"} and already:
+            _apply_transcript_intelligence(
+                ev, settings, hs, memory, report, already, add_timeline_note=False
+            )
+            report.skipped.append(f"{ev.source}:{ev.external_id} refreshed notes/amount")
+        else:
+            report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
+        return
+
     ev = enrichment.enrich(settings, ev)
     contact = hs.upsert_contact(ev)
     report.contacts_upserted.append(f"{ev.display_name() or ev.email} ({ev.source})")
-    facts = intelligence.extract(settings, ev)
-    hs.patch_contact(contact["id"], intelligence.merge_contact_props(contact, facts))
-    note = ev.summary or ev.transcript[:1500] or ev.raw_subject
-    if note:
-        hs.add_note(contact["id"], f"{ev.source} {ev.occurred_at or ''}\n\n{note}")
-    for fact_type in ("personal_details", "family_notes", "relationship_hooks"):
-        if facts.get(fact_type):
-            memory.save_fact(
-                {
-                    "hs_contact_id": contact["id"],
-                    "fact_type": fact_type,
-                    "fact_text": facts[fact_type],
-                    "source": ev.source,
-                    "external_id": ev.external_id,
-                }
-            )
-
-    hint = facts.get("stage_hint") or ev.stage_hint
-    stage = intelligence.stage_id(hint) if hint else ""
-    money_stages = {STAGE["signed"], STAGE["paid"], STAGE["proposal_sent"]}
-    if ev.source != "gmail" and stage in money_stages:
-        stage = ""
-    if is_client_context(ev.display_name(), ev.company, ev.raw_subject):
-        report.skipped.append(f"{ev.display_name()} client conversation, notes only")
-        stage = ""
-    elif ev.source == "smartlead" and not stage:
-        stage = STAGE["nurture"]
-    elif ev.source in {"cube_acr", "fireflies", "allo"} and not stage:
-        stage = STAGE["discovery_completed"]
-    elif ev.source in {"heyreach", "rvm"} and not stage:
-        stage = STAGE["replied"]
-    elif ev.source == "calendly" and not stage:
-        stage = STAGE["discovery_scheduled"]
-    if stage:
-        deal = hs.upsert_deal(contact, ev, stage)
-        report.deals_moved.append(f"{ev.display_name()} -> {stage} ({deal.get('id')})")
-        if stage in {STAGE["discovery_scheduled"], STAGE["discovery_completed"], STAGE["paid"], STAGE["signed"]}:
-            memory.stop_ticker(email=ev.email, hs_contact_id=contact["id"])
+    base = already or hs.find_contact(email=ev.email, phone=ev.phone) or contact
+    base["id"] = contact["id"]
+    facts = _apply_transcript_intelligence(
+        ev, settings, hs, memory, report, base, add_timeline_note=True
+    )
 
     reason = facts.get("ticker_reason") or ev.ticker_reason
     if ev.source == "smartlead" and not reason:
@@ -102,6 +94,63 @@ def _handle_engagement(
 
     memory.mark_processed(ev.source, ev.external_id, {"contact_id": contact["id"]})
     report.processed.append(f"{ev.source}:{ev.external_id}")
+
+
+def _apply_transcript_intelligence(
+    ev: Engagement,
+    settings: Settings,
+    hs: HubSpot,
+    memory: Memory,
+    report: CycleReport,
+    contact: dict,
+    *,
+    add_timeline_note: bool,
+) -> dict:
+    """Always extract → merge_contact_props for meeting transcripts. Fill deal amount if empty."""
+    facts = intelligence.extract(settings, ev)
+    merged = intelligence.merge_contact_props(contact, facts)
+    if merged:
+        hs.patch_contact(contact["id"], merged)
+        report.notes_updated.append(f"{ev.display_name() or ev.email} ({ev.source})")
+        props = contact.setdefault("properties", {})
+        props.update(merged)
+    if add_timeline_note:
+        note = ev.summary or ev.transcript[:1500] or ev.raw_subject
+        if note:
+            hs.add_note(contact["id"], f"{ev.source} {ev.occurred_at or ''}\n\n{note}")
+    for fact_type in ("personal_details", "family_notes", "relationship_hooks"):
+        if facts.get(fact_type):
+            memory.save_fact(
+                {
+                    "hs_contact_id": contact["id"],
+                    "fact_type": fact_type,
+                    "fact_text": facts[fact_type],
+                    "source": ev.source,
+                    "external_id": ev.external_id,
+                }
+            )
+
+    stage = policy.resolve_stage(ev, facts)
+    if not stage and policy.is_client_context_ev(ev):
+        report.skipped.append(f"{ev.display_name()} client conversation, notes only")
+    amount = facts.get("amount_hint") or facts.get("deal_amount") or ""
+    if stage or amount:
+        deal = hs.upsert_deal(contact, ev, stage, amount=amount)
+        if deal.get("id") and stage:
+            report.deals_moved.append(f"{ev.display_name()} -> {stage} ({deal.get('id')})")
+            if stage in {STAGE["discovery_scheduled"], STAGE["discovery_completed"], STAGE["paid"], STAGE["signed"]}:
+                memory.stop_ticker(email=ev.email, hs_contact_id=contact["id"])
+        if deal.get("id") and amount and (deal.get("properties") or {}).get("amount") == amount:
+            report.amounts_set.append(f"{ev.display_name() or ev.email} {amount}")
+    return facts
+
+
+def facts_reason_for_ticker(ev: Engagement) -> str:
+    if ev.source == "smartlead":
+        return ev.ticker_reason or "never_booked"
+    if ev.source in {"heyreach", "rvm"}:
+        return ev.ticker_reason or "never_booked"
+    return ev.ticker_reason or ""
 
 
 def _heyreach_id(ev: Engagement) -> str:
@@ -345,6 +394,11 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             _backfill_hubspot_invites(settings, hs, hey, memory, report)
         except Exception as exc:
             report.errors.append(f"heyreach backfill: {exc}")
+
+    try:
+        prune.run(hs, report)
+    except Exception as exc:
+        report.errors.append(f"prune: {exc}")
 
     _fire_ticker(settings, memory, report)
     _flush_memory_errors(memory, report)

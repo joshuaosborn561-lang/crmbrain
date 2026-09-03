@@ -15,14 +15,28 @@ CDT = ZoneInfo("America/Chicago")
 PERSONAL_PHONES = {
     "+15614278965",  # Sarah
     "15614278965",
-    "+19733030001",  # Jeremy
+    "+19733030001",  # Jeremy Ciotola
     "19733030001",
     "+19415927144",  # Dad
     "19415927144",
     "+15612255142",  # Cayden
     "15612255142",
 }
-PERSONAL_NAMES = {"sarah", "jeremy ciotola", "diana burns", "cayden"}
+# Exact full-name matches plus first-token matches for the short set.
+PERSONAL_NAMES = {
+    "sarah",
+    "sarah osborn",
+    "jeremy",
+    "jeremy ciotola",
+    "diana burns",
+    "diana",
+    "cayden",
+    "cayden osborn",
+    "dad",
+    "mom",
+    "father",
+}
+PERSONAL_FIRST_NAMES = {"sarah", "jeremy", "diana", "cayden", "dad", "mom", "father"}
 JOSH_EMAILS = {
     "joshua@salesglidergrowth.com",
     "joshuaosborn561@gmail.com",
@@ -167,8 +181,16 @@ def is_personal(name: str | None = None, phone: str | None = None, email: str | 
             return True
         if raw[-10:] in {p[-10:] for p in PERSONAL_PHONES if len(p) >= 10}:
             return True
-    if name and name.strip().lower() in PERSONAL_NAMES:
-        return True
+    if name:
+        n = name.strip().lower()
+        if n in PERSONAL_NAMES:
+            return True
+        for token in PERSONAL_NAMES:
+            if " " in token and token in n:
+                return True
+        first = n.split()[0] if n else ""
+        if first in PERSONAL_FIRST_NAMES:
+            return True
     return False
 
 

@@ -4,7 +4,14 @@ from crmbrain.briefing import due_to_send, format_phone, format_when, matches_se
 from crmbrain.enrichment import _apply_row, _rows_from_result
 from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
-from crmbrain.intelligence import heuristic_extract, stage_id
+from crmbrain.intelligence import (
+    amount_to_write,
+    heuristic_extract,
+    merge_fact_dicts,
+    normalize_amount_hint,
+    parse_deal_amount,
+    stage_id,
+)
 from crmbrain.leadmagic import (
     parse_email_response,
     parse_mobile_response,
@@ -36,6 +43,9 @@ def test_extract_drive_ids():
 def test_personal_filter():
     assert is_personal(phone="+15614278965")
     assert is_personal(name="Diana Burns")
+    assert is_personal(name="Jeremy Ciotola")
+    assert is_personal(name="Sarah Osborn")
+    assert is_personal(phone="+19733030001")
     assert not is_personal(email="rob@cyberguard360.com", name="Robert Lawson")
 
 
@@ -59,10 +69,51 @@ def test_stage_signals():
     assert loose.get("stage_hint") != "signed"
 
 
+def test_amount_extract_only_when_clearly_stated():
+    retainer = heuristic_extract(
+        "Josh walked the discovery. They want the monthly retainer of $3,000 to start next month."
+    )
+    assert retainer["amount_hint"] == "3000"
+    assert retainer["deal_amount"] == "3000"
+    assert parse_deal_amount("The package is $10,500 and they asked for a proposal.") == "10500"
+    assert parse_deal_amount("proposal for $8k") == "8000"
+    assert parse_deal_amount("Quoted them $4,500 one-time.") == "4500"
+
+
+def test_amount_extract_never_hallucinates_pitch_or_vague():
+    assert parse_deal_amount("We generated $2M in pipeline last quarter.") == ""
+    assert parse_deal_amount("One of our roofers closed $100K in his first 3 months.") == ""
+    assert parse_deal_amount("Happy to run a free 10K lead campaign.") == ""
+    assert parse_deal_amount("Maybe around a few thousand if it makes sense.") == ""
+    assert parse_deal_amount("There were 14+ replies per month.") == ""
+    # Two different stated prices — do not pick one.
+    assert parse_deal_amount("Monthly retainer of $3,000 or the $8,500 package.") == ""
+    # Gemini invents a number that is not in the transcript.
+    text = "Great discovery. They liked the roofing case study and the $2M pipeline."
+    assert normalize_amount_hint("4500", text) == ""
+    assert normalize_amount_hint("3000", "Monthly retainer is $3,000.") == "3000"
+    assert amount_to_write("", "3000") == "3000"
+    assert amount_to_write("0", "3000") == "3000"
+    assert amount_to_write("8500", "3000") == ""
+
+
+def test_empty_gemini_does_not_wipe_heuristic_notes():
+    base = heuristic_extract("Their son starts at Baylor University next fall.")
+    merged = merge_fact_dicts(
+        base,
+        {"personal_details": "", "family_notes": "", "amount_hint": "", "deal_amount": ""},
+    )
+    assert "son" in (merged["family_notes"] or "").lower()
+    assert "Baylor" in (merged["relationship_hooks"] or "")
+
+
 def test_gmail_pandadoc_and_calendly():
     assert _stage_from_mail("Document completed", "PandaDoc", "has been signed") == "closedwon"
     assert _stage_from_mail("New Event", "Calendly", "accepted") == "qualifiedtobuy"
     assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == "3557889773"
+    assert _stage_from_mail("Invitation: SalesGlider Intro", "calendar-notification@google.com", "scheduled") == (
+        "qualifiedtobuy"
+    )
 
 
 def test_josh_calendly_creates_contact():
