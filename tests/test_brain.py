@@ -36,6 +36,9 @@ def test_extract_drive_ids():
 def test_personal_filter():
     assert is_personal(phone="+15614278965")
     assert is_personal(name="Diana Burns")
+    assert is_personal(name="Jeremy Ciotola")
+    assert is_personal(name="Sarah Osborn")
+    assert is_personal(phone="+19733030001")
     assert not is_personal(email="rob@cyberguard360.com", name="Robert Lawson")
 
 
@@ -63,6 +66,9 @@ def test_gmail_pandadoc_and_calendly():
     assert _stage_from_mail("Document completed", "PandaDoc", "has been signed") == "closedwon"
     assert _stage_from_mail("New Event", "Calendly", "accepted") == "qualifiedtobuy"
     assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == "3557889773"
+    assert _stage_from_mail("Invitation: SalesGlider Intro", "calendar-notification@google.com", "scheduled") == (
+        "qualifiedtobuy"
+    )
 
 
 def test_josh_calendly_creates_contact():

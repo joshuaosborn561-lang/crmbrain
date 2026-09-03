@@ -40,6 +40,8 @@ class CycleReport:
     skipped: list[str] = field(default_factory=list)
     contacts_upserted: list[str] = field(default_factory=list)
     deals_moved: list[str] = field(default_factory=list)
+    deals_pruned: list[str] = field(default_factory=list)
+    contacts_pruned: list[str] = field(default_factory=list)
     junk_blocked: list[str] = field(default_factory=list)
     ticker_enrolled: list[str] = field(default_factory=list)
     ticker_drafts: list[str] = field(default_factory=list)
@@ -55,6 +57,8 @@ class CycleReport:
             "skipped": self.skipped,
             "contacts_upserted": self.contacts_upserted,
             "deals_moved": self.deals_moved,
+            "deals_pruned": self.deals_pruned,
+            "contacts_pruned": self.contacts_pruned,
             "junk_blocked": self.junk_blocked,
             "ticker_enrolled": self.ticker_enrolled,
             "ticker_drafts": self.ticker_drafts,

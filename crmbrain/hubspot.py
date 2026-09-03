@@ -6,6 +6,7 @@ import requests
 
 from crmbrain.config import STAGE, Settings, digits_phone
 from crmbrain.models import Engagement
+from crmbrain import policy
 
 CONTACT_PROPS = [
     {
@@ -103,6 +104,7 @@ class HubSpot:
                     "jobtitle",
                     "website",
                     "hs_linkedin_url",
+                    "crm_source",
                     "personal_details",
                     "family_notes",
                     "relationship_hooks",
@@ -118,7 +120,7 @@ class HubSpot:
                 rows = self._search(
                     "contacts",
                     [{"propertyName": "phone", "operator": "CONTAINS_TOKEN", "value": digits[-10:]}],
-                    ["email", "firstname", "lastname", "phone", "company"],
+                    ["email", "firstname", "lastname", "phone", "company", "crm_source"],
                 )
                 if rows:
                     return rows[0]
@@ -160,6 +162,9 @@ class HubSpot:
             props["hs_linkedin_url"] = ev.linkedin_url
         props = {k: v for k, v in props.items() if v}
         if existing:
+            existing_source = ((existing.get("properties") or {}).get("crm_source") or "").lower()
+            if existing_source in policy.MEETING_CRM_SOURCES and ev.source not in policy.MEETING_CRM_SOURCES:
+                props.pop("crm_source", None)
             resp = self.session.patch(
                 f"{self.base}/crm/v3/objects/contacts/{existing['id']}",
                 json={"properties": props},
@@ -230,12 +235,20 @@ class HubSpot:
         ]
         if live:
             deal = live[0]
-            self.move_deal(deal["id"], stage, evidence=f"{ev.source}:{ev.external_id}")
+            current = (deal.get("properties") or {}).get("dealstage") or ""
+            target = policy.choose_deal_action(current, stage, ev)
+            if not target:
+                return deal
+            self.move_deal(deal["id"], target, evidence=f"{ev.source}:{ev.external_id}")
+            deal.setdefault("properties", {})["dealstage"] = target
             return deal
+        target = policy.choose_deal_action(None, stage, ev)
+        if not target:
+            return {}
         payload = {
             "properties": {
                 "dealname": name or "SalesGlider deal",
-                "dealstage": stage,
+                "dealstage": target,
                 "pipeline": "default",
             },
             "associations": [
@@ -260,3 +273,78 @@ class HubSpot:
     def upcoming_meetings(self) -> list[dict]:
         """Meetings in HubSpot engagements if available; otherwise empty (Gmail/Calendly fills this)."""
         return []
+
+    def iter_deals(self, properties: list[str], stage: str = ""):
+        after = None
+        while True:
+            if stage:
+                payload: dict[str, Any] = {
+                    "filterGroups": [
+                        {"filters": [{"propertyName": "dealstage", "operator": "EQ", "value": stage}]}
+                    ],
+                    "properties": properties,
+                    "limit": 100,
+                }
+                if after:
+                    payload["after"] = after
+                resp = self.session.post(
+                    f"{self.base}/crm/v3/objects/deals/search", json=payload, timeout=30
+                )
+            else:
+                params: dict[str, Any] = {"limit": 100, "properties": ",".join(properties)}
+                if after:
+                    params["after"] = after
+                resp = self.session.get(f"{self.base}/crm/v3/objects/deals", params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            for row in data.get("results") or []:
+                yield row
+            after = (data.get("paging") or {}).get("next", {}).get("after")
+            if not after:
+                break
+
+    def contacts_for_deal(self, deal_id: str) -> list[dict]:
+        resp = self.session.get(
+            f"{self.base}/crm/v4/objects/deals/{deal_id}/associations/contacts",
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            return []
+        out = []
+        for row in resp.json().get("results") or []:
+            cid = row.get("toObjectId") or row.get("id")
+            if not cid:
+                continue
+            c = self.session.get(
+                f"{self.base}/crm/v3/objects/contacts/{cid}",
+                params={
+                    "properties": "email,firstname,lastname,phone,company,crm_source,hs_linkedin_url"
+                },
+                timeout=20,
+            )
+            if c.ok:
+                out.append(c.json())
+        return out
+
+    def contact_has_meetings(self, contact_id: str) -> bool:
+        for object_name in ("meetings", "emails"):
+            resp = self.session.get(
+                f"{self.base}/crm/v4/objects/contacts/{contact_id}/associations/{object_name}",
+                timeout=20,
+            )
+            if resp.status_code >= 400:
+                continue
+            if resp.json().get("results"):
+                return True
+        return False
+
+    def archive_deal(self, deal_id: str) -> None:
+        resp = self.session.delete(f"{self.base}/crm/v3/objects/deals/{deal_id}", timeout=20)
+        if resp.status_code >= 400:
+            # Fallback: closed-lost so junk leaves the open forecast.
+            self.move_deal(deal_id, STAGE["closed_lost"], evidence="prune:archive-fallback")
+
+    def archive_contact(self, contact_id: str) -> None:
+        resp = self.session.delete(f"{self.base}/crm/v3/objects/contacts/{contact_id}", timeout=20)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"archive contact {contact_id}: {resp.text[:200]}")
