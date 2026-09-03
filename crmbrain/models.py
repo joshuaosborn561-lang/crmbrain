@@ -47,6 +47,8 @@ class CycleReport:
     ticker_drafts: list[str] = field(default_factory=list)
     linkedin_queued: list[str] = field(default_factory=list)
     briefs_sent: list[str] = field(default_factory=list)
+    notes_updated: list[str] = field(default_factory=list)
+    amounts_set: list[str] = field(default_factory=list)
     integrations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -64,6 +66,8 @@ class CycleReport:
             "ticker_drafts": self.ticker_drafts,
             "linkedin_queued": self.linkedin_queued,
             "briefs_sent": self.briefs_sent,
+            "notes_updated": self.notes_updated,
+            "amounts_set": self.amounts_set,
             "errors": self.errors,
         }
 

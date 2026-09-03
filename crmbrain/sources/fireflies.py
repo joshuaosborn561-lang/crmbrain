@@ -54,9 +54,9 @@ def _post(settings: Settings, query: str, variables: dict) -> dict:
     return data.get("data") or {}
 
 
-def scan(settings: Settings) -> list[Engagement]:
+def scan(settings: Settings, limit: int = 50) -> list[Engagement]:
     start = lookback_start(settings.lookback_hours)
-    listing = _post(settings, QUERY, {"limit": 50}).get("transcripts") or []
+    listing = _post(settings, QUERY, {"limit": limit}).get("transcripts") or []
     out: list[Engagement] = []
     for row in listing:
         ms = row.get("date") or 0

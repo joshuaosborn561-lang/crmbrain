@@ -5,7 +5,13 @@ from __future__ import annotations
 from crmbrain.config import STAGE
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport
-from crmbrain.policy import MEETING_STAGES, contact_has_meeting_evidence, is_blank_contact
+from crmbrain.policy import (
+    MEETING_STAGES,
+    clean_deal_name,
+    contact_has_meeting_evidence,
+    is_blank_contact,
+    promote_replied_stage,
+)
 
 DEAL_LIMIT = 40
 CONTACT_LIMIT = 20
@@ -29,6 +35,7 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
     """Archive Appointment Scheduled deals that have no Calendly/Fireflies/GCal evidence.
 
     If the contact clearly held or booked a meeting, promote instead of deleting.
+    Associated emails are not meeting evidence and never promote Replied.
     """
     scanned = 0
     for deal in hs.iter_deals(["dealname", "dealstage", "pipeline"], stage=STAGE["replied"]):
@@ -38,24 +45,28 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
         deal_id = str(deal.get("id") or "")
         name = (deal.get("properties") or {}).get("dealname") or deal_id
         contacts = hs.contacts_for_deal(deal_id)
-        deals_for_contact: list[dict] = [deal]
         promote = ""
         keep = False
         for contact in contacts:
             more = hs.open_deals_for_contact(contact["id"])
-            deals_for_contact.extend(more)
             if _meeting_evidence(hs, contact, more):
                 keep = True
-                source = ((contact.get("properties") or {}).get("crm_source") or "").lower()
-                if source in {"fireflies", "cube_acr", "allo"}:
-                    promote = STAGE["discovery_completed"]
-                elif source in {"calendly"} or hs.contact_has_meetings(contact["id"]):
-                    promote = promote or STAGE["discovery_scheduled"]
-                else:
-                    promote = promote or STAGE["discovery_completed"]
+                candidate = promote_replied_stage(
+                    contact,
+                    has_real_meetings=hs.contact_has_meetings(contact["id"]),
+                    has_email_associations=False,
+                )
+                if candidate:
+                    promote = candidate
         if keep and promote:
-            hs.move_deal(deal_id, promote, evidence="prune:meeting-evidence")
-            report.deals_moved.append(f"prune {name} -> {promote}")
+            cleaned = clean_deal_name(name)
+            hs.move_deal(
+                deal_id,
+                promote,
+                evidence="prune:meeting-evidence",
+                dealname=cleaned if cleaned != name else "",
+            )
+            report.deals_moved.append(f"prune {cleaned} -> {promote}")
             continue
         if keep:
             continue

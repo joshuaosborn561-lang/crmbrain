@@ -44,11 +44,17 @@ Only move a deal when evidence warrants it. Never open a deal from Smartlead / H
 
 The cycle will not regress a more advanced open stage to Replied or Nurture without that back-signal. If a contact has meeting-held evidence and only a Replied deal exists, it is moved to Discovery Completed.
 
+Fireflies and Cube `*-transcript.docx` always run extract → `merge_contact_props` so relational notes (family, school, hooks) land on the contact. If the transcript clearly states **this deal's** price (monthly retainer, proposal $, package), the cycle PATCHes HubSpot deal `amount` when that field is empty. It never invents an amount and never copies Josh's case-study stats ($2M pipeline, $100K closed, free 10K leads).
+
 Each cycle also **prunes** junk:
 
 - Archives (or closed-lost fallback) deals stuck in Appointment Scheduled (`appointmentscheduled`) with no Calendly / Fireflies / GCal meeting evidence
+- Does **not** treat a HubSpot email association as a meeting (that was promoting Replied junk to Discovery Scheduled)
+- Cleans leftover `Name - Replied` deal titles when the stage is corrected
 - Does not delete contacts that have meeting evidence
 - Soft-archives blank / no-identity contacts when that is safe
+
+`circle back` / `next quarter` is a ticker reason only. It does not open a Nurture deal or move Discovery Completed (or later) backward.
 
 ```bash
 python scripts/prune_junk.py
@@ -58,6 +64,13 @@ To backfill existing HubSpot gaps:
 
 ```bash
 python scripts/backfill_contact_fields.py
+```
+
+To reprocess recent Fireflies / Cube transcripts onto **existing** HubSpot contacts (notes + empty deal amounts; dry-run by default):
+
+```bash
+python scripts/backfill_notes_and_amounts.py
+python scripts/backfill_notes_and_amounts.py --apply --days 14
 ```
 
 To enroll historical 90-day nurture ticker rows (dry-run by default; never emails):
@@ -86,10 +99,11 @@ Full cycle:
 5. Creates / updates HubSpot contacts only for meetings booked or held
 6. Moves deals only on evidence; never opens Replied from chat/RVM
 7. Prunes Appointment Scheduled junk with no meeting evidence
-8. Extracts personal details onto the contact
-9. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
-10. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
-11. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
+8. Extracts relational notes onto the contact (Fireflies / Cube every cycle, including a notes refresh if the transcript was already processed)
+9. Fills empty deal `amount` when the transcript states a retainer / proposal / package price
+10. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
+11. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
+12. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 
 ## Run locally
 

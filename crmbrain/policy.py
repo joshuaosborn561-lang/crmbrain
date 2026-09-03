@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from crmbrain.config import STAGE, is_client_context
 from crmbrain.intelligence import stage_id
 from crmbrain.models import Engagement
@@ -179,8 +181,10 @@ def is_explicit_back_signal(stage: str, ev: Engagement) -> bool:
 
 
 def should_move_stage(current: str, target: str, *, back_signal: bool = False) -> bool:
-    """Advance on stronger evidence. Never regress to Replied/Nurture without a back-signal."""
+    """Advance on stronger evidence. Never regress a held-meeting deal to Nurture."""
     if not target or current == target:
+        return False
+    if target == STAGE["nurture"] and STAGE_RANK.get(current, 0) >= STAGE_RANK[STAGE["discovery_completed"]]:
         return False
     if target in BACK_STAGES and back_signal:
         return True
@@ -197,6 +201,8 @@ def choose_deal_action(current: str | None, requested: str, ev: Engagement) -> s
         return None
     held = is_meeting_held(ev)
     target = requested
+    if held and target == STAGE["nurture"]:
+        target = STAGE["discovery_completed"]
     if current == STAGE["replied"] and held:
         target = STAGE["discovery_completed"]
     if not current:
@@ -222,6 +228,8 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     stage = stage_id(hint) if hint else ""
     if ev.source != "gmail" and stage in MONEY_STAGES:
         stage = ""
+    if stage == STAGE["nurture"] and is_meeting_held(ev):
+        return STAGE["discovery_completed"]
     if stage:
         if ev.source in NEVER_OPEN_DEAL_SOURCES and stage in {STAGE["replied"], STAGE["nurture"]}:
             return ""
@@ -234,6 +242,44 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
         return STAGE["discovery_completed"]
     if ev.source == "allo" and is_allo_discovery(ev):
         return STAGE["discovery_completed"]
+    return ""
+
+
+def clean_deal_name(name: str) -> str:
+    """Strip leftover Replied / Appointment Scheduled labels from deal names."""
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(
+        r"[\s]*[-–—][\s]*(replied|appointment scheduled)\s*$",
+        "",
+        cleaned,
+        flags=re.I,
+    )
+    cleaned = re.sub(r"\s+\((replied|appointment scheduled)\)\s*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+(replied|appointment scheduled)\s*$", "", cleaned, flags=re.I)
+    return cleaned.strip() or name.strip()
+
+
+def promote_replied_stage(
+    contact: dict,
+    *,
+    has_real_meetings: bool = False,
+    has_email_associations: bool = False,
+) -> str:
+    """Stage to promote a Replied deal to, or empty to archive.
+
+    Email associations are ignored. Only crm_source meeting evidence or a real
+    HubSpot meeting engagement can promote.
+    """
+    del has_email_associations  # never a reason to promote
+    source = ((contact.get("properties") or {}).get("crm_source") or "").lower()
+    if source in {"fireflies", "cube_acr", "allo"}:
+        return STAGE["discovery_completed"]
+    if source == "calendly":
+        return STAGE["discovery_scheduled"]
+    if has_real_meetings:
+        return STAGE["discovery_scheduled"]
     return ""
 
 
