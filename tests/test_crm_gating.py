@@ -8,7 +8,7 @@ from crmbrain.cycle import _handle_engagement
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.hubspot import MEETING_ASSOCIATION_OBJECTS
-from crmbrain.intelligence import heuristic_extract
+from crmbrain.intelligence import extract, heuristic_extract
 from crmbrain.policy import (
     choose_deal_action,
     clean_deal_name,
@@ -77,13 +77,23 @@ class FakeHubSpot:
             other = "".join(c for c in (props.get("phone") or "") if c.isdigit())
             if digits and len(digits) >= 10 and other[-10:] == digits[-10:]:
                 return row
+        wanted = (name or "").strip().lower()
+        if wanted:
+            matches = []
+            for row in self.contacts:
+                props = row.get("properties") or {}
+                full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip().lower()
+                if full and full == wanted:
+                    matches.append(row)
+            if len(matches) == 1:
+                return matches[0]
         return None
 
     def in_crm(self, email="", phone=""):
         return self.find_contact(email=email, phone=phone) is not None
 
     def upsert_contact(self, ev):
-        existing = self.find_contact(email=ev.email, phone=ev.phone)
+        existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         self.writes.append(("upsert_contact", ev.source, ev.email or ev.phone))
         if existing:
             return existing
@@ -169,10 +179,10 @@ class FakeHubSpot:
             current = (deal.get("properties") or {}).get("dealstage") or ""
             target = choose_deal_action(current, stage, ev) if stage else None
             current_name = deal["properties"].get("dealname") or ""
-            cleaned = clean_deal_name(current_name)
+            cleaned = clean_deal_name(current_name, fallback=ev.display_name())
             if target:
                 deal["properties"]["dealstage"] = target
-            if cleaned != current_name:
+            if cleaned and cleaned != current_name:
                 deal["properties"]["dealname"] = cleaned
                 self.patch_deal(deal["id"], {"dealname": cleaned})
             self.fill_deal_amount(deal, amount)
@@ -180,7 +190,7 @@ class FakeHubSpot:
         target = choose_deal_action(None, stage, ev) if stage else None
         if not target:
             return {}
-        props = {"dealstage": target, "dealname": ev.display_name()}
+        props = {"dealstage": target, "dealname": ev.display_name() or ev.email or "SalesGlider deal"}
         if amount:
             props["amount"] = amount
         deal = {
@@ -539,6 +549,124 @@ def test_fireflies_lands_relational_notes_and_amount(tmp_path):
     assert any("3000" in a for a in report.amounts_set)
 
 
+def test_calendar_system_email_never_upserts_hubspot(tmp_path):
+    for email in (
+        "calendar-notification@google.com",
+        "noreply@calendly.com",
+        "calendar-noreply@google.com",
+        "noreply@google.com",
+    ):
+        ev = Engagement(
+            source="calendly",
+            external_id=f"sys-{email}",
+            email=email,
+            raw_subject="Invitation: SalesGlider Intro",
+            extra={"event_type": "SalesGlider Intro", "create_new": True},
+        )
+        hs, memory, report = _handle(tmp_path, ev)
+        assert hs.writes == []
+        assert hs.contacts == []
+        assert any("system address" in x for x in report.junk_blocked)
+        assert f"calendly:sys-{email}" in memory._local["processed"]
+
+
+def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-3k-month",
+        email="lklein@grnplano.com",
+        name="Laura Klein",
+        first_name="Laura",
+        last_name="Klein",
+        transcript="Laura walked the discovery. They want to start at $3,000/month next month.",
+        raw_subject="Laura Klein and Joshua Osborn",
+    )
+    hs, _, report = _handle(tmp_path, ev)
+    assert any(w[0] == "patch_deal" and w[2].get("amount") == "3000" for w in hs.writes) or (
+        hs.deals and hs.deals[0]["properties"].get("amount") == "3000"
+    )
+    assert hs.deals[0]["properties"]["amount"] == "3000"
+    assert any("3000" in a for a in report.amounts_set)
+
+
+def test_fireflies_gemini_failure_still_uses_heuristic_amount(tmp_path, monkeypatch):
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-gemini-fail",
+        email="mtrpkosh@example.com",
+        name="Mike Trpkosh",
+        transcript="Mike said the monthly retainer is $3,000/month and his son plays baseball.",
+        summary="Mike wants $3,000/month. Son plays baseball.",
+        raw_subject="Mike Trpkosh and Joshua Osborn",
+    )
+    settings = make_settings(gemini_key="fake-gemini")
+    monkeypatch.setattr(
+        "crmbrain.intelligence._gemini",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("gemini 500")),
+    )
+    facts = extract(settings, ev)
+    assert facts["amount_hint"] == "3000"
+    assert "son" in (facts.get("family_notes") or "").lower()
+    hs = FakeHubSpot()
+    memory = Memory(settings, data_dir=tmp_path)
+    report = CycleReport()
+    _handle_engagement(ev, settings, hs, memory, None, report)
+    assert hs.deals[0]["properties"]["amount"] == "3000"
+    assert any("3000" in a for a in report.amounts_set)
+    assert report.notes_updated
+
+
+def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-name-only",
+        name="Laura Klein",
+        first_name="Laura",
+        last_name="Klein",
+        transcript="Their daughter plays soccer. Quoted them $4,500 one-time package.",
+        summary="Discovery with Laura. Daughter in soccer. $4,500 package.",
+        raw_subject="Laura Klein and Joshua Osborn",
+    )
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "lk-1",
+                "properties": {
+                    "email": "lklein@grnplano.com",
+                    "firstname": "Laura",
+                    "lastname": "Klein",
+                    "crm_source": "calendly",
+                    "personal_details": "",
+                },
+            }
+        ]
+    )
+    hs.deals.append(
+        {
+            "id": "d-lk",
+            "contact_id": "lk-1",
+            "properties": {
+                "dealstage": STAGE["discovery_scheduled"],
+                "dealname": "Discovery Scheduled",
+                "amount": "",
+            },
+        }
+    )
+    settings = make_settings()
+    memory = Memory(settings, data_dir=tmp_path)
+    memory.mark_processed("fireflies", "ff-name-only", {"contact_id": "lk-1"})
+    report = CycleReport()
+    _handle_engagement(ev, settings, hs, memory, None, report)
+    assert any("refreshed notes/amount" in s for s in report.skipped)
+    assert any(p[0] == "lk-1" and (p[1].get("family_notes") or p[1].get("personal_details")) for p in hs.patches)
+    assert hs.deals[0]["properties"]["amount"] == "4500"
+    assert hs.deals[0]["properties"]["dealname"] == "Laura Klein"
+    assert report.notes_updated
+    assert any("4500" in a for a in report.amounts_set)
+    assert hs.notes == []
+    assert len(hs.contacts) == 1
+
+
 def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
     ev = Engagement(
         source="fireflies",
@@ -668,6 +796,9 @@ def test_clean_deal_name_strips_replied_label():
     assert clean_deal_name("Pat Lee — Replied") == "Pat Lee"
     assert clean_deal_name("Pat Lee (Replied)") == "Pat Lee"
     assert clean_deal_name("Laura Klein") == "Laura Klein"
+    assert clean_deal_name("Discovery Scheduled", fallback="Laura Klein") == "Laura Klein"
+    assert clean_deal_name("", fallback="Mike Trpkosh") == "Mike Trpkosh"
+    assert clean_deal_name("Mike Trpkosh - Discovery Scheduled") == "Mike Trpkosh"
 
 
 def test_prune_archives_replied_without_meeting_and_promotes_held():

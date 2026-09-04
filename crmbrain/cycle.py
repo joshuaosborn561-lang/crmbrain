@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from crmbrain import briefing, enrichment, intelligence, policy, prune, slack_notify, ticker
@@ -11,6 +12,9 @@ from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.leadmagic import should_skip_email, usable_linkedin
 from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartlead
+from crmbrain.sources.gmail_scan import is_junk_crm_email
+
+logger = logging.getLogger(__name__)
 
 
 def _in_window(ev: Engagement, settings: Settings) -> bool:
@@ -33,6 +37,10 @@ def _handle_engagement(
     hey: HeyReach | None,
     report: CycleReport,
 ) -> None:
+    if ev.email and is_junk_crm_email(ev.email):
+        report.junk_blocked.append(f"{ev.source}:{ev.email} system address")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "system_email"})
+        return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         if not policy.personal_allowed_for_sales_intro(ev):
             report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} personal")
@@ -47,7 +55,7 @@ def _handle_engagement(
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_transcript"})
         return
 
-    already = hs.find_contact(email=ev.email, phone=ev.phone)
+    already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
     if not policy.may_write_hubspot(ev, already is not None):
         if memory.already_processed(ev.source, ev.external_id):
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
@@ -77,7 +85,7 @@ def _handle_engagement(
     ev = enrichment.enrich(settings, ev)
     contact = hs.upsert_contact(ev)
     report.contacts_upserted.append(f"{ev.display_name() or ev.email} ({ev.source})")
-    base = already or hs.find_contact(email=ev.email, phone=ev.phone) or contact
+    base = already or hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name()) or contact
     base["id"] = contact["id"]
     facts = _apply_transcript_intelligence(
         ev, settings, hs, memory, report, base, add_timeline_note=True
@@ -110,22 +118,30 @@ def _apply_transcript_intelligence(
     facts = intelligence.extract(settings, ev)
     merged = intelligence.merge_contact_props(contact, facts)
     if merged:
-        hs.patch_contact(contact["id"], merged)
-        report.notes_updated.append(f"{ev.display_name() or ev.email} ({ev.source})")
-        props = contact.setdefault("properties", {})
-        props.update(merged)
+        try:
+            hs.patch_contact(contact["id"], merged)
+            report.notes_updated.append(f"{ev.display_name() or ev.email} ({ev.source})")
+            props = contact.setdefault("properties", {})
+            props.update(merged)
+            logger.info("notes_updated %s %s", ev.display_name() or ev.email, sorted(merged))
+        except Exception as exc:
+            report.errors.append(f"notes {ev.display_name() or ev.email}: {exc}")
+            logger.warning("notes patch failed %s: %s", ev.display_name() or ev.email, exc)
     if add_timeline_note:
         note = ev.summary or ev.transcript[:1500] or ev.raw_subject
         if note:
-            hs.add_note(contact["id"], f"{ev.source} {ev.occurred_at or ''}\n\n{note}")
+            try:
+                hs.add_note(contact["id"], f"{ev.source} {ev.occurred_at or ''}\n\n{note}")
+            except Exception as exc:
+                report.errors.append(f"timeline note {ev.display_name() or ev.email}: {exc}")
     for fact_type in ("personal_details", "family_notes", "relationship_hooks"):
         if facts.get(fact_type):
             memory.save_fact(
                 {
                     "hs_contact_id": contact["id"],
                     "fact_type": fact_type,
-                    "fact_text": facts[fact_type],
                     "source": ev.source,
+                    "fact_text": facts[fact_type],
                     "external_id": ev.external_id,
                 }
             )
@@ -135,13 +151,23 @@ def _apply_transcript_intelligence(
         report.skipped.append(f"{ev.display_name()} client conversation, notes only")
     amount = facts.get("amount_hint") or facts.get("deal_amount") or ""
     if stage or amount:
-        deal = hs.upsert_deal(contact, ev, stage, amount=amount)
+        try:
+            deal = hs.upsert_deal(contact, ev, stage, amount=amount)
+        except Exception as exc:
+            report.errors.append(f"deal {ev.display_name() or ev.email}: {exc}")
+            logger.warning("deal write failed %s: %s", ev.display_name() or ev.email, exc)
+            return facts
         if deal.get("id") and stage:
             report.deals_moved.append(f"{ev.display_name()} -> {stage} ({deal.get('id')})")
             if stage in {STAGE["discovery_scheduled"], STAGE["discovery_completed"], STAGE["paid"], STAGE["signed"]}:
                 memory.stop_ticker(email=ev.email, hs_contact_id=contact["id"])
-        if deal.get("id") and amount and (deal.get("properties") or {}).get("amount") == amount:
+        live_amount = (deal.get("properties") or {}).get("amount")
+        wrote_amount = bool(deal.get("id") and amount and intelligence.amounts_equal(live_amount, amount))
+        if deal.get("id") and amount and not wrote_amount:
+            wrote_amount = hs.fill_deal_amount(deal, amount)
+        if wrote_amount:
             report.amounts_set.append(f"{ev.display_name() or ev.email} {amount}")
+            logger.info("amounts_set %s %s", ev.display_name() or ev.email, amount)
     return facts
 
 

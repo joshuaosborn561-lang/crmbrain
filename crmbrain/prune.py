@@ -59,12 +59,18 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
                 if candidate:
                     promote = candidate
         if keep and promote:
-            cleaned = clean_deal_name(name)
+            fallback = ""
+            if contacts:
+                props = (contacts[0].get("properties") or {})
+                fallback = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip() or (
+                    props.get("email") or ""
+                )
+            cleaned = clean_deal_name(name, fallback=fallback)
             hs.move_deal(
                 deal_id,
                 promote,
                 evidence="prune:meeting-evidence",
-                dealname=cleaned if cleaned != name else "",
+                dealname=cleaned if cleaned and cleaned != name else "",
             )
             report.deals_moved.append(f"prune {cleaned} -> {promote}")
             continue

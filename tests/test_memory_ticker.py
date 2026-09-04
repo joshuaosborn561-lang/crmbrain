@@ -4,7 +4,7 @@ from pathlib import Path
 
 from crmbrain.config import STAGE, Settings
 from crmbrain.cycle import _fire_ticker, integration_status, run as cycle_run
-from crmbrain.memory import Memory
+from crmbrain.memory import Memory, _is_duplicate_key
 from crmbrain.models import CycleReport
 from crmbrain.ticker import (
     TickerCandidate,
@@ -83,6 +83,41 @@ def test_memory_records_supabase_errors_on_report(tmp_path: Path):
     assert "super-secret-key" not in text
     assert "smartlead:lead-1" in memory._local["processed"]
     assert memory.drain_errors() == []
+
+
+def test_duplicate_key_is_success_for_mark_and_enroll(tmp_path: Path):
+    settings = make_settings(supabase_key="super-secret-key")
+    memory = Memory(settings, data_dir=tmp_path)
+
+    def conflict(method, table, **_k):
+        raise RuntimeError(f"supabase crmbrain.{table} 409: duplicate key value violates unique constraint")
+
+    memory._sb_schema = conflict
+    memory.mark_processed("allo", "already-seen-id")
+    memory.enroll_ticker(
+        {
+            "id": "t-dup",
+            "email": "pat@example.com",
+            "status": "active",
+            "next_fire_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    assert memory.drain_errors() == []
+    assert "allo:already-seen-id" in memory._local["processed"]
+    assert _is_duplicate_key(RuntimeError("supabase crmbrain.processed_events 409: duplicate key"))
+    assert not _is_duplicate_key(RuntimeError("supabase crmbrain.ticker 404: missing"))
+
+    memory.enroll_ticker(
+        {
+            "id": "t-dup-2",
+            "email": "pat@example.com",
+            "status": "active",
+            "next_fire_at": "2026-02-01T00:00:00+00:00",
+        }
+    )
+    assert memory.drain_errors() == []
+    emails = [t.get("email") for t in memory._local["ticker"] if t.get("status") == "active"]
+    assert emails.count("pat@example.com") == 1
 
 
 def test_cycle_summary_includes_integrations_and_memory_errors(tmp_path: Path, monkeypatch):
