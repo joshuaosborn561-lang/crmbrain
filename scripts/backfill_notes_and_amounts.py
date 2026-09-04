@@ -107,7 +107,7 @@ def run(
             if not personal_allowed_for_sales_intro(ev):
                 skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} personal")
                 continue
-        contact = hs.find_contact(email=ev.email, phone=ev.phone)
+        contact = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         if not contact:
             skipped.append(f"{ev.source}:{ev.display_name() or ev.email or ev.phone} not in CRM")
             continue

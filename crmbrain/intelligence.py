@@ -57,6 +57,8 @@ _PRICE_HINTS = (
     "retainer",
     "per month",
     "/mo",
+    "/month",
+    "/ month",
     "a month",
     "each month",
     "monthly",
@@ -229,6 +231,22 @@ def amount_to_write(current_amount: object, hint: str) -> str:
     return hint
 
 
+def amounts_equal(left: object, right: object) -> bool:
+    """HubSpot often returns 3000.0 for a 3000 write."""
+    if left is None or right is None:
+        return False
+    a = str(left).strip().replace(",", "")
+    b = str(right).strip().replace(",", "")
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    try:
+        return abs(float(a) - float(b)) < 0.01
+    except ValueError:
+        return False
+
+
 def merge_fact_dicts(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     """Gemini empty strings must not wipe heuristic facts."""
     out = dict(base)
@@ -256,6 +274,13 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
     amount = normalize_amount_hint(facts.get("amount_hint") or facts.get("deal_amount"), text)
     facts["amount_hint"] = amount
     facts["deal_amount"] = amount
+    if ev.source in {"fireflies", "cube_acr"} and not any(
+        str(facts.get(k) or "").strip()
+        for k in ("personal_details", "family_notes", "relationship_hooks")
+    ):
+        overview = (ev.summary or "").strip()
+        if overview:
+            facts["personal_details"] = overview[:800]
     return facts
 
 

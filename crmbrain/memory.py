@@ -12,6 +12,20 @@ from crmbrain.config import Settings
 logger = logging.getLogger(__name__)
 
 
+def _is_duplicate_key(exc: BaseException) -> bool:
+    """PostgREST unique violation (409) — row already exists."""
+    msg = str(exc).lower()
+    return (
+        " 409" in f" {msg}"
+        or msg.startswith("409")
+        or "duplicate key" in msg
+        or "unique constraint" in msg
+        or "23505" in msg
+        or ": 409" in msg
+        or " 409:" in msg
+    )
+
+
 class Memory:
     """Idempotency + ticker. Supabase first, local JSON fallback.
 
@@ -98,6 +112,8 @@ class Memory:
         resp = requests.request(
             method, url, headers=headers, timeout=30, json=json_body, params=params
         )
+        if resp.status_code == 409:
+            raise RuntimeError(f"supabase crmbrain.{table} 409: {resp.text[:400]}")
         if resp.status_code >= 400:
             raise RuntimeError(f"supabase crmbrain.{table} {resp.status_code}: {resp.text[:400]}")
         if not resp.content:
@@ -118,6 +134,9 @@ class Memory:
                     json_body={"source": source, "external_id": external_id, "payload": payload or {}},
                 )
             except Exception as exc:
+                if _is_duplicate_key(exc):
+                    logger.info("processed_events already had %s:%s", source, external_id)
+                    return
                 self._record_error("mark_processed", exc)
 
     def start_run(self) -> int | None:
@@ -147,13 +166,30 @@ class Memory:
                 self._record_error("finish_run", exc)
 
     def enroll_ticker(self, row: dict) -> None:
+        if self._ticker_already_active(row):
+            return
         self._local.setdefault("ticker", []).append(row)
         self.save_local()
         if self.use_supabase:
             try:
                 self._sb_schema("POST", "ticker", json_body=row)
             except Exception as exc:
+                if _is_duplicate_key(exc):
+                    logger.info("ticker already active for %s", row.get("email") or row.get("id"))
+                    return
                 self._record_error("enroll_ticker", exc)
+
+    def _ticker_already_active(self, row: dict) -> bool:
+        email = (row.get("email") or "").strip().lower()
+        hs = str(row.get("hs_contact_id") or "").strip()
+        for existing in self._local.get("ticker", []):
+            if (existing.get("status") or "active") != "active":
+                continue
+            if email and (existing.get("email") or "").strip().lower() == email:
+                return True
+            if hs and str(existing.get("hs_contact_id") or "").strip() == hs:
+                return True
+        return False
 
     def list_ticker(self) -> list[dict]:
         local = list(self._local.get("ticker", []))

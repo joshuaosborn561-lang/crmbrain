@@ -245,20 +245,21 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     return ""
 
 
-def clean_deal_name(name: str) -> str:
-    """Strip leftover Replied / Appointment Scheduled labels from deal names."""
+_DEAL_NAME_NOISE = r"(replied|appointment scheduled|discovery scheduled)"
+
+
+def clean_deal_name(name: str, fallback: str = "") -> str:
+    """Strip leftover Replied / Discovery Scheduled labels. Empty names use fallback."""
     cleaned = (name or "").strip()
+    fallback = (fallback or "").strip()
     if not cleaned:
-        return ""
-    cleaned = re.sub(
-        r"[\s]*[-–—][\s]*(replied|appointment scheduled)\s*$",
-        "",
-        cleaned,
-        flags=re.I,
-    )
-    cleaned = re.sub(r"\s+\((replied|appointment scheduled)\)\s*$", "", cleaned, flags=re.I)
-    cleaned = re.sub(r"\s+(replied|appointment scheduled)\s*$", "", cleaned, flags=re.I)
-    return cleaned.strip() or name.strip()
+        return fallback
+    cleaned = re.sub(rf"[\s]*[-–—][\s]*{_DEAL_NAME_NOISE}\s*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(rf"\s+\({_DEAL_NAME_NOISE}\)\s*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(rf"^{_DEAL_NAME_NOISE}$", "", cleaned, flags=re.I)
+    cleaned = re.sub(rf"\s+{_DEAL_NAME_NOISE}\s*$", "", cleaned, flags=re.I)
+    cleaned = cleaned.strip()
+    return cleaned or fallback or name.strip()
 
 
 def promote_replied_stage(

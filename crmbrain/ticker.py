@@ -228,6 +228,13 @@ def apply_plan(
 
 
 def enroll(memory: Memory, ev: Engagement, reason: str, hs_contact_id: str = "", hs_deal_id: str = "") -> dict:
+    if already_enrolled(
+        memory.list_ticker(),
+        email=ev.email,
+        phone=ev.phone,
+        hs_contact_id=hs_contact_id,
+    ):
+        return {}
     next_fire = (now_utc() + timedelta(days=TICKER_DAYS)).isoformat()
     row = {
         "id": str(uuid4()),

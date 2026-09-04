@@ -6,6 +6,7 @@ from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_pers
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import (
     amount_to_write,
+    amounts_equal,
     heuristic_extract,
     merge_fact_dicts,
     normalize_amount_hint,
@@ -23,9 +24,11 @@ from crmbrain.sources.gmail_scan import (
     _stage_from_mail,
     counterpart_from_headers,
     is_josh_meeting,
+    is_junk_crm_email,
     is_system_address,
     parse_calendly,
     parse_meeting_at,
+    real_person_emails,
 )
 from crmbrain.ticker import draft_email, infer_industry
 
@@ -78,6 +81,10 @@ def test_amount_extract_only_when_clearly_stated():
     assert parse_deal_amount("The package is $10,500 and they asked for a proposal.") == "10500"
     assert parse_deal_amount("proposal for $8k") == "8000"
     assert parse_deal_amount("Quoted them $4,500 one-time.") == "4500"
+    assert parse_deal_amount("They agreed to $3,000/month after discovery.") == "3000"
+    assert parse_deal_amount("Retainer is $3,000 / month.") == "3000"
+    assert amounts_equal("3000", "3000.0")
+    assert amounts_equal("3000.00", 3000)
 
 
 def test_amount_extract_never_hallucinates_pitch_or_vague():
@@ -121,6 +128,11 @@ def test_josh_calendly_creates_contact():
     body = "Invitee: Laura Klein\nInvitee Email: lklein@grnplano.com\nEvent Type: SalesGlider Intro\n"
     cal = parse_calendly(subject, body)
     assert cal["email"] == "lklein@grnplano.com"
+    junk = parse_calendly(
+        "Invitation: SalesGlider Intro",
+        "From: calendar-notification@google.com\nTo: joshua@salesglidergrowth.com\n",
+    )
+    assert junk["email"] == ""
     assert cal["first_name"] == "Laura"
     assert cal["domain"] == "grnplano.com"
     assert is_josh_meeting(subject, cal["event_type"])
@@ -207,7 +219,18 @@ def test_gmail_counterpart_is_the_other_person():
     assert inbox_email == "lklein@grnplano.com"
     assert is_system_address("noreply@calendly.com")
     assert is_system_address("joshua@salesglidergrowth.com")
+    assert is_system_address("calendar-notification@google.com")
+    assert is_system_address("noreply@google.com")
+    assert is_system_address("calendar-noreply@google.com")
+    assert is_junk_crm_email("calendar-notification@google.com")
+    assert is_junk_crm_email("noreply@calendly.com")
+    assert not is_junk_crm_email("")
+    assert not is_junk_crm_email("lklein@grnplano.com")
     assert not is_system_address("lklein@grnplano.com")
+    assert real_person_emails(
+        ["calendar-notification@google.com", "lklein@grnplano.com"],
+        ["noreply@google.com"],
+    ) == ["lklein@grnplano.com"]
 
 
 def test_nurture_copy_has_no_dashes():

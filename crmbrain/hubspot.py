@@ -56,6 +56,31 @@ CONTACT_PROPS = [
         "groupName": "contactinformation",
         "description": "How this person earned a HubSpot record: call, meeting, reply, LinkedIn, Allo, RVM.",
     },
+    {
+        "name": "gift_ideas",
+        "label": "Gift ideas",
+        "type": "string",
+        "fieldType": "textarea",
+        "groupName": "contactinformation",
+    },
+]
+
+CONTACT_SEARCH_PROPS = [
+    "email",
+    "firstname",
+    "lastname",
+    "phone",
+    "company",
+    "jobtitle",
+    "website",
+    "hs_linkedin_url",
+    "crm_source",
+    "personal_details",
+    "family_notes",
+    "relationship_hooks",
+    "pain_points",
+    "buying_committee",
+    "gift_ideas",
 ]
 
 
@@ -98,23 +123,7 @@ class HubSpot:
             rows = self._search(
                 "contacts",
                 [{"propertyName": "email", "operator": "EQ", "value": email}],
-                [
-                    "email",
-                    "firstname",
-                    "lastname",
-                    "phone",
-                    "company",
-                    "jobtitle",
-                    "website",
-                    "hs_linkedin_url",
-                    "crm_source",
-                    "personal_details",
-                    "family_notes",
-                    "relationship_hooks",
-                    "pain_points",
-                    "buying_committee",
-                    "gift_ideas",
-                ],
+                CONTACT_SEARCH_PROPS,
             )
             if rows:
                 return rows[0]
@@ -124,23 +133,28 @@ class HubSpot:
                 rows = self._search(
                     "contacts",
                     [{"propertyName": "phone", "operator": "CONTAINS_TOKEN", "value": digits[-10:]}],
-                    [
-                        "email",
-                        "firstname",
-                        "lastname",
-                        "phone",
-                        "company",
-                        "crm_source",
-                        "personal_details",
-                        "family_notes",
-                        "relationship_hooks",
-                        "pain_points",
-                        "buying_committee",
-                        "gift_ideas",
-                    ],
+                    CONTACT_SEARCH_PROPS,
                 )
                 if rows:
                     return rows[0]
+        return self._find_contact_by_name(name)
+
+    def _find_contact_by_name(self, name: str) -> dict | None:
+        """Exact first+last match. Skip if zero or multiple hits."""
+        parts = [p for p in (name or "").strip().split() if p]
+        if len(parts) < 2:
+            return None
+        first, last = parts[0], " ".join(parts[1:])
+        rows = self._search(
+            "contacts",
+            [
+                {"propertyName": "firstname", "operator": "EQ", "value": first},
+                {"propertyName": "lastname", "operator": "EQ", "value": last},
+            ],
+            CONTACT_SEARCH_PROPS,
+        )
+        if len(rows) == 1:
+            return rows[0]
         return None
 
     def in_crm(self, email: str = "", phone: str = "") -> bool:
@@ -162,7 +176,7 @@ class HubSpot:
                 break
 
     def upsert_contact(self, ev: Engagement) -> dict:
-        existing = self.find_contact(email=ev.email, phone=ev.phone)
+        existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         props = {
             "firstname": ev.first_name or (ev.display_name().split(" ")[0] if ev.display_name() else ""),
             "lastname": ev.last_name
@@ -250,23 +264,24 @@ class HubSpot:
             for d in existing
             if d.get("properties", {}).get("dealstage") not in {STAGE["closed_lost"], STAGE["paid"]}
         ]
+        fallback_name = ev.display_name() or ev.company or ev.email or ""
         if live:
             deal = live[0]
             current = (deal.get("properties") or {}).get("dealstage") or ""
             target = policy.choose_deal_action(current, stage, ev) if stage else None
             current_name = (deal.get("properties") or {}).get("dealname") or ""
-            cleaned = policy.clean_deal_name(current_name)
+            cleaned = policy.clean_deal_name(current_name, fallback=fallback_name)
             if target:
                 self.move_deal(
                     deal["id"],
                     target,
                     evidence=f"{ev.source}:{ev.external_id}",
-                    dealname=cleaned if cleaned != current_name else "",
+                    dealname=cleaned if cleaned and cleaned != current_name else "",
                 )
                 deal.setdefault("properties", {})["dealstage"] = target
-            elif cleaned != current_name:
+            elif cleaned and cleaned != current_name:
                 self.patch_deal(str(deal["id"]), {"dealname": cleaned})
-            if cleaned != current_name:
+            if cleaned and cleaned != current_name:
                 deal.setdefault("properties", {})["dealname"] = cleaned
             self.fill_deal_amount(deal, amount)
             return deal
@@ -274,7 +289,7 @@ class HubSpot:
         if not target:
             return {}
         props = {
-            "dealname": name or "SalesGlider deal",
+            "dealname": name or fallback_name or "SalesGlider deal",
             "dealstage": target,
             "pipeline": "default",
         }
@@ -291,7 +306,10 @@ class HubSpot:
         }
         resp = self.session.post(f"{self.base}/crm/v3/objects/deals", json=payload, timeout=30)
         resp.raise_for_status()
-        return resp.json()
+        created = resp.json()
+        if amount:
+            created.setdefault("properties", {})["amount"] = amount
+        return created
 
     def fill_deal_amount(self, deal: dict, amount: str) -> bool:
         """PATCH amount only when the live deal amount is empty. Never invent."""

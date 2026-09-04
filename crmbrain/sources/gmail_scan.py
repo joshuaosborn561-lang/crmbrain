@@ -32,7 +32,9 @@ NOREPLY_HINTS = (
     "mailer-daemon",
     "notifications@",
     "calendar-notification",
+    "calendar-noreply",
     "no_reply",
+    "@calendar.google.com",
 )
 PEOPLE_QUERIES = (
     "newer_than:2d in:sent -from:calendly.com -from:pandadoc.com -from:docusign.net",
@@ -75,8 +77,10 @@ def parse_calendly(subject: str, body: str) -> dict[str, str]:
         m = re.search(r"New Event:\s*(.+?)\s+-\s+\d", subject)
         if m:
             invitee = m.group(1).strip()
+    if email and is_system_address(email):
+        email = ""
     if not email:
-        emails = [e for e in _addresses(text) if not any(h in e for h in SYSTEM_EMAIL_HINTS)]
+        emails = [e for e in _addresses(text) if not is_system_address(e)]
         email = emails[0] if emails else ""
     first, last = "", ""
     if invitee:
@@ -170,21 +174,25 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
             snippet = msg.get("snippet", "")
             body = gmail.body_text(msg)
             cal = parse_calendly(subject, body) if "calendly" in f"{sender} {subject}".lower() else {}
-            emails = [
-                e
-                for e in ([cal.get("email")] if cal.get("email") else []) + _addresses(sender) + _addresses(to)
-                if e and not any(h in e for h in SYSTEM_EMAIL_HINTS)
-            ]
+            emails = real_person_emails(
+                [cal.get("email")] if cal.get("email") else [],
+                _addresses(sender),
+                _addresses(to),
+            )
             contact = None
             for email in emails:
                 contact = hubspot.find_contact(email=email)
                 if contact:
                     break
             stage = _stage_from_mail(subject, sender, f"{snippet} {body}")
+            ev_email = cal.get("email") or (emails[0] if emails else "")
             create_new = (not contact) and is_josh_meeting(subject, cal.get("event_type", "")) and stage in {
                 STAGE["discovery_scheduled"],
                 STAGE["no_show"],
             }
+            if create_new and (not ev_email or is_system_address(ev_email)):
+                report.junk_blocked.append(f"gmail {subject[:80]} (system address)")
+                continue
             if not contact and not create_new:
                 report.junk_blocked.append(f"gmail {subject[:80]} (not in CRM)")
                 continue
@@ -194,7 +202,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                     source="gmail",
                     external_id=mid,
                     occurred_at=datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc),
-                    email=cal.get("email") or props.get("email") or (emails[0] if emails else ""),
+                    email=ev_email or props.get("email") or "",
                     first_name=cal.get("first_name") or props.get("firstname") or "",
                     last_name=cal.get("last_name") or props.get("lastname") or "",
                     name=cal.get("name") or "",
@@ -216,12 +224,45 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
 
 
 def is_system_address(email: str) -> bool:
-    low = (email or "").lower()
+    low = (email or "").strip().lower()
     if not low or low in JOSH_EMAILS:
         return True
     if any(h in low for h in SYSTEM_EMAIL_HINTS) or any(h in low for h in NOREPLY_HINTS):
         return True
+    local, _, domain = low.partition("@")
+    if domain in {"calendar.google.com", "googlemail.com"}:
+        return True
+    if domain == "google.com" and any(
+        tok in local for tok in ("calendar", "noreply", "no-reply", "notification", "invite")
+    ):
+        return True
+    if local.startswith("noreply") or local.startswith("no-reply") or local.startswith("donotreply"):
+        return True
+    if "calendar-notification" in local:
+        return True
     return False
+
+
+def is_junk_crm_email(email: str) -> bool:
+    """System/noreply calendar addresses that must never become HubSpot contacts.
+
+    Empty email is not junk (Cube/phone-only meetings still need a path).
+    """
+    low = (email or "").strip().lower()
+    if not low:
+        return False
+    return is_system_address(low)
+
+
+def real_person_emails(*groups: list[str] | tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for group in groups:
+        for raw in group or []:
+            email = (raw or "").strip().lower()
+            if not email or is_system_address(email) or email in out:
+                continue
+            out.append(email)
+    return out
 
 
 def parse_person_header(header: str) -> tuple[str, str, str]:
