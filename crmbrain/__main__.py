@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 
 from crmbrain.config import now_utc
-from crmbrain.cycle import run
+from crmbrain.cycle import cycle_status, run
 
 FULL_CYCLE_HOURS_UTC = {12, 22}
 
@@ -21,7 +21,7 @@ def main() -> int:
         print("usage: python -m crmbrain [auto|cycle|briefs]")
         return 2
     print(report.summary_text())
-    return 0 if not report.errors else 1
+    return 0 if cycle_status(report) == "ok" else 1
 
 
 if __name__ == "__main__":

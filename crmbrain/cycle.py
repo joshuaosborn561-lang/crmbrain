@@ -285,6 +285,30 @@ def integration_status(settings: Settings) -> list[str]:
     return [f"{name}: {'present' if ok else 'missing'}" for name, ok in checks]
 
 
+def _recovered_rate_limit_note(err: str) -> bool:
+    """True only for notes about 429/503 that later succeeded — not skipped data."""
+    lower = err.lower()
+    if "429" not in lower and "too many requests" not in lower and "503" not in lower:
+        return False
+    return any(
+        token in lower
+        for token in ("recovered", "succeeded after", "retried ok", "retry succeeded")
+    )
+
+
+def cycle_status(report: CycleReport) -> str:
+    """ok unless data was skipped after exhausted retries or another hard error.
+
+    Transient Smartlead 429/503 that later succeeded must not flip the cycle to
+    partial. Those belong in logs, not report.errors; recovered notes are ignored.
+    """
+    for err in report.errors:
+        if _recovered_rate_limit_note(err):
+            continue
+        return "partial"
+    return "ok"
+
+
 def _flush_memory_errors(memory: Memory, report: CycleReport) -> None:
     for msg in memory.drain_errors():
         if msg not in report.errors:
@@ -338,7 +362,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         else:
             report.errors.append("Gmail missing, cannot send briefs")
         _flush_memory_errors(memory, report)
-        memory.finish_run(run_id, "ok" if not report.errors else "partial", report.as_dict())
+        memory.finish_run(run_id, cycle_status(report), report.as_dict())
         _flush_memory_errors(memory, report)
         return report
 
@@ -352,7 +376,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
     except Exception as exc:
         report.errors.append(f"fireflies: {exc}")
     try:
-        engagements += smartlead.scan(settings)
+        engagements += smartlead.scan(settings, errors=report.errors)
     except Exception as exc:
         report.errors.append(f"smartlead: {exc}")
     if hey:
@@ -428,6 +452,6 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
 
     _fire_ticker(settings, memory, report)
     _flush_memory_errors(memory, report)
-    memory.finish_run(run_id, "ok" if not report.errors else "partial", report.as_dict())
+    memory.finish_run(run_id, cycle_status(report), report.as_dict())
     _flush_memory_errors(memory, report)
     return report
