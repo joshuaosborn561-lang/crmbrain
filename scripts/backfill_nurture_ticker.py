@@ -121,7 +121,7 @@ def collect_smartlead(settings: Settings) -> tuple[list[TickerCandidate], list[s
     if not settings.smartlead_key:
         return [], errors
     try:
-        events = smartlead.scan(settings)
+        events = smartlead.scan(settings, errors=errors)
     except Exception as exc:
         errors.append(f"smartlead: {exc}")
         return [], errors
