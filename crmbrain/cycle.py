@@ -56,7 +56,12 @@ def _handle_engagement(
         return
 
     already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
-    if not policy.may_write_hubspot(ev, already is not None):
+    meeting_evidence = None
+    if already and not policy.may_create_hubspot_contact(ev):
+        meeting_evidence = prune.has_live_meeting_evidence(hs, already)
+    if not policy.may_write_hubspot(ev, already is not None, meeting_evidence=meeting_evidence):
+        if already and meeting_evidence is False:
+            prune.archive_unengaged_contact(hs, already, report, "no meeting")
         if memory.already_processed(ev.source, ev.external_id):
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
             return
@@ -242,7 +247,11 @@ def _backfill_hubspot_invites(
     report: CycleReport,
     limit: int = 25,
 ) -> None:
-    """HubSpot is engaged people. Queue anyone not already sent to HeyReach."""
+    """HubSpot is engaged people. Queue anyone not already sent to HeyReach.
+
+    `iter_contacts` retries HubSpot read timeouts so a one-off 30s stall does
+    not mark the cycle partial when the retry succeeds.
+    """
     queued = 0
     for row in hs.iter_contacts(
         ["email", "firstname", "lastname", "phone", "company", "jobtitle", "hs_linkedin_url"]

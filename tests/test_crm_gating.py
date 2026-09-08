@@ -3,11 +3,13 @@ from io import BytesIO
 from pathlib import Path
 import zipfile
 
+import requests
+
 from crmbrain.config import STAGE, Settings, is_personal
-from crmbrain.cycle import _handle_engagement
+from crmbrain.cycle import _backfill_hubspot_invites, _handle_engagement, cycle_status
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
-from crmbrain.hubspot import MEETING_ASSOCIATION_OBJECTS
+from crmbrain.hubspot import MEETING_ASSOCIATION_OBJECTS, HubSpot, MAX_READ_RETRIES
 from crmbrain.intelligence import extract, heuristic_extract
 from crmbrain.policy import (
     choose_deal_action,
@@ -223,6 +225,8 @@ def test_smartlead_without_meeting_skips_hubspot(tmp_path):
     )
     assert not may_create_hubspot_contact(ev)
     assert not may_write_hubspot(ev, already_in_crm=False)
+    assert not may_write_hubspot(ev, already_in_crm=True, meeting_evidence=False)
+    assert may_write_hubspot(ev, already_in_crm=True, meeting_evidence=True)
     assert resolve_stage(ev) == ""
     hs, memory, report = _handle(tmp_path, ev)
     assert hs.writes == []
@@ -555,6 +559,7 @@ def test_calendar_system_email_never_upserts_hubspot(tmp_path):
         "noreply@calendly.com",
         "calendar-noreply@google.com",
         "noreply@google.com",
+        "fred@fireflies.ai",
     ):
         ev = Engagement(
             source="calendly",
@@ -788,6 +793,8 @@ def test_prune_does_not_treat_email_association_as_meeting():
     ids = {d["id"] for d in hs.deals}
     assert "email-junk" not in ids
     assert any("Junk" in x for x in report.deals_pruned)
+    assert not any(c["id"] == "1" for c in hs.contacts)
+    assert any(w[0] == "archive_contact" and w[1] == "1" for w in hs.writes)
     assert not any(STAGE["discovery_scheduled"] in str(w) for w in hs.writes if w[0] == "move_deal")
 
 
@@ -824,6 +831,10 @@ def test_prune_archives_replied_without_meeting_and_promotes_held():
     assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
     assert hs.deals[0]["properties"]["dealname"] == "Held"
     assert any("Junk" in x for x in report.deals_pruned)
+    assert not any(c["id"] == "1" for c in hs.contacts)
+    assert any(c["id"] == "2" for c in hs.contacts)
+    assert any(w[0] == "archive_contact" and w[1] == "1" for w in hs.writes)
+    assert not any(w[0] == "archive_contact" and w[1] == "2" for w in hs.writes)
 
 
 def test_prune_skips_contacts_with_meeting_evidence():
@@ -839,3 +850,161 @@ def test_prune_skips_contacts_with_meeting_evidence():
     assert "blank" not in ids
     assert "meet" in ids
     assert "blank" in report.contacts_pruned
+
+
+def test_smartlead_interested_leftover_does_not_leave_hubspot_contact(tmp_path):
+    ev = Engagement(
+        source="smartlead",
+        external_id="sl-mary",
+        email="mary.nen@jobtracks.com",
+        first_name="Mary",
+        last_name="Nen",
+        company="JobTracks",
+        summary="Positive SmartLead reply (Interested) in SG HVAC",
+    )
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "mary-1",
+                "properties": {
+                    "email": "mary.nen@jobtracks.com",
+                    "firstname": "Mary",
+                    "lastname": "Nen",
+                    "company": "JobTracks",
+                    "crm_source": "smartlead",
+                },
+            }
+        ]
+    )
+    hs.deals.append(
+        {
+            "id": "mary-deal",
+            "contact_id": "mary-1",
+            "properties": {"dealstage": STAGE["replied"], "dealname": "Mary Nen - JobTracks"},
+        }
+    )
+    hs, memory, report = _handle(tmp_path, ev, hs=hs)
+    assert not any(w[0] == "upsert_contact" for w in hs.writes)
+    assert any(w[0] == "archive_contact" and w[1] == "mary-1" for w in hs.writes)
+    assert not any(c["id"] == "mary-1" for c in hs.contacts)
+    assert any("never_booked" in t for t in report.ticker_enrolled)
+    assert any("no meeting, skip HubSpot" in s for s in report.skipped)
+    assert "smartlead:sl-mary" in memory._local["processed"]
+
+
+def test_prune_junk_deal_archives_junk_contact():
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "fred",
+                "properties": {
+                    "email": "fred@fireflies.ai",
+                    "firstname": "Fireflies",
+                    "lastname": "Notetaker",
+                    "crm_source": "fireflies",
+                },
+            }
+        ]
+    )
+    hs.deals = [
+        {
+            "id": "fred-deal",
+            "contact_id": "fred",
+            "properties": {"dealstage": STAGE["replied"], "dealname": "Fireflies Notetaker"},
+        }
+    ]
+    report = CycleReport()
+    prune_replied_deals(hs, report)
+    assert hs.deals == []
+    assert hs.contacts == []
+    assert any("Fireflies" in x for x in report.deals_pruned)
+    assert any("fred@fireflies.ai" in x for x in report.contacts_pruned)
+    assert any(w[0] == "archive_deal" and w[1] == "fred-deal" for w in hs.writes)
+    assert any(w[0] == "archive_contact" and w[1] == "fred" for w in hs.writes)
+
+
+def test_prune_skips_junk_contact_when_other_open_deal_exists():
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "keep",
+                "properties": {
+                    "email": "pat@acme.com",
+                    "firstname": "Pat",
+                    "crm_source": "smartlead",
+                },
+            }
+        ]
+    )
+    hs.deals = [
+        {
+            "id": "junk-deal",
+            "contact_id": "keep",
+            "properties": {"dealstage": STAGE["replied"], "dealname": "Pat - Replied"},
+        },
+        {
+            "id": "other-deal",
+            "contact_id": "keep",
+            "properties": {"dealstage": STAGE["replied"], "dealname": "Pat other"},
+        },
+    ]
+    report = CycleReport()
+    prune_replied_deals(hs, report, limit=1)
+    assert any(w[0] == "archive_deal" for w in hs.writes)
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
+    assert any(c["id"] == "keep" for c in hs.contacts)
+
+
+class _EmptyListResp:
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"results": [], "paging": {}}
+
+
+def test_heyreach_backfill_retries_hubspot_read_timeout(tmp_path, monkeypatch):
+    settings = make_settings(heyreach_key="k")
+    hs = HubSpot(settings)
+    slept = []
+    monkeypatch.setattr("crmbrain.hubspot._sleep", slept.append)
+    calls = {"n": 0}
+
+    def fake_request(method, url, timeout=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.ReadTimeout(
+                "HTTPSConnectionPool(host='api.hubapi.com', port=443): Read timed out. (read timeout=30)"
+            )
+        return _EmptyListResp()
+
+    hs.session.request = fake_request
+    report = CycleReport()
+    memory = Memory(settings, data_dir=tmp_path)
+    _backfill_hubspot_invites(settings, hs, object(), memory, report)
+    assert calls["n"] == 2
+    assert slept == [1.0]
+    assert report.errors == []
+    assert cycle_status(report) == "ok"
+
+
+def test_hubspot_read_timeout_exhausted_still_raises(monkeypatch):
+    hs = HubSpot(make_settings())
+    monkeypatch.setattr("crmbrain.hubspot._sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def always_timeout(method, url, timeout=None, **kwargs):
+        calls["n"] += 1
+        raise requests.exceptions.ReadTimeout(
+            "HTTPSConnectionPool(host='api.hubapi.com', port=443): Read timed out. (read timeout=30)"
+        )
+
+    hs.session.request = always_timeout
+    try:
+        list(hs.iter_contacts(["email"]))
+        raise AssertionError("expected ReadTimeout")
+    except requests.exceptions.ReadTimeout as exc:
+        assert "api.hubapi.com" in str(exc)
+    assert calls["n"] == MAX_READ_RETRIES + 1

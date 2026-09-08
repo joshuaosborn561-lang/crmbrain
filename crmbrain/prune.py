@@ -1,4 +1,10 @@
-"""Each cycle: archive Replied junk with no meeting evidence; soft-archive blanks."""
+"""Each cycle: archive Replied junk with no meeting evidence; soft-archive blanks.
+
+When a junk deal is pruned, also archive the associated contact if it has no
+meeting held/scheduled evidence and is not otherwise engaged (no other open
+deals). System addresses (Fireflies Notetaker, calendar bots) never count as
+meeting evidence.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,7 @@ from crmbrain.policy import (
     is_blank_contact,
     promote_replied_stage,
 )
+from crmbrain.sources.gmail_scan import is_junk_crm_email
 
 DEAL_LIMIT = 40
 CONTACT_LIMIT = 20
@@ -23,12 +30,60 @@ def run(hs: HubSpot, report: CycleReport) -> None:
 
 
 def _meeting_evidence(hs: HubSpot, contact: dict, deals: list[dict] | None = None) -> bool:
+    email = ((contact.get("properties") or {}).get("email") or "")
+    if is_junk_crm_email(email):
+        return False
     if contact_has_meeting_evidence(contact, deals):
         return True
     cid = contact.get("id")
     if cid and hs.contact_has_meetings(str(cid)):
         return True
     return False
+
+
+def has_live_meeting_evidence(hs: HubSpot, contact: dict, deals: list[dict] | None = None) -> bool:
+    """True when the contact may stay in HubSpot (held or scheduled meeting)."""
+    if deals is None and contact.get("id"):
+        deals = hs.open_deals_for_contact(contact["id"])
+    return _meeting_evidence(hs, contact, deals)
+
+
+def _contact_label(contact: dict) -> str:
+    props = contact.get("properties") or {}
+    return (
+        (props.get("email") or "").strip()
+        or f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+        or str(contact.get("id") or "")
+    )
+
+
+def archive_unengaged_contact(hs: HubSpot, contact: dict, report: CycleReport, reason: str) -> None:
+    cid = contact.get("id")
+    if not cid:
+        return
+    try:
+        hs.archive_contact(str(cid))
+    except Exception as exc:
+        report.errors.append(f"prune contact {cid}: {exc}")
+        return
+    report.contacts_pruned.append(f"{_contact_label(contact)} ({reason})")
+
+
+def _archive_deal_contact_if_junk(
+    hs: HubSpot, contact: dict, deal_id: str, report: CycleReport
+) -> None:
+    """After a junk deal is archived, drop the contact if nothing else keeps it."""
+    cid = contact.get("id")
+    if not cid:
+        return
+    remaining = [
+        d for d in hs.open_deals_for_contact(cid) if str(d.get("id") or "") != str(deal_id)
+    ]
+    if remaining:
+        return
+    if _meeting_evidence(hs, contact, remaining):
+        return
+    archive_unengaged_contact(hs, contact, report, "junk deal, no meeting")
 
 
 def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMIT) -> None:
@@ -78,6 +133,8 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
             continue
         hs.archive_deal(deal_id)
         report.deals_pruned.append(name)
+        for contact in contacts:
+            _archive_deal_contact_if_junk(hs, contact, deal_id, report)
 
 
 def prune_blank_contacts(hs: HubSpot, report: CycleReport, limit: int = CONTACT_LIMIT) -> None:

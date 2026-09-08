@@ -164,8 +164,23 @@ def may_create_hubspot_contact(ev: Engagement) -> bool:
     return False
 
 
-def may_write_hubspot(ev: Engagement, already_in_crm: bool) -> bool:
-    return already_in_crm or may_create_hubspot_contact(ev)
+def may_write_hubspot(
+    ev: Engagement, already_in_crm: bool, *, meeting_evidence: bool | None = None
+) -> bool:
+    """Write only for a meeting create, or an existing meeting-engaged contact.
+
+    `already_in_crm` alone is not enough. A leftover Smartlead / HeyReach / RVM
+    contact without held or scheduled meeting evidence must not be kept.
+    When `meeting_evidence` is omitted, callers that already know the contact
+    is meeting-engaged (notes backfill) keep the previous already-in-CRM path.
+    """
+    if may_create_hubspot_contact(ev):
+        return True
+    if not already_in_crm:
+        return False
+    if meeting_evidence is False:
+        return False
+    return True
 
 
 def should_enroll_ticker_without_hubspot(ev: Engagement) -> bool:

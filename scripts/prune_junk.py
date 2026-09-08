@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Archive Appointment Scheduled junk deals with no meeting evidence.
 
+Also archives associated junk contacts that have no meeting held/scheduled
+evidence and are not otherwise engaged.
+
+
 Invoked from the daily cycle. Safe to run by hand:
 
     python scripts/prune_junk.py

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 import requests
@@ -7,6 +9,15 @@ import requests
 from crmbrain.config import STAGE, Settings, digits_phone
 from crmbrain.models import Engagement
 from crmbrain import intelligence, policy
+
+logger = logging.getLogger(__name__)
+
+# Listing contacts for HeyReach backfill can exceed 30s; retry transient reads.
+READ_TIMEOUT = 45
+WRITE_TIMEOUT = 30
+MAX_READ_RETRIES = 3
+BACKOFF_BASE = 1.0
+BACKOFF_CAP = 16.0
 
 # HubSpot meeting engagements only. Associated emails are NOT meetings.
 MEETING_ASSOCIATION_OBJECTS = ("meetings",)
@@ -96,12 +107,47 @@ class HubSpot:
             }
         )
 
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        retry: bool = False,
+        timeout: int | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """HubSpot HTTP. Reads retry timeouts with backoff so one 30s stall is not fatal."""
+        url = path if path.startswith("http") else f"{self.base}{path}"
+        timeout = READ_TIMEOUT if timeout is None else timeout
+        attempts = MAX_READ_RETRIES + 1 if retry else 1
+        last_exc: BaseException | None = None
+        for attempt in range(attempts):
+            try:
+                return self.session.request(method, url, timeout=timeout, **kwargs)
+            except requests.Timeout as exc:
+                last_exc = exc
+                if attempt + 1 >= attempts:
+                    raise
+                delay = min(BACKOFF_CAP, BACKOFF_BASE * (2**attempt))
+                logger.warning(
+                    "hubspot %s %s timed out, retry %s/%s in %.2fs",
+                    method,
+                    path,
+                    attempt + 1,
+                    MAX_READ_RETRIES,
+                    delay,
+                )
+                _sleep(delay)
+        raise last_exc or RuntimeError("hubspot request failed")
+
     def ensure_properties(self) -> None:
         for prop in CONTACT_PROPS:
-            resp = self.session.get(f"{self.base}/crm/v3/properties/contacts/{prop['name']}", timeout=20)
+            resp = self._request(
+                "GET", f"/crm/v3/properties/contacts/{prop['name']}", retry=True, timeout=20
+            )
             if resp.status_code == 404:
-                created = self.session.post(
-                    f"{self.base}/crm/v3/properties/contacts", json=prop, timeout=20
+                created = self._request(
+                    "POST", "/crm/v3/properties/contacts", json=prop, timeout=WRITE_TIMEOUT
                 )
                 if created.status_code >= 400:
                     raise RuntimeError(f"create prop {prop['name']}: {created.text[:300]}")
@@ -112,8 +158,12 @@ class HubSpot:
             "properties": properties,
             "limit": 10,
         }
-        resp = self.session.post(
-            f"{self.base}/crm/v3/objects/{object_name}/search", json=payload, timeout=30
+        resp = self._request(
+            "POST",
+            f"/crm/v3/objects/{object_name}/search",
+            json=payload,
+            retry=True,
+            timeout=READ_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.json().get("results", [])
@@ -166,7 +216,13 @@ class HubSpot:
             params: dict[str, Any] = {"limit": 100, "properties": ",".join(properties)}
             if after:
                 params["after"] = after
-            resp = self.session.get(f"{self.base}/crm/v3/objects/contacts", params=params, timeout=30)
+            resp = self._request(
+                "GET",
+                "/crm/v3/objects/contacts",
+                params=params,
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
             resp.raise_for_status()
             data = resp.json()
             for row in data.get("results") or []:
@@ -196,15 +252,16 @@ class HubSpot:
             existing_source = ((existing.get("properties") or {}).get("crm_source") or "").lower()
             if existing_source in policy.MEETING_CRM_SOURCES and ev.source not in policy.MEETING_CRM_SOURCES:
                 props.pop("crm_source", None)
-            resp = self.session.patch(
-                f"{self.base}/crm/v3/objects/contacts/{existing['id']}",
+            resp = self._request(
+                "PATCH",
+                f"/crm/v3/objects/contacts/{existing['id']}",
                 json={"properties": props},
-                timeout=30,
+                timeout=WRITE_TIMEOUT,
             )
             resp.raise_for_status()
             return resp.json()
-        resp = self.session.post(
-            f"{self.base}/crm/v3/objects/contacts", json={"properties": props}, timeout=30
+        resp = self._request(
+            "POST", "/crm/v3/objects/contacts", json={"properties": props}, timeout=WRITE_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
@@ -219,7 +276,7 @@ class HubSpot:
                 }
             ],
         }
-        resp = self.session.post(f"{self.base}/crm/v3/objects/notes", json=payload, timeout=30)
+        resp = self._request("POST", "/crm/v3/objects/notes", json=payload, timeout=WRITE_TIMEOUT)
         if resp.status_code >= 400:
             raise RuntimeError(f"note: {resp.text[:300]}")
 
@@ -227,17 +284,20 @@ class HubSpot:
         properties = {k: v for k, v in properties.items() if v}
         if not properties:
             return
-        resp = self.session.patch(
-            f"{self.base}/crm/v3/objects/contacts/{contact_id}",
+        resp = self._request(
+            "PATCH",
+            f"/crm/v3/objects/contacts/{contact_id}",
             json={"properties": properties},
-            timeout=30,
+            timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
 
     def open_deals_for_contact(self, contact_id: str) -> list[dict]:
-        resp = self.session.get(
-            f"{self.base}/crm/v4/objects/contacts/{contact_id}/associations/deals",
-            timeout=30,
+        resp = self._request(
+            "GET",
+            f"/crm/v4/objects/contacts/{contact_id}/associations/deals",
+            retry=True,
+            timeout=READ_TIMEOUT,
         )
         if resp.status_code >= 400:
             return []
@@ -246,9 +306,11 @@ class HubSpot:
         for deal_id in ids:
             if not deal_id:
                 continue
-            d = self.session.get(
-                f"{self.base}/crm/v3/objects/deals/{deal_id}",
+            d = self._request(
+                "GET",
+                f"/crm/v3/objects/deals/{deal_id}",
                 params={"properties": "dealname,dealstage,pipeline,amount"},
+                retry=True,
                 timeout=20,
             )
             if d.ok:
@@ -304,7 +366,7 @@ class HubSpot:
                 }
             ],
         }
-        resp = self.session.post(f"{self.base}/crm/v3/objects/deals", json=payload, timeout=30)
+        resp = self._request("POST", "/crm/v3/objects/deals", json=payload, timeout=WRITE_TIMEOUT)
         resp.raise_for_status()
         created = resp.json()
         if amount:
@@ -324,10 +386,11 @@ class HubSpot:
         properties = {k: v for k, v in properties.items() if v}
         if not properties:
             return
-        resp = self.session.patch(
-            f"{self.base}/crm/v3/objects/deals/{deal_id}",
+        resp = self._request(
+            "PATCH",
+            f"/crm/v3/objects/deals/{deal_id}",
             json={"properties": properties},
-            timeout=30,
+            timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
 
@@ -335,10 +398,11 @@ class HubSpot:
         props = {"dealstage": stage}
         if dealname:
             props["dealname"] = dealname
-        resp = self.session.patch(
-            f"{self.base}/crm/v3/objects/deals/{deal_id}",
+        resp = self._request(
+            "PATCH",
+            f"/crm/v3/objects/deals/{deal_id}",
             json={"properties": props},
-            timeout=30,
+            timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
 
@@ -359,14 +423,24 @@ class HubSpot:
                 }
                 if after:
                     payload["after"] = after
-                resp = self.session.post(
-                    f"{self.base}/crm/v3/objects/deals/search", json=payload, timeout=30
+                resp = self._request(
+                    "POST",
+                    "/crm/v3/objects/deals/search",
+                    json=payload,
+                    retry=True,
+                    timeout=READ_TIMEOUT,
                 )
             else:
                 params: dict[str, Any] = {"limit": 100, "properties": ",".join(properties)}
                 if after:
                     params["after"] = after
-                resp = self.session.get(f"{self.base}/crm/v3/objects/deals", params=params, timeout=30)
+                resp = self._request(
+                    "GET",
+                    "/crm/v3/objects/deals",
+                    params=params,
+                    retry=True,
+                    timeout=READ_TIMEOUT,
+                )
             resp.raise_for_status()
             data = resp.json()
             for row in data.get("results") or []:
@@ -376,8 +450,10 @@ class HubSpot:
                 break
 
     def contacts_for_deal(self, deal_id: str) -> list[dict]:
-        resp = self.session.get(
-            f"{self.base}/crm/v4/objects/deals/{deal_id}/associations/contacts",
+        resp = self._request(
+            "GET",
+            f"/crm/v4/objects/deals/{deal_id}/associations/contacts",
+            retry=True,
             timeout=20,
         )
         if resp.status_code >= 400:
@@ -387,11 +463,13 @@ class HubSpot:
             cid = row.get("toObjectId") or row.get("id")
             if not cid:
                 continue
-            c = self.session.get(
-                f"{self.base}/crm/v3/objects/contacts/{cid}",
+            c = self._request(
+                "GET",
+                f"/crm/v3/objects/contacts/{cid}",
                 params={
                     "properties": "email,firstname,lastname,phone,company,crm_source,hs_linkedin_url"
                 },
+                retry=True,
                 timeout=20,
             )
             if c.ok:
@@ -401,8 +479,10 @@ class HubSpot:
     def contact_has_meetings(self, contact_id: str) -> bool:
         """True only for real HubSpot meeting engagements. Emails do not count."""
         for object_name in MEETING_ASSOCIATION_OBJECTS:
-            resp = self.session.get(
-                f"{self.base}/crm/v4/objects/contacts/{contact_id}/associations/{object_name}",
+            resp = self._request(
+                "GET",
+                f"/crm/v4/objects/contacts/{contact_id}/associations/{object_name}",
+                retry=True,
                 timeout=20,
             )
             if resp.status_code >= 400:
@@ -412,12 +492,19 @@ class HubSpot:
         return False
 
     def archive_deal(self, deal_id: str) -> None:
-        resp = self.session.delete(f"{self.base}/crm/v3/objects/deals/{deal_id}", timeout=20)
+        resp = self._request("DELETE", f"/crm/v3/objects/deals/{deal_id}", timeout=20)
         if resp.status_code >= 400:
             # Fallback: closed-lost so junk leaves the open forecast.
             self.move_deal(deal_id, STAGE["closed_lost"], evidence="prune:archive-fallback")
 
     def archive_contact(self, contact_id: str) -> None:
-        resp = self.session.delete(f"{self.base}/crm/v3/objects/contacts/{contact_id}", timeout=20)
+        resp = self._request("DELETE", f"/crm/v3/objects/contacts/{contact_id}", timeout=20)
+        if resp.status_code == 404:
+            return
         if resp.status_code >= 400:
             raise RuntimeError(f"archive contact {contact_id}: {resp.text[:200]}")
+
+
+def _sleep(seconds: float) -> None:
+    if seconds > 0:
+        time.sleep(seconds)
