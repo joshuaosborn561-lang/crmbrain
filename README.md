@@ -49,10 +49,13 @@ Fireflies and Cube `*-transcript.docx` always run extract → `merge_contact_pro
 Each cycle also **prunes** junk:
 
 - Archives (or closed-lost fallback) deals stuck in Appointment Scheduled (`appointmentscheduled`) with no Calendly / Fireflies / GCal meeting evidence
+- When that junk deal is pruned, also archives the associated contact if it has no meeting held/scheduled evidence and no other open deals (Fireflies Notetaker / leftover Smartlead Interested)
+- Smartlead Interested / HeyReach / RVM never create a HubSpot contact. If a leftover contact is already there without meeting evidence, the cycle archives it instead of upserting.
 - Does **not** treat a HubSpot email association as a meeting (that was promoting Replied junk to Discovery Scheduled)
 - Cleans leftover `Name - Replied` deal titles when the stage is corrected
 - Does not delete contacts that have meeting evidence
 - Soft-archives blank / no-identity contacts when that is safe
+- HubSpot reads (including HeyReach backfill `iter_contacts`) retry timeouts with backoff and a 45s read timeout so one `api.hubapi.com` stall does not leave the cycle `partial`
 
 `circle back` / `next quarter` is a ticker reason only. It does not open a Nurture deal or move Discovery Completed (or later) backward.
 

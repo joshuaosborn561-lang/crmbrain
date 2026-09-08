@@ -6,6 +6,7 @@ import requests
 
 from crmbrain.config import Settings, is_internal_meeting, lookback_start
 from crmbrain.models import Engagement
+from crmbrain.sources.gmail_scan import is_junk_crm_email
 
 QUERY = """
 query Transcripts($limit: Int) {
@@ -73,8 +74,16 @@ def scan(settings: Settings, limit: int = 50) -> list[Engagement]:
             (s.get("text") or s.get("raw_text") or "") for s in sentences
         )[:20000]
         summary = ((detail.get("summary") or {}).get("overview") or "")[:2000]
-        emails = [p for p in participants if "@" in p and "salesglider" not in p.lower()]
+        emails = [
+            p
+            for p in participants
+            if "@" in str(p)
+            and "salesglider" not in str(p).lower()
+            and not is_junk_crm_email(str(p))
+        ]
         name = title.replace(" and Joshua Osborn", "").replace("/Josh Osborn", "").strip()
+        if not emails and "notetaker" in name.lower():
+            continue
         out.append(
             Engagement(
                 source="fireflies",

@@ -24,6 +24,7 @@ SYSTEM_EMAIL_HINTS = (
     "zoom.us",
     "stripe.com",
     "intuit.com",
+    "fireflies.ai",
 )
 NOREPLY_HINTS = (
     "noreply",
