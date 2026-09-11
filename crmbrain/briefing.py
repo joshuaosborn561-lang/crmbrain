@@ -42,12 +42,22 @@ def format_phone(value: str | None) -> str:
 
 
 def default_offer(company: str = "", title: str = "", pain: str = "") -> str:
+    """Internal brief prompt for Josh. Meeting guarantee, not a free POC/test campaign."""
     blob = f"{company} {title} {pain}".lower()
     if any(w in blob for w in ("health", "medtech", "medical", "insurance", "device", "pharma")):
-        return "Loom on a healthcare or MedTech owner list, or Airpods on a tight test campaign."
+        return (
+            "Guarantee meetings or keep working until they hit the number. "
+            "Loom on a healthcare or MedTech owner list, or AirPods for a 15-min chat."
+        )
     if any(w in blob for w in ("recruit", "search", "staffing", "talent")):
-        return "Loom on an owner list in their niche, or Airpods on a tight test campaign."
-    return "Loom on their exact owner list, or Airpods on a tight test campaign."
+        return (
+            "Guarantee meetings or keep working until they hit the number. "
+            "Loom on an owner list in their niche, or AirPods for a 15-min chat."
+        )
+    return (
+        "Guarantee meetings or keep working until they hit the number. "
+        "Loom on their exact owner list, or AirPods for a 15-min chat."
+    )
 
 
 def render(ev: Engagement, facts: dict | None = None, contact: dict | None = None) -> str:

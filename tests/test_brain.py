@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta
 
-from crmbrain.briefing import due_to_send, format_phone, format_when, matches_sent_brief, render
+from crmbrain.briefing import (
+    default_offer,
+    due_to_send,
+    format_phone,
+    format_when,
+    matches_sent_brief,
+    render,
+)
 from crmbrain.enrichment import _apply_row, _rows_from_result
 from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
@@ -30,7 +37,13 @@ from crmbrain.sources.gmail_scan import (
     parse_meeting_at,
     real_person_emails,
 )
-from crmbrain.ticker import draft_email, infer_industry
+from crmbrain.ticker import (
+    MEETING_GUARANTEE,
+    VERTICALS,
+    draft_email,
+    has_free_poc_offer,
+    infer_industry,
+)
 
 
 def test_clean_drive_id():
@@ -175,6 +188,10 @@ def test_one_brief_two_hours_before():
     assert "Why you are talking" in body
     assert "Thu Sep 3 2026 1:00pm CDT" in body
     assert "Offer that fits" in body
+    assert "guarantee" in body.lower()
+    assert "test campaign" not in body.lower()
+    assert "free 10k" not in body.lower()
+    assert "proof of concept" not in body.lower()
     assert format_phone("+1 (469) 701-1712") == "4697011712"
     assert "1:00pm CDT" in format_when(meeting)
     sent = render(ev)
@@ -250,6 +267,8 @@ def test_nurture_roofing_uses_roi_case_study():
     assert "$100K" in body
     assert "14+" in body
     assert "AirPods" in body
+    assert MEETING_GUARANTEE in body
+    assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
     assert "Quick bump" not in subject
     assert infer_industry("Kelly Roofing")["key"] == "roofing"
@@ -271,7 +290,8 @@ def test_nurture_hvac_from_company_or_campaign():
     assert "what we're doing in HVAC" in body
     assert "HVAC clients" in body
     assert "$100K" in body
-    assert "free 10K" in body
+    assert MEETING_GUARANTEE in body
+    assert not has_free_poc_offer(body)
     assert infer_industry("The Chill Brothers", extras={"vertical": "HVAC"})["key"] == "hvac"
 
 
@@ -283,8 +303,9 @@ def test_nurture_generalized_when_industry_unknown():
     assert "$100K" in body and "first 3 months" in body
     assert "14+" in body
     assert "Loom" in body
-    assert "10K" in body
+    assert MEETING_GUARANTEE in body
     assert "AirPods" in body
+    assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
     assert "HVAC" not in body
     assert "roofing" not in body.lower()
@@ -298,3 +319,56 @@ def test_nurture_industry_from_title_and_explicit():
     subject, body = draft_email("Rob", "Northside GC", extras={"industry": "construction"})
     assert subject == "Construction update"
     assert "construction" in body.lower()
+    assert MEETING_GUARANTEE in body
+    assert not has_free_poc_offer(body)
+
+
+def test_has_free_poc_offer_detects_old_copy():
+    assert has_free_poc_offer("Happy to run a free 10K lead campaign.")
+    assert has_free_poc_offer("We'll do a free POC this month.")
+    assert has_free_poc_offer("Need a proof of concept?")
+    assert has_free_poc_offer("I'll send a free test list.")
+    assert not has_free_poc_offer(MEETING_GUARANTEE)
+    assert not has_free_poc_offer("AirPods just for chatting 15 minutes.")
+
+
+def test_nurture_drafts_never_pitch_free_poc():
+    samples = [
+        draft_email("Jackie Darkazalli", "Kelly Roofing", "kicked_can"),
+        draft_email("Joel Stewart", "The Chill Brothers", "never_booked"),
+        draft_email(
+            "Joel Stewart",
+            "The Chill Brothers",
+            "never_booked",
+            extras={"campaign_name": "SG HVAC owners"},
+        ),
+        draft_email("Pat Lee", "Acme Holdings", "never_booked"),
+        draft_email("Pat Lee", "Acme Holdings", "no_show"),
+        draft_email("Rob", "Northside GC", extras={"industry": "construction"}),
+    ]
+    for row in VERTICALS:
+        samples.append(draft_email("Alex", f"Sample {row['label']}", extras={"industry": row["key"]}))
+    for subject, body in samples:
+        assert MEETING_GUARANTEE in body
+        assert "keep working" in body.lower()
+        assert not has_free_poc_offer(subject)
+        assert not has_free_poc_offer(body)
+        assert "free 10k" not in body.lower()
+        assert "proof of concept" not in body.lower()
+        assert "test list" not in body.lower()
+        assert "$2M" in body
+        assert "$100K" in body
+        assert "14+" in body
+        assert "Josh Osborn" in body
+
+
+def test_default_offer_is_meeting_guarantee_not_free_poc():
+    healthcare = default_offer("GRN Plano", "President", "healthcare recruiting")
+    staffing = default_offer("Acme Staffing", "Recruiter", "")
+    general = default_offer("Acme Holdings", "Owner", "")
+    for offer in (healthcare, staffing, general):
+        assert "guarantee" in offer.lower()
+        assert "meeting" in offer.lower()
+        assert "test campaign" not in offer.lower()
+        assert "test list" not in offer.lower()
+        assert not has_free_poc_offer(offer)

@@ -35,7 +35,7 @@ Rules:
 - amount_hint / deal_amount: USD number only when THIS deal's price was clearly stated
   (monthly retainer, proposal dollar amount, package). Examples: "3000", "8500".
   Empty if unsure. Never invent. Never use Josh's case-study stats
-  ($2M pipeline, $100K closed, free 10K lead campaign).
+  ($2M pipeline, $100K closed, meeting guarantee).
 - No dashes in gift_ideas.
 """
 
@@ -47,6 +47,8 @@ _PITCH_HINTS = (
     "lead campaign",
     "10k lead",
     "free 10k",
+    "guarantee meetings",
+    "keep working until",
     "replies per month",
     "airpods",
     "case study",

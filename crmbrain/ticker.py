@@ -329,6 +329,23 @@ VERTICALS: tuple[dict, ...] = (
     },
 )
 
+# Josh 2026-09-11: no free POC / free 10K campaign. Guarantee meetings or keep working.
+MEETING_GUARANTEE = "We guarantee meetings, or we keep working until you hit them."
+
+_FREE_POC_PHRASES = (
+    "free poc",
+    "free p.o.c",
+    "proof of concept",
+    "proof-of-concept",
+    "free 10k",
+    "free 10 k",
+    "10k lead",
+    "free test list",
+    "test list",
+    "free campaign",
+    "free proof",
+)
+
 _DASHES = ("—", "–", "−")
 
 
@@ -336,6 +353,12 @@ def _no_dashes(text: str) -> str:
     for dash in _DASHES:
         text = text.replace(dash, "...")
     return text
+
+
+def has_free_poc_offer(text: str) -> bool:
+    """True if copy still pitches a free POC / free 10K campaign / test list."""
+    low = (text or "").lower()
+    return any(phrase in low for phrase in _FREE_POC_PHRASES)
 
 
 def _first_name(name: str) -> str:
@@ -405,6 +428,26 @@ def infer_industry(
     return None
 
 
+def _cta_paragraph(*, include_loom: bool = False, airpods_style: str = "chat") -> str:
+    """Meeting-guarantee first. Soft AirPods gift is optional, never a free POC."""
+    if airpods_style == "name":
+        gift = (
+            "I've also got an extra pair of AirPods with your name on it if you just "
+            "want to hop on a call and see if it makes sense."
+        )
+    elif include_loom:
+        gift = (
+            "I can send a Loom, or a pair of AirPods just for chatting 15 minutes "
+            "to see if this makes sense."
+        )
+    else:
+        gift = (
+            "I can also send you a pair of AirPods just for chatting 15 minutes to "
+            "see if this makes sense."
+        )
+    return f"{MEETING_GUARANTEE} {gift}"
+
+
 def _industry_body(first: str, vertical: dict) -> str:
     label = vertical["label"]
     client = vertical["client"]
@@ -414,8 +457,7 @@ def _industry_body(first: str, vertical: dict) -> str:
             "Quick stats since we last talked, we generated $2M in pipeline last quarter across our trades "
             "clients and one of our roofers closed $100K in his first 3 months with us. Averaging 14+ replies "
             "per month now.\n\n"
-            "Happy to run a free 10K lead campaign to show you what it looks like. Or I've got an extra pair "
-            "of AirPods with your name on it if you just want to hop on a call and see if it makes sense.\n\n"
+            f"{_cta_paragraph(airpods_style='name')}\n\n"
             "Worth a few minutes to see what's new?\n\n"
             "Josh Osborn"
         )
@@ -423,8 +465,7 @@ def _industry_body(first: str, vertical: dict) -> str:
         f"Hey {first}, it's been a few months. Wanted to circle back on what we're doing in {label} now.\n\n"
         f"Since we talked we've added $2M to our pipeline and one of our {client} closed $100K in their "
         "first 3 months. We're averaging 14+ replies per month across all verticals.\n\n"
-        "I'll run you a free 10K lead campaign to show you exactly what it looks like for your market. "
-        "Or I can send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\n"
+        f"{_cta_paragraph()}\n\n"
         "Worth a look?\n\n"
         "Josh Osborn"
     )
@@ -435,8 +476,7 @@ def _general_body(first: str) -> str:
         f"Hey {first}, it's been a few months. Wanted to circle back.\n\n"
         "Since we talked we've added $2M in pipeline last quarter and one of our clients closed $100K "
         "in their first 3 months. We're averaging 14+ replies per month.\n\n"
-        "I can send a Loom, run you a free 10K lead campaign, or send a pair of AirPods just for chatting "
-        "15 minutes to see if this makes sense.\n\n"
+        f"{_cta_paragraph(include_loom=True)}\n\n"
         "Worth a look?\n\n"
         "Josh Osborn"
     )
