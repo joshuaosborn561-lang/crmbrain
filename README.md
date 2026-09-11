@@ -44,7 +44,7 @@ Only move a deal when evidence warrants it. Never open a deal from Smartlead / H
 
 The cycle will not regress a more advanced open stage to Replied or Nurture without that back-signal. If a contact has meeting-held evidence and only a Replied deal exists, it is moved to Discovery Completed.
 
-Fireflies and Cube `*-transcript.docx` always run extract → `merge_contact_props` so relational notes (family, school, hooks) land on the contact. If the transcript clearly states **this deal's** price (monthly retainer, proposal $, package), the cycle PATCHes HubSpot deal `amount` when that field is empty. It never invents an amount and never copies Josh's case-study stats ($2M pipeline, $100K closed, free 10K leads).
+Fireflies and Cube `*-transcript.docx` always run extract → `merge_contact_props` so relational notes (family, school, hooks) land on the contact. If the transcript clearly states **this deal's** price (monthly retainer, proposal $, package), the cycle PATCHes HubSpot deal `amount` when that field is empty. It never invents an amount and never copies Josh's case-study stats ($2M pipeline, $100K closed, meeting guarantee).
 
 Each cycle also **prunes** junk:
 
