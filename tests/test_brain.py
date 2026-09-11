@@ -249,6 +249,8 @@ def test_nurture_roofing_uses_roi_case_study():
     assert "$2M" in body
     assert "$100K" in body
     assert "14+" in body
+    assert "guarantee meetings" in body
+    assert "keep working" in body
     assert "AirPods" in body
     assert "Josh Osborn" in body
     assert "Quick bump" not in subject
@@ -271,7 +273,8 @@ def test_nurture_hvac_from_company_or_campaign():
     assert "what we're doing in HVAC" in body
     assert "HVAC clients" in body
     assert "$100K" in body
-    assert "free 10K" in body
+    assert "guarantee meetings" in body
+    assert "keep working" in body
     assert infer_industry("The Chill Brothers", extras={"vertical": "HVAC"})["key"] == "hvac"
 
 
@@ -283,7 +286,8 @@ def test_nurture_generalized_when_industry_unknown():
     assert "$100K" in body and "first 3 months" in body
     assert "14+" in body
     assert "Loom" in body
-    assert "10K" in body
+    assert "guarantee meetings" in body
+    assert "keep working" in body
     assert "AirPods" in body
     assert "Josh Osborn" in body
     assert "HVAC" not in body
