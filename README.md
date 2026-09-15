@@ -56,6 +56,7 @@ Each cycle also **prunes** junk:
 - Does not delete contacts that have meeting evidence
 - Soft-archives blank / no-identity contacts when that is safe
 - HubSpot reads (including HeyReach backfill `iter_contacts`) retry timeouts with backoff and a 45s read timeout so one `api.hubapi.com` stall does not leave the cycle `partial`
+- Gmail reads (`search` / `get`) retry timeouts and 429/503 with jittered backoff, honor `Retry-After`, and use a 45s read timeout so one `gmail.googleapis.com` stall does not leave the cycle `partial`
 
 `circle back` / `next quarter` is a ticker reason only. It does not open a Nurture deal or move Discovery Completed (or later) backward.
 
