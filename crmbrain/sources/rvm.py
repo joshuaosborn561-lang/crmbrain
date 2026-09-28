@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from crmbrain.config import Settings, lookback_start
+from crmbrain.config import Settings, settings_lookback_start
 from crmbrain.models import Engagement
 
 
@@ -12,7 +12,7 @@ def scan(settings: Settings) -> list[Engagement]:
     """RVM callback = they called back. That is engagement."""
     if not settings.supabase_url or not settings.supabase_key:
         return []
-    start = lookback_start(settings.lookback_hours).isoformat()
+    start = settings_lookback_start(settings).isoformat()
     url = f"{settings.supabase_url.rstrip('/')}/rest/v1/rvm_callbacks"
     headers = {
         "apikey": settings.supabase_key,

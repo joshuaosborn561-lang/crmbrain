@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from crmbrain.config import Settings
+from crmbrain.config import Settings, gmail_after_clause, now_utc, settings_lookback_start
 from crmbrain.gmail_client import Gmail
 from crmbrain.models import Engagement
 
@@ -17,7 +17,9 @@ def scan(settings: Settings, gmail: Gmail | None = None) -> list[Engagement]:
             resp = requests.get(
                 settings.allo_url.rstrip("/") + "/conversations",
                 headers={"Authorization": f"Bearer {settings.allo_key}"},
-                params={"since": "36h"},
+                params={
+                    "since": f"{max(1, int((now_utc() - settings_lookback_start(settings)).total_seconds() / 3600) + 1)}h"
+                },
                 timeout=30,
             )
             if resp.ok:
@@ -42,8 +44,9 @@ def scan(settings: Settings, gmail: Gmail | None = None) -> list[Engagement]:
         except Exception:
             pass
     if gmail:
+        after = gmail_after_clause(settings_lookback_start(settings))
         for stub in gmail.search(
-            'newer_than:2d (from:allo.ai OR from:withallo.com OR from:callallo.com OR from:hello@allo.com OR subject:"Allo call")',
+            f'{after} (from:allo.ai OR from:withallo.com OR from:callallo.com OR from:hello@allo.com OR subject:"Allo call")',
             max_results=20,
         ):
             msg = gmail.get(stub["id"])

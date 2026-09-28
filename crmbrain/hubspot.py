@@ -8,6 +8,7 @@ import requests
 
 from crmbrain.config import STAGE, Settings, digits_phone
 from crmbrain.models import Engagement
+from crmbrain.names import prefer_contact_name
 from crmbrain import intelligence, policy
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,8 @@ class HubSpot:
                 "Content-Type": "application/json",
             }
         )
+        # Upcoming/recent GCal + Calendly attendee emails. Filled each cycle.
+        self.scheduled_attendee_emails: set[str] = set()
 
     def _request(
         self,
@@ -233,11 +236,21 @@ class HubSpot:
 
     def upsert_contact(self, ev: Engagement) -> dict:
         existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
-        props = {
-            "firstname": ev.first_name or (ev.display_name().split(" ")[0] if ev.display_name() else ""),
-            "lastname": ev.last_name
+        existing_props = (existing or {}).get("properties") or {}
+        first = prefer_contact_name(
+            existing_props.get("firstname") or "",
+            ev.first_name
+            or (ev.display_name().split(" ")[0] if ev.display_name() else ""),
+        )
+        last = prefer_contact_name(
+            existing_props.get("lastname") or "",
+            ev.last_name
             or (" ".join(ev.display_name().split(" ")[1:]) if ev.display_name() else ""),
-            "company": ev.company,
+        )
+        props = {
+            "firstname": first,
+            "lastname": last,
+            "company": ev.company or existing_props.get("company") or "",
             "jobtitle": ev.title,
             "crm_source": ev.source,
         }
@@ -249,7 +262,7 @@ class HubSpot:
             props["hs_linkedin_url"] = ev.linkedin_url
         props = {k: v for k, v in props.items() if v}
         if existing:
-            existing_source = ((existing.get("properties") or {}).get("crm_source") or "").lower()
+            existing_source = (existing_props.get("crm_source") or "").lower()
             if existing_source in policy.MEETING_CRM_SOURCES and ev.source not in policy.MEETING_CRM_SOURCES:
                 props.pop("crm_source", None)
             resp = self._request(
@@ -317,41 +330,76 @@ class HubSpot:
                 deals.append(d.json())
         return deals
 
+    def _archive_duplicate_deals(self, deals: list[dict]) -> list[dict]:
+        """Soft-archive same-stage, no-amount duplicates. Keep the richer deal."""
+        archived_ids: set[str] = set()
+        for _keep, dup in policy.duplicate_open_deal_pairs(deals):
+            dup_id = str(dup.get("id") or "")
+            if not dup_id or dup_id in archived_ids:
+                continue
+            try:
+                self.archive_deal(dup_id)
+                archived_ids.add(dup_id)
+            except Exception as exc:
+                logger.warning("dedupe archive %s failed: %s", dup_id, exc)
+        if not archived_ids:
+            return deals
+        return [d for d in deals if str(d.get("id") or "") not in archived_ids]
+
+    def search_contacts_by_email_token(self, token: str) -> list[dict]:
+        if not token:
+            return []
+        return self._search(
+            "contacts",
+            [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": token}],
+            ["email", "firstname", "lastname", "phone", "company", "crm_source"],
+        )
+
+    def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
+        current = (deal.get("properties") or {}).get("dealstage") or ""
+        target = policy.choose_deal_action(current, stage, ev) if stage else None
+        current_name = (deal.get("properties") or {}).get("dealname") or ""
+        wanted = policy.deal_name_for(ev, contact)
+        cleaned = policy.prefer_deal_name(
+            policy.clean_deal_name(current_name, fallback=wanted),
+            wanted,
+        )
+        if policy.is_weak_deal_name(current_name) and wanted:
+            cleaned = wanted
+        if target:
+            self.move_deal(
+                deal["id"],
+                target,
+                evidence=f"{ev.source}:{ev.external_id}",
+                dealname=cleaned if cleaned and cleaned != current_name else "",
+            )
+            deal.setdefault("properties", {})["dealstage"] = target
+        elif cleaned and cleaned != current_name:
+            self.patch_deal(str(deal["id"]), {"dealname": cleaned})
+        if cleaned and cleaned != current_name:
+            deal.setdefault("properties", {})["dealname"] = cleaned
+        self.fill_deal_amount(deal, amount)
+        return deal
+
     def upsert_deal(self, contact: dict, ev: Engagement, stage: str, amount: str = "") -> dict:
         contact_id = contact["id"]
-        name = f"{ev.display_name() or ev.company or ev.email} — {ev.company}".strip(" —")
-        existing = self.open_deals_for_contact(contact_id)
-        live = [
-            d
-            for d in existing
-            if d.get("properties", {}).get("dealstage") not in {STAGE["closed_lost"], STAGE["paid"]}
-        ]
-        fallback_name = ev.display_name() or ev.company or ev.email or ""
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        live = policy.live_open_deals(existing)
         if live:
-            deal = live[0]
-            current = (deal.get("properties") or {}).get("dealstage") or ""
-            target = policy.choose_deal_action(current, stage, ev) if stage else None
-            current_name = (deal.get("properties") or {}).get("dealname") or ""
-            cleaned = policy.clean_deal_name(current_name, fallback=fallback_name)
-            if target:
-                self.move_deal(
-                    deal["id"],
-                    target,
-                    evidence=f"{ev.source}:{ev.external_id}",
-                    dealname=cleaned if cleaned and cleaned != current_name else "",
-                )
-                deal.setdefault("properties", {})["dealstage"] = target
-            elif cleaned and cleaned != current_name:
-                self.patch_deal(str(deal["id"]), {"dealname": cleaned})
-            if cleaned and cleaned != current_name:
-                deal.setdefault("properties", {})["dealname"] = cleaned
-            self.fill_deal_amount(deal, amount)
-            return deal
+            deal = max(live, key=policy.deal_richness)
+            return self._apply_live_deal(deal, ev, stage, amount, contact)
         target = policy.choose_deal_action(None, stage, ev) if stage else None
         if not target:
             return {}
+        # HubSpot workflows can create a deal between the first read and POST.
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        live = policy.live_open_deals(existing)
+        if live:
+            deal = max(live, key=policy.deal_richness)
+            return self._apply_live_deal(deal, ev, stage, amount, contact)
+        name = policy.deal_name_for(ev, contact) or ev.email or "SalesGlider deal"
         props = {
-            "dealname": name or fallback_name or "SalesGlider deal",
+            "dealname": name,
             "dealstage": target,
             "pipeline": "default",
         }

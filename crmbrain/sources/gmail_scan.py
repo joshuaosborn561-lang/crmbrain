@@ -3,7 +3,15 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from crmbrain.config import CDT, JOSH_EMAILS, STAGE, Settings, is_personal
+from crmbrain.config import (
+    CDT,
+    JOSH_EMAILS,
+    STAGE,
+    Settings,
+    gmail_after_clause,
+    is_personal,
+    settings_lookback_start,
+)
 from crmbrain.gmail_client import Gmail
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport, Engagement
@@ -15,6 +23,36 @@ QUERIES = [
     "newer_than:2d (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR \"new event\")",
     "newer_than:2d (from:docusign.net OR subject:DocuSign completed)",
 ]
+
+NOTETAKER_DOMAINS = frozenset(
+    {
+        "fireflies.ai",
+        "otter.ai",
+        "fathom.video",
+        "read.ai",
+        "krisp.ai",
+        "tldv.io",
+    }
+)
+
+
+def mail_queries(settings: Settings) -> list[str]:
+    after = gmail_after_clause(settings_lookback_start(settings))
+    return [
+        f"{after} (from:pandadoc.com OR from:e.pandadoc.com OR subject:PandaDoc)",
+        f'{after} ("You received a payment" OR from:stripe.com OR from:quickbooks OR subject:payment received)',
+        f'{after} (from:calendly.com ("New Event" OR Accepted OR canceled OR "no-show" OR "Invitee"))',
+        f'{after} (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR "new event")',
+        f"{after} (from:docusign.net OR subject:DocuSign completed)",
+    ]
+
+
+def people_queries(settings: Settings) -> tuple[str, ...]:
+    after = gmail_after_clause(settings_lookback_start(settings))
+    return (
+        f"{after} in:sent -from:calendly.com -from:pandadoc.com -from:docusign.net",
+        f"{after} in:inbox -category:promotions -from:calendly.com -from:noreply",
+    )
 
 SYSTEM_EMAIL_HINTS = (
     "salesglider",
@@ -161,7 +199,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
     """Gmail updates existing CRM people. Josh Calendly bookings also create new ones."""
     seen = set()
     out: list[Engagement] = []
-    for query in QUERIES:
+    for query in mail_queries(settings):
         for stub in gmail.search(query, max_results=30):
             mid = stub["id"]
             if mid in seen:
@@ -175,10 +213,20 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
             snippet = msg.get("snippet", "")
             body = gmail.body_text(msg)
             cal = parse_calendly(subject, body) if "calendly" in f"{sender} {subject}".lower() else {}
+            ics_emails: list[str] = []
+            try:
+                from crmbrain.calendar_events import attendees_from_ics
+
+                for ics in gmail.calendar_parts(msg):
+                    ics_emails.extend(attendees_from_ics(ics))
+            except Exception:
+                ics_emails = []
             emails = real_person_emails(
                 [cal.get("email")] if cal.get("email") else [],
                 _addresses(sender),
                 _addresses(to),
+                ics_emails,
+                _addresses(body),
             )
             contact = None
             for email in emails:
@@ -244,6 +292,30 @@ def is_system_address(email: str) -> bool:
     return False
 
 
+def is_notetaker_email(email: str) -> bool:
+    """Fireflies / Otter / Fathom style bots. Always archive, any deal stage."""
+    low = (email or "").strip().lower()
+    if not low or "@" not in low:
+        return False
+    domain = low.rsplit("@", 1)[-1]
+    if domain in NOTETAKER_DOMAINS:
+        return True
+    if "notetaker" in low:
+        return True
+    return False
+
+
+def is_notetaker_contact(contact: dict) -> bool:
+    props = contact.get("properties") or {}
+    email = (props.get("email") or "").strip()
+    if is_notetaker_email(email):
+        return True
+    name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".lower()
+    if "notetaker" in name:
+        return True
+    return False
+
+
 def is_junk_crm_email(email: str) -> bool:
     """System/noreply calendar addresses that must never become HubSpot contacts.
 
@@ -252,7 +324,7 @@ def is_junk_crm_email(email: str) -> bool:
     low = (email or "").strip().lower()
     if not low:
         return False
-    return is_system_address(low)
+    return is_system_address(low) or is_notetaker_email(low)
 
 
 def real_person_emails(*groups: list[str] | tuple[str, ...]) -> list[str]:
@@ -296,7 +368,7 @@ def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
     """Josh emailed someone, or a real person emailed Josh. That is engagement."""
     seen: set[str] = set()
     out: list[Engagement] = []
-    for query in PEOPLE_QUERIES:
+    for query in people_queries(settings):
         for stub in gmail.search(query, max_results=40):
             mid = stub["id"]
             if mid in seen:

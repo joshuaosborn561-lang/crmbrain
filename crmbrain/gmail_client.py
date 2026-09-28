@@ -174,6 +174,46 @@ class Gmail:
         walk(message.get("payload") or {})
         return "\n".join(chunks)
 
+    def calendar_parts(self, message: dict) -> list[str]:
+        """ICS / text/calendar parts on a Gmail message."""
+        chunks: list[str] = []
+
+        def walk(part: dict) -> None:
+            data = (part.get("body") or {}).get("data")
+            mime = (part.get("mimeType") or "").lower()
+            filename = (part.get("filename") or "").lower()
+            if data and ("calendar" in mime or filename.endswith(".ics")):
+                raw = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+                chunks.append(raw)
+            for child in part.get("parts") or []:
+                walk(child)
+
+        walk(message.get("payload") or {})
+        return chunks
+
+    def list_calendar_events(self, time_min: datetime, time_max: datetime) -> list[dict]:
+        """Primary calendar events. Empty when the token has no calendar scope."""
+        params = {
+            "timeMin": time_min.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timeMax": time_max.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": 250,
+        }
+        resp = self._request(
+            "GET",
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers=self._headers(),
+            params=params,
+            retry=True,
+            timeout=READ_TIMEOUT,
+        )
+        if resp.status_code in {401, 403}:
+            logger.info("calendar api %s — falling back to Gmail invites", resp.status_code)
+            return []
+        resp.raise_for_status()
+        return resp.json().get("items") or []
+
     def send(self, to: str, subject: str, body: str) -> None:
         msg = MIMEText(body)
         msg["to"] = to

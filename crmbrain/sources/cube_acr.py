@@ -10,7 +10,7 @@ from typing import Iterable
 
 import requests
 
-from crmbrain.config import Settings, is_personal, today_and_yesterday_cdt
+from crmbrain.config import Settings, is_personal, lookback_dates_cdt, today_and_yesterday_cdt
 from crmbrain.http_mcp import extract_drive_ids, retry
 from crmbrain.models import Engagement
 from crmbrain.policy import looks_like_html
@@ -123,7 +123,7 @@ def _load_transcripts(html: str, file_ids: list[str]) -> list[tuple[str, str, st
 
 def scan(settings: Settings, dates: Iterable[str] | None = None) -> list[Engagement]:
     """Read Cube ACR Drive. Prefer call-transcriber *-transcript.docx. No AssemblyAI."""
-    dates = list(dates or today_and_yesterday_cdt())
+    dates = list(dates or lookback_dates_cdt(settings) or today_and_yesterday_cdt())
     root_html = _folder_html(settings.cube_folder)
     # Dated subfolders appear as titles in the HTML next to file ids.
     folder_hits: dict[str, str] = {}
