@@ -67,6 +67,8 @@ class FakeHubSpot:
         self.notes = []
         self.patches = []
         self.writes = []
+        self.scheduled_attendee_emails = set()
+        self.recent_attendee_emails = set()
         self._n = 10
 
     def find_contact(self, email="", phone="", name=""):
@@ -95,17 +97,26 @@ class FakeHubSpot:
         return self.find_contact(email=email, phone=phone) is not None
 
     def upsert_contact(self, ev):
+        from crmbrain.names import prefer_contact_name
+
         existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         self.writes.append(("upsert_contact", ev.source, ev.email or ev.phone))
+        first = ev.first_name or (ev.display_name().split(" ")[0] if ev.display_name() else "")
+        last = ev.last_name or (" ".join(ev.display_name().split(" ")[1:]) if ev.display_name() else "")
         if existing:
+            props = existing.setdefault("properties", {})
+            props["firstname"] = prefer_contact_name(props.get("firstname") or "", first)
+            props["lastname"] = prefer_contact_name(props.get("lastname") or "", last)
+            if ev.company:
+                props["company"] = ev.company
             return existing
         self._n += 1
         row = {
             "id": str(self._n),
             "properties": {
                 "email": ev.email,
-                "firstname": ev.first_name,
-                "lastname": ev.last_name,
+                "firstname": first,
+                "lastname": last,
                 "phone": ev.phone,
                 "company": ev.company,
                 "crm_source": ev.source,
@@ -114,14 +125,32 @@ class FakeHubSpot:
         self.contacts.append(row)
         return row
 
+    def search_contacts_by_email_token(self, token):
+        needle = (token or "").lower()
+        if not needle:
+            return []
+        return [
+            row
+            for row in self.contacts
+            if needle in ((row.get("properties") or {}).get("email") or "").lower()
+        ]
+
     def patch_contact(self, contact_id, properties):
         self.patches.append((contact_id, properties))
 
     def add_note(self, contact_id, body):
         self.notes.append((contact_id, body))
 
+    def _deal_contact_ids(self, deal):
+        ids = deal.get("contact_ids")
+        if ids:
+            return [str(i) for i in ids]
+        cid = deal.get("contact_id")
+        return [str(cid)] if cid else []
+
     def open_deals_for_contact(self, contact_id):
-        return [d for d in self.deals if d.get("contact_id") == str(contact_id)]
+        wanted = str(contact_id)
+        return [d for d in self.deals if wanted in self._deal_contact_ids(d)]
 
     def iter_deals(self, properties, stage=""):
         for deal in self.deals:
@@ -133,7 +162,17 @@ class FakeHubSpot:
         deal = next((d for d in self.deals if d["id"] == deal_id), None)
         if not deal:
             return []
-        return [c for c in self.contacts if c["id"] == deal.get("contact_id")]
+        ids = set(self._deal_contact_ids(deal))
+        return [c for c in self.contacts if str(c["id"]) in ids]
+
+    def disassociate_contact_from_deal(self, contact_id, deal_id):
+        self.writes.append(("disassociate", str(contact_id), str(deal_id)))
+        for deal in self.deals:
+            if deal["id"] != deal_id:
+                continue
+            ids = [i for i in self._deal_contact_ids(deal) if i != str(contact_id)]
+            deal["contact_ids"] = ids
+            deal["contact_id"] = ids[0] if ids else ""
 
     def contact_has_meetings(self, contact_id):
         return bool(getattr(self, "meetings", {}).get(str(contact_id)))
@@ -174,14 +213,26 @@ class FakeHubSpot:
         return True
 
     def upsert_deal(self, contact, ev, stage, amount=""):
+        from crmbrain import policy
+
         self.writes.append(("upsert_deal", ev.source, stage, amount))
-        live = self.open_deals_for_contact(contact["id"])
+        existing = self.open_deals_for_contact(contact["id"])
+        for _keep, dup in policy.duplicate_open_deal_pairs(existing):
+            self.archive_deal(dup["id"])
+        existing = self.open_deals_for_contact(contact["id"])
+        live = policy.live_open_deals(existing)
+        wanted = policy.deal_name_for(ev, contact)
         if live:
-            deal = live[0]
+            deal = max(live, key=policy.deal_richness)
             current = (deal.get("properties") or {}).get("dealstage") or ""
             target = choose_deal_action(current, stage, ev) if stage else None
             current_name = deal["properties"].get("dealname") or ""
-            cleaned = clean_deal_name(current_name, fallback=ev.display_name())
+            cleaned = policy.prefer_deal_name(
+                clean_deal_name(current_name, fallback=wanted or ev.display_name()),
+                wanted,
+            )
+            if policy.is_weak_deal_name(current_name) and wanted:
+                cleaned = wanted
             if target:
                 deal["properties"]["dealstage"] = target
             if cleaned and cleaned != current_name:
@@ -192,7 +243,7 @@ class FakeHubSpot:
         target = choose_deal_action(None, stage, ev) if stage else None
         if not target:
             return {}
-        props = {"dealstage": target, "dealname": ev.display_name() or ev.email or "SalesGlider deal"}
+        props = {"dealstage": target, "dealname": wanted or ev.display_name() or ev.email or "SalesGlider deal"}
         if amount:
             props["amount"] = amount
         deal = {
@@ -806,6 +857,7 @@ def test_clean_deal_name_strips_replied_label():
     assert clean_deal_name("Discovery Scheduled", fallback="Laura Klein") == "Laura Klein"
     assert clean_deal_name("", fallback="Mike Trpkosh") == "Mike Trpkosh"
     assert clean_deal_name("Mike Trpkosh - Discovery Scheduled") == "Mike Trpkosh"
+    assert clean_deal_name("Pat Lee -", fallback="Pat Lee - Acme") == "Pat Lee"
 
 
 def test_prune_archives_replied_without_meeting_and_promotes_held():

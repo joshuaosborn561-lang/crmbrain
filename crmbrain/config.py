@@ -42,6 +42,12 @@ JOSH_EMAILS = {
     "joshuaosborn561@gmail.com",
     "joshua@salescloudedgroup.com",
 }
+JOSH_DOMAINS = {
+    "salesglidergrowth.com",
+    "salescloudedgroup.com",
+    "jmosolutionsllc.com",
+    "insight.com",
+}
 
 POSITIVE_SMARTLEAD_CATEGORIES = {1, 2, 5}  # Interested, Meeting Request, Info Request
 POSITIVE_SENTIMENTS = {"positive"}
@@ -115,6 +121,7 @@ class Settings:
     allo_url: str
     allo_key: str
     lookback_hours: int
+    lookback_start_at: datetime | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -157,8 +164,58 @@ def now_cdt() -> datetime:
     return datetime.now(CDT)
 
 
-def lookback_start(hours: int) -> datetime:
+LOOKBACK_OVERLAP_HOURS = 2
+LOOKBACK_CAP_HOURS = 24 * 7
+
+
+def lookback_start(hours: int, start_at: datetime | None = None) -> datetime:
+    if start_at is not None:
+        return start_at if start_at.tzinfo else start_at.replace(tzinfo=timezone.utc)
     return now_utc() - timedelta(hours=hours)
+
+
+def settings_lookback_start(settings: Settings) -> datetime:
+    return lookback_start(settings.lookback_hours, settings.lookback_start_at)
+
+
+def compute_lookback_start(
+    settings: Settings,
+    last_started_at: datetime | None,
+    now: datetime | None = None,
+    overlap_hours: int = LOOKBACK_OVERLAP_HOURS,
+    cap_hours: int = LOOKBACK_CAP_HOURS,
+) -> datetime:
+    """Window start: last finished cycle minus overlap, else the configured hours.
+
+    Monday 7am after a Friday 5pm run must include Friday evening. Cap at 7 days
+    so a long outage does not replay the whole history.
+    """
+    now = now or now_utc()
+    fallback = now - timedelta(hours=settings.lookback_hours)
+    if last_started_at is None:
+        return fallback
+    if last_started_at.tzinfo is None:
+        last_started_at = last_started_at.replace(tzinfo=timezone.utc)
+    start = last_started_at - timedelta(hours=overlap_hours)
+    earliest = now - timedelta(hours=cap_hours)
+    if start < earliest:
+        return earliest
+    return start
+
+
+def lookback_dates_cdt(settings: Settings) -> list[str]:
+    """Inclusive Chicago dates from the cycle window through today."""
+    start = settings_lookback_start(settings).astimezone(CDT).date()
+    end = now_cdt().date()
+    if start > end:
+        return [end.isoformat()]
+    days = (end - start).days
+    return [(end - timedelta(days=i)).isoformat() for i in range(days, -1, -1)]
+
+
+def gmail_after_clause(start: datetime) -> str:
+    local = start.astimezone(CDT)
+    return f"after:{local.year}/{local.month:02d}/{local.day:02d}"
 
 
 def today_and_yesterday_cdt() -> list[str]:

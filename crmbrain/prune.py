@@ -3,36 +3,59 @@
 When a junk deal is pruned, also archive the associated contact if it has no
 meeting held/scheduled evidence and is not otherwise engaged (no other open
 deals). System addresses (Fireflies Notetaker, calendar bots) never count as
-meeting evidence.
+meeting evidence. Notetaker/bot contacts are archived in every stage.
 """
 
 from __future__ import annotations
 
+from crmbrain.calendar_events import contact_on_calendar
 from crmbrain.config import STAGE
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport
 from crmbrain.policy import (
+    DEFAULT_PIPELINE,
     MEETING_STAGES,
+    PRE_SALE_STAGES,
     clean_deal_name,
     contact_has_meeting_evidence,
+    deal_has_amount,
+    deal_pipeline,
     is_blank_contact,
     promote_replied_stage,
 )
-from crmbrain.sources.gmail_scan import is_junk_crm_email
+from crmbrain.sources.gmail_scan import (
+    NOTETAKER_DOMAINS,
+    is_junk_crm_email,
+    is_notetaker_contact,
+)
 
 DEAL_LIMIT = 40
 CONTACT_LIMIT = 20
+NOTETAKER_LIMIT = 40
 
 
 def run(hs: HubSpot, report: CycleReport) -> None:
+    prune_notetaker_contacts(hs, report)
     prune_replied_deals(hs, report)
     prune_blank_contacts(hs, report)
 
 
+def _calendar_protect_emails(hs: HubSpot) -> set[str]:
+    upcoming = {e.lower() for e in getattr(hs, "scheduled_attendee_emails", set()) or set()}
+    recent = {e.lower() for e in getattr(hs, "recent_attendee_emails", set()) or set()}
+    return upcoming | recent
+
+
+def _calendar_promote_emails(hs: HubSpot) -> set[str]:
+    return {e.lower() for e in getattr(hs, "scheduled_attendee_emails", set()) or set()}
+
+
 def _meeting_evidence(hs: HubSpot, contact: dict, deals: list[dict] | None = None) -> bool:
     email = ((contact.get("properties") or {}).get("email") or "")
-    if is_junk_crm_email(email):
+    if is_junk_crm_email(email) or is_notetaker_contact(contact):
         return False
+    if contact_on_calendar(email, _calendar_protect_emails(hs)):
+        return True
     if contact_has_meeting_evidence(contact, deals):
         return True
     cid = contact.get("id")
@@ -106,10 +129,12 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
             more = hs.open_deals_for_contact(contact["id"])
             if _meeting_evidence(hs, contact, more):
                 keep = True
+                email = ((contact.get("properties") or {}).get("email") or "")
                 candidate = promote_replied_stage(
                     contact,
                     has_real_meetings=hs.contact_has_meetings(contact["id"]),
                     has_email_associations=False,
+                    has_calendar_meeting=contact_on_calendar(email, _calendar_promote_emails(hs)),
                 )
                 if candidate:
                     promote = candidate
@@ -159,3 +184,93 @@ def prune_blank_contacts(hs: HubSpot, report: CycleReport, limit: int = CONTACT_
             continue
         archived += 1
         report.contacts_pruned.append(str(contact.get("id")))
+
+
+def _deal_has_real_contact(hs: HubSpot, deal_id: str, bot_id: str) -> bool:
+    for other in hs.contacts_for_deal(deal_id):
+        if str(other.get("id") or "") == str(bot_id):
+            continue
+        if not is_notetaker_contact(other):
+            return True
+    return False
+
+
+def may_archive_notetaker_deal(hs: HubSpot, deal: dict, bot_id: str) -> bool:
+    """Only drop bot-only pre-sale stubs. Keep paid/signed/shared deals."""
+    props = deal.get("properties") or {}
+    stage = props.get("dealstage") or ""
+    if deal_pipeline(deal) != DEFAULT_PIPELINE:
+        return False
+    if stage not in PRE_SALE_STAGES:
+        return False
+    if deal_has_amount(deal):
+        return False
+    deal_id = str(deal.get("id") or "")
+    if deal_id and _deal_has_real_contact(hs, deal_id, bot_id):
+        return False
+    return True
+
+
+def _archive_notetaker(hs: HubSpot, contact: dict, report: CycleReport) -> None:
+    cid = contact.get("id")
+    if not cid:
+        return
+    for deal in hs.open_deals_for_contact(cid):
+        deal_id = str(deal.get("id") or "")
+        if not deal_id:
+            continue
+        if may_archive_notetaker_deal(hs, deal, str(cid)):
+            try:
+                hs.archive_deal(deal_id)
+                report.deals_pruned.append(
+                    (deal.get("properties") or {}).get("dealname") or deal_id
+                )
+            except Exception as exc:
+                report.errors.append(f"prune notetaker deal {deal_id}: {exc}")
+            continue
+        drop = getattr(hs, "disassociate_contact_from_deal", None)
+        if callable(drop):
+            try:
+                drop(str(cid), deal_id)
+            except Exception as exc:
+                report.errors.append(f"detach notetaker {cid} from {deal_id}: {exc}")
+    archive_unengaged_contact(hs, contact, report, "notetaker")
+
+
+def prune_notetaker_contacts(hs: HubSpot, report: CycleReport, limit: int = NOTETAKER_LIMIT) -> None:
+    """Always soft-archive Fireflies/Otter/etc. bots.
+
+    Attached deals are archived only when they are default-pipeline pre-sale
+    stubs with no amount and no real (non-notetaker) contact.
+    """
+    found: dict[str, dict] = {}
+    search = getattr(hs, "search_contacts_by_email_token", None)
+    if callable(search):
+        for token in ("fred@fireflies.ai", *sorted(NOTETAKER_DOMAINS)):
+            try:
+                for row in search(token) or []:
+                    cid = str(row.get("id") or "")
+                    if cid:
+                        found[cid] = row
+            except Exception as exc:
+                report.errors.append(f"notetaker search {token}: {exc}")
+    scanned = 0
+    for contact in hs.iter_contacts(
+        ["email", "firstname", "lastname", "phone", "company", "crm_source"]
+    ):
+        scanned += 1
+        if scanned > 400:
+            break
+        cid = str(contact.get("id") or "")
+        if cid and is_notetaker_contact(contact):
+            found[cid] = contact
+    archived = 0
+    for contact in found.values():
+        if archived >= limit:
+            break
+        if not is_notetaker_contact(contact):
+            continue
+        before = len(report.contacts_pruned)
+        _archive_notetaker(hs, contact, report)
+        if len(report.contacts_pruned) > before:
+            archived += 1

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import timedelta
 
-from crmbrain import briefing, enrichment, intelligence, policy, prune, slack_notify, ticker
-from crmbrain.config import JOSH_EMAILS, STAGE, Settings, is_personal, lookback_start, now_utc
+from crmbrain import briefing, calendar_events, enrichment, intelligence, policy, prune, slack_notify, ticker
+from crmbrain.config import (
+    JOSH_EMAILS,
+    STAGE,
+    Settings,
+    compute_lookback_start,
+    is_personal,
+    now_utc,
+    settings_lookback_start,
+)
 from crmbrain.gmail_client import Gmail
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
@@ -18,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 def _in_window(ev: Engagement, settings: Settings) -> bool:
-    start = lookback_start(settings.lookback_hours)
+    start = settings_lookback_start(settings)
     if ev.source == "smartlead":
         # Positive replies stay on the ticker. First cycle still respects
         # lookback so we do not dump the whole history.
@@ -360,10 +369,21 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         report.errors.append("HUBSPOT_ACCESS_TOKEN missing")
         return report
 
+    last_started = memory.last_finished_run_started_at()
+    settings = replace(settings, lookback_start_at=compute_lookback_start(settings, last_started))
     hs = HubSpot(settings)
     if not briefs_only:
         hs.ensure_properties()
     gmail = Gmail(settings) if settings.gmail_refresh_token else None
+    calendar_creates: list[Engagement] = []
+    if gmail and not briefs_only:
+        try:
+            snap = calendar_events.load_calendar(gmail, settings)
+            hs.scheduled_attendee_emails = snap.upcoming
+            hs.recent_attendee_emails = snap.recent
+            calendar_creates = list(snap.create_engagements)
+        except Exception as exc:
+            logger.warning("calendar attendees unavailable: %s", exc)
     hey = None if briefs_only else (HeyReach(settings) if settings.heyreach_key else None)
     if briefs_only:
         if gmail:
@@ -375,7 +395,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         _flush_memory_errors(memory, report)
         return report
 
-    engagements: list[Engagement] = []
+    engagements: list[Engagement] = list(calendar_creates)
     try:
         engagements += cube_acr.scan(settings)
     except Exception as exc:

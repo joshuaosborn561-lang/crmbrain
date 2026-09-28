@@ -3,7 +3,15 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from crmbrain.config import CDT, JOSH_EMAILS, STAGE, Settings, is_personal
+from crmbrain.config import (
+    CDT,
+    JOSH_EMAILS,
+    STAGE,
+    Settings,
+    gmail_after_clause,
+    is_personal,
+    settings_lookback_start,
+)
 from crmbrain.gmail_client import Gmail
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport, Engagement
@@ -15,6 +23,36 @@ QUERIES = [
     "newer_than:2d (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR \"new event\")",
     "newer_than:2d (from:docusign.net OR subject:DocuSign completed)",
 ]
+
+NOTETAKER_DOMAINS = frozenset(
+    {
+        "fireflies.ai",
+        "otter.ai",
+        "fathom.video",
+        "read.ai",
+        "krisp.ai",
+        "tldv.io",
+    }
+)
+
+
+def mail_queries(settings: Settings) -> list[str]:
+    after = gmail_after_clause(settings_lookback_start(settings))
+    return [
+        f"{after} (from:pandadoc.com OR from:e.pandadoc.com OR subject:PandaDoc)",
+        f'{after} ("You received a payment" OR from:stripe.com OR from:quickbooks OR subject:payment received)',
+        f'{after} (from:calendly.com ("New Event" OR Accepted OR canceled OR "no-show" OR "Invitee"))',
+        f'{after} (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR "new event")',
+        f"{after} (from:docusign.net OR subject:DocuSign completed)",
+    ]
+
+
+def people_queries(settings: Settings) -> tuple[str, ...]:
+    after = gmail_after_clause(settings_lookback_start(settings))
+    return (
+        f"{after} in:sent -from:calendly.com -from:pandadoc.com -from:docusign.net",
+        f"{after} in:inbox -category:promotions -from:calendly.com -from:noreply",
+    )
 
 SYSTEM_EMAIL_HINTS = (
     "salesglider",
@@ -145,6 +183,22 @@ def is_josh_meeting(subject: str, event_type: str) -> bool:
     return "salesglider" in blob
 
 
+def is_invite_notification(sender: str, subject: str) -> bool:
+    blob = f"{sender} {subject}".lower()
+    return any(
+        h in blob
+        for h in ("calendly", "calendar-notification", "zoom.us", "zoom.com", "filename:ics")
+    )
+
+
+def is_billing_or_signature_mail(sender: str, subject: str) -> bool:
+    blob = f"{sender} {subject}".lower()
+    return any(
+        h in blob
+        for h in ("pandadoc", "stripe.com", "docusign", "quickbooks", "intuit.com", "you received a payment")
+    )
+
+
 def _field(text: str, label: str) -> str:
     m = re.search(rf"{re.escape(label)}:\s*([^\n<]+)", text, re.I)
     return (m.group(1).strip() if m else "")
@@ -161,7 +215,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
     """Gmail updates existing CRM people. Josh Calendly bookings also create new ones."""
     seen = set()
     out: list[Engagement] = []
-    for query in QUERIES:
+    for query in mail_queries(settings):
         for stub in gmail.search(query, max_results=30):
             mid = stub["id"]
             if mid in seen:
@@ -175,11 +229,32 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
             snippet = msg.get("snippet", "")
             body = gmail.body_text(msg)
             cal = parse_calendly(subject, body) if "calendly" in f"{sender} {subject}".lower() else {}
-            emails = real_person_emails(
+            invite_mail = is_invite_notification(sender, subject) and not is_billing_or_signature_mail(
+                sender, subject
+            )
+            ics_emails: list[str] = []
+            gcal_create = False
+            classified = None
+            if invite_mail:
+                try:
+                    from crmbrain.calendar_events import (
+                        attendees_from_ics,
+                        classify_ics,
+                        may_create_contact_from_event,
+                    )
+
+                    for ics in gmail.calendar_parts(msg):
+                        ics_emails.extend(attendees_from_ics(ics))
+                        classified = classify_ics(ics)
+                except Exception:
+                    ics_emails = []
+            header_emails = real_person_emails(
                 [cal.get("email")] if cal.get("email") else [],
                 _addresses(sender),
                 _addresses(to),
             )
+            invite_emails = real_person_emails(ics_emails, _addresses(body)) if invite_mail else []
+            emails = real_person_emails(header_emails, invite_emails)
             contact = None
             for email in emails:
                 contact = hubspot.find_contact(email=email)
@@ -187,10 +262,17 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                     break
             stage = _stage_from_mail(subject, sender, f"{snippet} {body}")
             ev_email = cal.get("email") or (emails[0] if emails else "")
-            create_new = (not contact) and is_josh_meeting(subject, cal.get("event_type", "")) and stage in {
-                STAGE["discovery_scheduled"],
-                STAGE["no_show"],
-            }
+            calendly_create = (
+                (not contact)
+                and "calendly" in f"{sender} {subject}".lower()
+                and is_josh_meeting(subject, cal.get("event_type", ""))
+                and stage in {STAGE["discovery_scheduled"], STAGE["no_show"]}
+            )
+            if classified is not None and not contact and "calendly" not in f"{sender} {subject}".lower():
+                gcal_create = may_create_contact_from_event(classified)
+                if gcal_create and classified.primary_prospect:
+                    ev_email = classified.primary_prospect
+            create_new = calendly_create or gcal_create
             if create_new and (not ev_email or is_system_address(ev_email)):
                 report.junk_blocked.append(f"gmail {subject[:80]} (system address)")
                 continue
@@ -198,26 +280,38 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 report.junk_blocked.append(f"gmail {subject[:80]} (not in CRM)")
                 continue
             props = (contact or {}).get("properties") or {}
+            if gcal_create and classified is not None:
+                from crmbrain.names import person_name_from_attendee
+
+                first, last = person_name_from_attendee("", ev_email)
+                domain = ev_email.split("@")[1] if "@" in ev_email else ""
+                extra_event = classified.title
+            else:
+                first = cal.get("first_name") or props.get("firstname") or ""
+                last = cal.get("last_name") or props.get("lastname") or ""
+                domain = cal.get("domain") or ""
+                extra_event = cal.get("event_type", "")
             out.append(
                 Engagement(
                     source="gmail",
                     external_id=mid,
                     occurred_at=datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc),
                     email=ev_email or props.get("email") or "",
-                    first_name=cal.get("first_name") or props.get("firstname") or "",
-                    last_name=cal.get("last_name") or props.get("lastname") or "",
+                    first_name=first,
+                    last_name=last,
                     name=cal.get("name") or "",
                     company=cal.get("company") or props.get("company") or "",
-                    domain=cal.get("domain") or "",
+                    domain=domain,
                     raw_subject=subject,
-                    summary=f"{snippet}\n{cal.get('when') or ''}\n{cal.get('event_type') or ''}".strip(),
-                    stage_hint=stage,
+                    summary=f"{snippet}\n{cal.get('when') or ''}\n{extra_event}".strip(),
+                    stage_hint=stage or (STAGE["discovery_scheduled"] if gcal_create else ""),
                     extra={
                         "hubspot_contact_id": contact["id"] if contact else "",
                         "from": sender,
                         "create_new": create_new,
-                        "event_type": cal.get("event_type", ""),
+                        "event_type": extra_event,
                         "meeting_when": cal.get("when", ""),
+                        "gcal_create": gcal_create,
                     },
                 )
             )
@@ -244,6 +338,30 @@ def is_system_address(email: str) -> bool:
     return False
 
 
+def is_notetaker_email(email: str) -> bool:
+    """Fireflies / Otter / Fathom style bots. Always archive, any deal stage."""
+    low = (email or "").strip().lower()
+    if not low or "@" not in low:
+        return False
+    domain = low.rsplit("@", 1)[-1]
+    if domain in NOTETAKER_DOMAINS:
+        return True
+    if "notetaker" in low:
+        return True
+    return False
+
+
+def is_notetaker_contact(contact: dict) -> bool:
+    props = contact.get("properties") or {}
+    email = (props.get("email") or "").strip()
+    if is_notetaker_email(email):
+        return True
+    name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".lower()
+    if "notetaker" in name:
+        return True
+    return False
+
+
 def is_junk_crm_email(email: str) -> bool:
     """System/noreply calendar addresses that must never become HubSpot contacts.
 
@@ -252,7 +370,7 @@ def is_junk_crm_email(email: str) -> bool:
     low = (email or "").strip().lower()
     if not low:
         return False
-    return is_system_address(low)
+    return is_system_address(low) or is_notetaker_email(low)
 
 
 def real_person_emails(*groups: list[str] | tuple[str, ...]) -> list[str]:
@@ -296,7 +414,7 @@ def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
     """Josh emailed someone, or a real person emailed Josh. That is engagement."""
     seen: set[str] = set()
     out: list[Engagement] = []
-    for query in PEOPLE_QUERIES:
+    for query in people_queries(settings):
         for stub in gmail.search(query, max_results=40):
             mid = stub["id"]
             if mid in seen:

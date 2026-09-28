@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from crmbrain.config import Settings
+from crmbrain.config import Settings, now_utc
 
 logger = logging.getLogger(__name__)
+
+
+def _run_started_stamp(row: dict | None) -> datetime | None:
+    if not row:
+        return None
+    raw = row.get("started_at") or ""
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
 
 
 def _is_duplicate_key(exc: BaseException) -> bool:
@@ -41,6 +57,7 @@ class Memory:
         self._local = self._load_local()
         self.use_supabase = bool(settings.supabase_url and settings.supabase_key)
         self.errors: list[str] = []
+        self._run_started_at = ""
 
     def _load_local(self) -> dict[str, Any]:
         if self.path.exists():
@@ -140,19 +157,56 @@ class Memory:
                 self._record_error("mark_processed", exc)
 
     def start_run(self) -> int | None:
+        self._run_started_at = now_utc().isoformat()
         if not self.use_supabase:
             return None
         try:
             rows = self._sb_schema("POST", "cycle_runs", json_body={"status": "running"})
             if rows:
+                stamp = rows[0].get("started_at")
+                if stamp:
+                    self._run_started_at = str(stamp)
                 return rows[0]["id"]
         except Exception as exc:
             self._record_error("start_run", exc)
             return None
         return None
 
+    def last_finished_run_started_at(self) -> datetime | None:
+        """Start time of the most recent ok/partial cycle_runs row."""
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema(
+                    "GET",
+                    "cycle_runs",
+                    params={
+                        "status": "in.(ok,partial)",
+                        "select": "id,status,started_at,finished_at",
+                        "order": "id.desc",
+                        "limit": "1",
+                    },
+                )
+                stamp = _run_started_stamp((rows or [None])[0] if rows else None)
+                if stamp:
+                    return stamp
+            except Exception as exc:
+                self._record_error("last_finished_run", exc)
+        for row in reversed(self._local.get("runs") or []):
+            if (row.get("status") or "") not in {"ok", "partial"}:
+                continue
+            stamp = _run_started_stamp(row)
+            if stamp:
+                return stamp
+        return None
+
     def finish_run(self, run_id: int | None, status: str, report: dict) -> None:
-        self._local.setdefault("runs", []).append({"status": status, "report": report})
+        self._local.setdefault("runs", []).append(
+            {
+                "status": status,
+                "started_at": self._run_started_at,
+                "report": report,
+            }
+        )
         self.save_local()
         if self.use_supabase and run_id is not None:
             try:
