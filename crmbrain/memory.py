@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 def _run_started_stamp(row: dict | None) -> datetime | None:
     if not row:
         return None
-    raw = row.get("started_at") or row.get("created_at") or ""
+    raw = row.get("started_at") or ""
     if not raw:
         return None
     try:
@@ -163,7 +163,7 @@ class Memory:
         try:
             rows = self._sb_schema("POST", "cycle_runs", json_body={"status": "running"})
             if rows:
-                stamp = rows[0].get("started_at") or rows[0].get("created_at")
+                stamp = rows[0].get("started_at")
                 if stamp:
                     self._run_started_at = str(stamp)
                 return rows[0]["id"]
@@ -181,7 +181,7 @@ class Memory:
                     "cycle_runs",
                     params={
                         "status": "in.(ok,partial)",
-                        "select": "id,status,started_at,created_at,finished_at",
+                        "select": "id,status,started_at,finished_at",
                         "order": "id.desc",
                         "limit": "1",
                     },

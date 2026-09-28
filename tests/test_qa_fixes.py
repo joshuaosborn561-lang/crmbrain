@@ -3,8 +3,11 @@ from datetime import datetime, timedelta, timezone
 from crmbrain.calendar_events import (
     attendees_from_gcal_event,
     attendees_from_ics,
+    classify_gcal_event,
+    classify_ics,
     contact_on_calendar,
     keep_event_attendees,
+    may_create_contact_from_event,
 )
 from crmbrain.config import (
     CDT,
@@ -30,13 +33,18 @@ from crmbrain.policy import (
     duplicate_open_deal_pairs,
     live_open_deals,
 )
+from crmbrain.sources.gmail_scan import (
+    is_notetaker_contact,
+    is_notetaker_email,
+    mail_queries,
+    scan as scan_gmail,
+)
 from crmbrain.prune import (
     has_live_meeting_evidence,
     prune_notetaker_contacts,
     prune_replied_deals,
 )
 from crmbrain.sources.fireflies import counterpart_from_fireflies
-from crmbrain.sources.gmail_scan import is_notetaker_contact, is_notetaker_email, mail_queries
 from tests.test_crm_gating import FakeHubSpot, make_settings
 
 
@@ -352,3 +360,392 @@ def test_memory_reads_last_finished_cycle_start(tmp_path):
     ]
     stamp = memory.last_finished_run_started_at()
     assert stamp == datetime(2026, 9, 25, 22, 0, tzinfo=timezone.utc)
+
+
+def test_last_finished_run_supabase_selects_started_at_only(tmp_path):
+    settings = make_settings(supabase_key="super-secret-key")
+    memory = Memory(settings, data_dir=tmp_path)
+    seen = {}
+
+    def fake_sb(method, table, json_body=None, params=None):
+        seen["method"] = method
+        seen["table"] = table
+        seen["params"] = params or {}
+        assert "created_at" not in (params or {}).get("select", "")
+        assert params["select"] == "id,status,started_at,finished_at"
+        return [
+            {
+                "id": 17,
+                "status": "ok",
+                "started_at": "2026-09-25T22:00:00+00:00",
+                "finished_at": "2026-09-25T22:12:00+00:00",
+            }
+        ]
+
+    memory._sb_schema = fake_sb
+    stamp = memory.last_finished_run_started_at()
+    assert stamp == datetime(2026, 9, 25, 22, 0, tzinfo=timezone.utc)
+    assert seen["table"] == "cycle_runs"
+    assert memory.drain_errors() == []
+
+
+def _deal(deal_id, stage, **props):
+    properties = {"dealstage": stage, "dealname": deal_id, "pipeline": "default", "amount": "", **props}
+    return {"id": deal_id, "contact_id": "c1", "properties": properties}
+
+
+def test_duplicate_collapse_skips_signed_paid_and_other_pipeline():
+    signed = [
+        _deal("s1", STAGE["signed"], dealname="Pat Lee - Acme"),
+        _deal("s2", STAGE["signed"], dealname="Pat Lee -"),
+    ]
+    paid = [
+        _deal("p1", STAGE["paid"], dealname="Pat Lee - Acme"),
+        _deal("p2", STAGE["paid"], dealname="Pat Lee -"),
+    ]
+    other_pipe = [
+        _deal("o1", STAGE["discovery_scheduled"], pipeline="subscriptions", dealname="Pat Lee - Acme"),
+        _deal("o2", STAGE["discovery_scheduled"], pipeline="subscriptions", dealname="Pat Lee -"),
+    ]
+    mixed_amount = [
+        _deal("a1", STAGE["discovery_scheduled"], dealname="Pat Lee - Acme", amount="3000"),
+        _deal("a2", STAGE["discovery_scheduled"], dealname="Pat Lee -"),
+    ]
+    assert duplicate_open_deal_pairs(signed) == []
+    assert duplicate_open_deal_pairs(paid) == []
+    assert duplicate_open_deal_pairs(other_pipe) == []
+    assert duplicate_open_deal_pairs(mixed_amount) == []
+    hs = FakeHubSpot([{"id": "c1", "properties": {"email": "pat@acme.com", "firstname": "Pat"}}])
+    hs.deals = signed + paid + other_pipe
+    ev = Engagement(
+        source="calendly",
+        external_id="cal-safe",
+        email="pat@acme.com",
+        first_name="Pat",
+        last_name="Lee",
+    )
+    hs.upsert_deal(hs.contacts[0], ev, STAGE["discovery_scheduled"])
+    assert {d["id"] for d in hs.deals} == {"s1", "s2", "p1", "p2", "o1", "o2"}
+    assert not any(w[0] == "archive_deal" for w in hs.writes)
+
+
+def test_notetaker_keeps_paid_and_shared_discovery_deals():
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "fred",
+                "properties": {
+                    "email": "fred@fireflies.ai",
+                    "firstname": "Fireflies",
+                    "lastname": "Notetaker",
+                },
+            },
+            {
+                "id": "pat",
+                "properties": {
+                    "email": "pat@acme.com",
+                    "firstname": "Pat",
+                    "lastname": "Lee",
+                    "crm_source": "calendly",
+                },
+            },
+        ]
+    )
+    hs.deals = [
+        {
+            "id": "paid-deal",
+            "contact_id": "fred",
+            "contact_ids": ["fred"],
+            "properties": {
+                "dealstage": STAGE["paid"],
+                "dealname": "Paid bot deal",
+                "pipeline": "default",
+                "amount": "3000",
+            },
+        },
+        {
+            "id": "shared-disco",
+            "contact_id": "pat",
+            "contact_ids": ["fred", "pat"],
+            "properties": {
+                "dealstage": STAGE["discovery_scheduled"],
+                "dealname": "Pat Lee - Acme",
+                "pipeline": "default",
+                "amount": "",
+            },
+        },
+    ]
+    report = CycleReport()
+    prune_notetaker_contacts(hs, report)
+    ids = {d["id"] for d in hs.deals}
+    assert ids == {"paid-deal", "shared-disco"}
+    assert not any(c["id"] == "fred" for c in hs.contacts)
+    assert any(c["id"] == "pat" for c in hs.contacts)
+    assert any(w[0] == "archive_contact" and w[1] == "fred" for w in hs.writes)
+    assert not any(w[0] == "archive_deal" for w in hs.writes)
+    assert any(w[0] == "disassociate" and w[1] == "fred" for w in hs.writes)
+
+
+def test_past_calendar_protects_but_does_not_promote():
+    contact = {
+        "id": "past-1",
+        "properties": {
+            "email": "past@acme.com",
+            "firstname": "Pat",
+            "crm_source": "smartlead",
+        },
+    }
+    hs = FakeHubSpot([contact])
+    hs.deals.append(
+        {
+            "id": "past-replied",
+            "contact_id": "past-1",
+            "properties": {"dealstage": STAGE["replied"], "dealname": "Pat -"},
+        }
+    )
+    hs.recent_attendee_emails = {"past@acme.com"}
+    assert has_live_meeting_evidence(hs, contact, hs.deals)
+    report = CycleReport()
+    prune_replied_deals(hs, report)
+    assert any(d["id"] == "past-replied" for d in hs.deals)
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["replied"]
+    assert not any(w[0] == "move_deal" for w in hs.writes)
+
+
+def _gcal_event(**kwargs):
+    now = datetime(2026, 9, 28, 18, 0, tzinfo=timezone.utc)
+    start = kwargs.pop("start", now + timedelta(hours=20))
+    all_day = kwargs.pop("all_day", False)
+    event = {
+        "id": kwargs.pop("id", "evt-1"),
+        "status": kwargs.pop("status", "confirmed"),
+        "summary": kwargs.pop("summary", "SalesGlider Intro with Brian"),
+        "description": kwargs.pop("description", ""),
+        "organizer": kwargs.pop("organizer", {"email": "joshua@salesglidergrowth.com"}),
+        "attendees": kwargs.pop(
+            "attendees",
+            [
+                {
+                    "email": "joshua@salesglidergrowth.com",
+                    "responseStatus": "accepted",
+                    "self": True,
+                },
+                {"email": "bdonigan@wtrenovations.com", "responseStatus": "accepted"},
+            ],
+        ),
+        "start": {"date": start.date().isoformat()}
+        if all_day
+        else {"dateTime": start.isoformat()},
+    }
+    event.update(kwargs)
+    return event, now
+
+
+def test_gcal_create_when_upcoming_sales_meeting_one_prospect():
+    event, now = _gcal_event()
+    classified = classify_gcal_event(event, now=now)
+    assert classified.upcoming
+    assert classified.primary_prospect == "bdonigan@wtrenovations.com"
+    assert may_create_contact_from_event(classified)
+
+
+def test_gcal_no_create_all_day():
+    event, now = _gcal_event(all_day=True)
+    assert not may_create_contact_from_event(classify_gcal_event(event, now=now))
+
+
+def test_gcal_no_create_past_event():
+    event, now = _gcal_event(start=datetime(2026, 9, 27, 16, 0, tzinfo=timezone.utc))
+    classified = classify_gcal_event(event, now=now)
+    assert not classified.upcoming
+    assert not may_create_contact_from_event(classified)
+    assert classified.external_attendees == ["bdonigan@wtrenovations.com"]
+
+
+def test_gcal_no_create_multiple_domains():
+    event, now = _gcal_event(
+        attendees=[
+            {"email": "joshua@salesglidergrowth.com", "responseStatus": "accepted", "self": True},
+            {"email": "a@acme.com", "responseStatus": "accepted"},
+            {"email": "b@other.com", "responseStatus": "accepted"},
+        ]
+    )
+    classified = classify_gcal_event(event, now=now)
+    assert classified.primary_prospect == ""
+    assert not may_create_contact_from_event(classified)
+
+
+def test_gcal_no_create_when_title_is_not_sales():
+    event, now = _gcal_event(summary="Lunch with Brian")
+    assert not may_create_contact_from_event(classify_gcal_event(event, now=now))
+
+
+def test_gcal_no_create_when_josh_declined():
+    event, now = _gcal_event(
+        attendees=[
+            {"email": "joshua@salesglidergrowth.com", "responseStatus": "declined", "self": True},
+            {"email": "bdonigan@wtrenovations.com", "responseStatus": "accepted"},
+        ]
+    )
+    classified = classify_gcal_event(event, now=now)
+    assert classified.josh_declined
+    assert not may_create_contact_from_event(classified)
+    assert attendees_from_gcal_event(event) == set()
+
+
+def test_gcal_excludes_josh_domains_resources_and_bots():
+    event, now = _gcal_event(
+        attendees=[
+            {"email": "joshua@jmosolutionsllc.com", "responseStatus": "accepted", "self": True},
+            {"email": "room@calendar.google.com", "resource": True, "responseStatus": "accepted"},
+            {"email": "fred@fireflies.ai", "responseStatus": "accepted"},
+            {"email": "bdonigan@wtrenovations.com", "responseStatus": "accepted"},
+        ]
+    )
+    classified = classify_gcal_event(event, now=now)
+    assert classified.external_attendees == ["bdonigan@wtrenovations.com"]
+
+
+def test_gcal_same_domain_picks_primary_and_can_create():
+    event, now = _gcal_event(
+        summary="Discovery call with Brian",
+        attendees=[
+            {"email": "joshua@salesglidergrowth.com", "responseStatus": "accepted", "self": True},
+            {"email": "ops@wtrenovations.com", "responseStatus": "accepted"},
+            {"email": "brian.donigan@wtrenovations.com", "responseStatus": "accepted"},
+        ],
+    )
+    classified = classify_gcal_event(event, now=now)
+    assert classified.primary_prospect == "brian.donigan@wtrenovations.com"
+    assert may_create_contact_from_event(classified)
+
+
+class FakeGmail:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+    def search(self, query, max_results=30):
+        return [{"id": m["id"]} for m in self.messages][:max_results]
+
+    def get(self, message_id):
+        row = next(m for m in self.messages if m["id"] == message_id)
+        return {
+            "id": message_id,
+            "snippet": row.get("snippet", ""),
+            "internalDate": row.get("internalDate", "1727500000000"),
+            "payload": {},
+        }
+
+    def headers_map(self, message):
+        row = next(m for m in self.messages if m["id"] == message["id"])
+        return row.get("headers", {})
+
+    def body_text(self, message):
+        row = next(m for m in self.messages if m["id"] == message["id"])
+        return row.get("body", "")
+
+    def calendar_parts(self, message):
+        row = next(m for m in self.messages if m["id"] == message["id"])
+        return list(row.get("ics") or [])
+
+
+def test_gmail_scan_ignores_body_emails_on_pandadoc_and_stripe():
+    hs = FakeHubSpot(
+        [{"id": "paid-1", "properties": {"email": "paid@acme.com", "firstname": "Paid"}}]
+    )
+    report = CycleReport()
+    gmail = FakeGmail(
+        [
+            {
+                "id": "pd-1",
+                "headers": {
+                    "from": "PandaDoc <noreply@pandadoc.com>",
+                    "to": "joshua@salesglidergrowth.com",
+                    "subject": "Document completed",
+                },
+                "snippet": "has been signed",
+                "body": "Counterparty paid@acme.com signed the document.",
+            },
+            {
+                "id": "st-1",
+                "headers": {
+                    "from": "Stripe <receipts@stripe.com>",
+                    "to": "joshua@salesglidergrowth.com",
+                    "subject": "You received a payment",
+                },
+                "snippet": "You received a payment",
+                "body": "Customer paid@acme.com paid $3000.",
+            },
+        ]
+    )
+    events = scan_gmail(make_settings(), gmail, hs, report)
+    assert events == []
+    assert any("not in CRM" in x for x in report.junk_blocked)
+    assert not any(w[0] == "upsert_contact" for w in hs.writes)
+
+
+def test_gmail_scan_uses_ics_body_for_calendar_and_can_create():
+    ics = """
+BEGIN:VEVENT
+SUMMARY:SalesGlider Intro
+DTSTART:20260929T150000Z
+ORGANIZER;CN=Joshua Osborn:mailto:joshua@salesglidergrowth.com
+ATTENDEE;CN=Joshua;PARTSTAT=ACCEPTED:mailto:joshua@salesglidergrowth.com
+ATTENDEE;CN=Brian Donigan;PARTSTAT=ACCEPTED:mailto:bdonigan@wtrenovations.com
+END:VEVENT
+"""
+    hs = FakeHubSpot()
+    report = CycleReport()
+    gmail = FakeGmail(
+        [
+            {
+                "id": "cal-1",
+                "headers": {
+                    "from": "calendar-notification@google.com",
+                    "to": "joshua@salesglidergrowth.com",
+                    "subject": "Invitation: SalesGlider Intro",
+                },
+                "snippet": "invitation scheduled",
+                "body": "Guests bdonigan@wtrenovations.com",
+                "ics": [ics],
+            }
+        ]
+    )
+    events = scan_gmail(make_settings(), gmail, hs, report)
+    assert len(events) == 1
+    assert events[0].extra.get("create_new") is True
+    assert events[0].email == "bdonigan@wtrenovations.com"
+
+
+def test_gmail_scan_calendar_without_sales_title_does_not_create():
+    ics = """
+BEGIN:VEVENT
+SUMMARY:Lunch with Brian
+DTSTART:20260929T150000Z
+ORGANIZER:mailto:joshua@salesglidergrowth.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:joshua@salesglidergrowth.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:bdonigan@wtrenovations.com
+END:VEVENT
+"""
+    hs = FakeHubSpot()
+    report = CycleReport()
+    gmail = FakeGmail(
+        [
+            {
+                "id": "cal-lunch",
+                "headers": {
+                    "from": "calendar-notification@google.com",
+                    "to": "joshua@salesglidergrowth.com",
+                    "subject": "Invitation: Lunch with Brian",
+                },
+                "snippet": "invitation scheduled",
+                "body": "bdonigan@wtrenovations.com",
+                "ics": [ics],
+            }
+        ]
+    )
+    events = scan_gmail(make_settings(), gmail, hs, report)
+    assert events == []
+    assert any("not in CRM" in x for x in report.junk_blocked)
+    assert classify_ics(ics).primary_prospect == "bdonigan@wtrenovations.com"
+    assert not may_create_contact_from_event(classify_ics(ics, now=datetime(2026, 9, 28, 12, tzinfo=timezone.utc)))

@@ -375,9 +375,13 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
     if not briefs_only:
         hs.ensure_properties()
     gmail = Gmail(settings) if settings.gmail_refresh_token else None
+    calendar_creates: list[Engagement] = []
     if gmail and not briefs_only:
         try:
-            hs.scheduled_attendee_emails = calendar_events.load_attendee_emails(gmail, settings)
+            snap = calendar_events.load_calendar(gmail, settings)
+            hs.scheduled_attendee_emails = snap.upcoming
+            hs.recent_attendee_emails = snap.recent
+            calendar_creates = list(snap.create_engagements)
         except Exception as exc:
             logger.warning("calendar attendees unavailable: %s", exc)
     hey = None if briefs_only else (HeyReach(settings) if settings.heyreach_key else None)
@@ -391,7 +395,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         _flush_memory_errors(memory, report)
         return report
 
-    engagements: list[Engagement] = []
+    engagements: list[Engagement] = list(calendar_creates)
     try:
         engagements += cube_acr.scan(settings)
     except Exception as exc:

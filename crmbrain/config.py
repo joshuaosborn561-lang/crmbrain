@@ -42,6 +42,12 @@ JOSH_EMAILS = {
     "joshuaosborn561@gmail.com",
     "joshua@salescloudedgroup.com",
 }
+JOSH_DOMAINS = {
+    "salesglidergrowth.com",
+    "salescloudedgroup.com",
+    "jmosolutionsllc.com",
+    "insight.com",
+}
 
 POSITIVE_SMARTLEAD_CATEGORIES = {1, 2, 5}  # Interested, Meeting Request, Info Request
 POSITIVE_SENTIMENTS = {"positive"}

@@ -68,6 +68,7 @@ class FakeHubSpot:
         self.patches = []
         self.writes = []
         self.scheduled_attendee_emails = set()
+        self.recent_attendee_emails = set()
         self._n = 10
 
     def find_contact(self, email="", phone="", name=""):
@@ -140,8 +141,16 @@ class FakeHubSpot:
     def add_note(self, contact_id, body):
         self.notes.append((contact_id, body))
 
+    def _deal_contact_ids(self, deal):
+        ids = deal.get("contact_ids")
+        if ids:
+            return [str(i) for i in ids]
+        cid = deal.get("contact_id")
+        return [str(cid)] if cid else []
+
     def open_deals_for_contact(self, contact_id):
-        return [d for d in self.deals if d.get("contact_id") == str(contact_id)]
+        wanted = str(contact_id)
+        return [d for d in self.deals if wanted in self._deal_contact_ids(d)]
 
     def iter_deals(self, properties, stage=""):
         for deal in self.deals:
@@ -153,7 +162,17 @@ class FakeHubSpot:
         deal = next((d for d in self.deals if d["id"] == deal_id), None)
         if not deal:
             return []
-        return [c for c in self.contacts if c["id"] == deal.get("contact_id")]
+        ids = set(self._deal_contact_ids(deal))
+        return [c for c in self.contacts if str(c["id"]) in ids]
+
+    def disassociate_contact_from_deal(self, contact_id, deal_id):
+        self.writes.append(("disassociate", str(contact_id), str(deal_id)))
+        for deal in self.deals:
+            if deal["id"] != deal_id:
+                continue
+            ids = [i for i in self._deal_contact_ids(deal) if i != str(contact_id)]
+            deal["contact_ids"] = ids
+            deal["contact_id"] = ids[0] if ids else ""
 
     def contact_has_meetings(self, contact_id):
         return bool(getattr(self, "meetings", {}).get(str(contact_id)))

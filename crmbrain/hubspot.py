@@ -107,8 +107,9 @@ class HubSpot:
                 "Content-Type": "application/json",
             }
         )
-        # Upcoming/recent GCal + Calendly attendee emails. Filled each cycle.
+        # Upcoming GCal attendees may promote. Recent/past only protect from prune.
         self.scheduled_attendee_emails: set[str] = set()
+        self.recent_attendee_emails: set[str] = set()
 
     def _request(
         self,
@@ -322,7 +323,12 @@ class HubSpot:
             d = self._request(
                 "GET",
                 f"/crm/v3/objects/deals/{deal_id}",
-                params={"properties": "dealname,dealstage,pipeline,amount"},
+                params={
+                    "properties": (
+                        "dealname,dealstage,pipeline,amount,dealtype,"
+                        "hs_mrr,hs_arr,hs_acv,hs_tcv,hs_is_closed_won"
+                    )
+                },
                 retry=True,
                 timeout=20,
             )
@@ -538,6 +544,15 @@ class HubSpot:
             if resp.json().get("results"):
                 return True
         return False
+
+    def disassociate_contact_from_deal(self, contact_id: str, deal_id: str) -> None:
+        resp = self._request(
+            "DELETE",
+            f"/crm/v4/objects/contacts/{contact_id}/associations/deals/{deal_id}",
+            timeout=WRITE_TIMEOUT,
+        )
+        if resp.status_code >= 400 and resp.status_code != 404:
+            raise RuntimeError(f"detach contact {contact_id} from deal {deal_id}: {resp.text[:200]}")
 
     def archive_deal(self, deal_id: str) -> None:
         resp = self._request("DELETE", f"/crm/v3/objects/deals/{deal_id}", timeout=20)
