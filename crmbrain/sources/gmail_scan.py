@@ -311,6 +311,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                         "create_new": create_new,
                         "event_type": extra_event,
                         "meeting_when": cal.get("when", ""),
+                        "meeting_at": cal.get("meeting_at", ""),
                         "gcal_create": gcal_create,
                     },
                 )

@@ -439,6 +439,7 @@ def test_no_stage_regression_to_replied_or_nurture():
     assert not should_move_stage(STAGE["discovery_completed"], STAGE["nurture"])
     assert should_move_stage(STAGE["discovery_scheduled"], STAGE["nurture"], back_signal=True)
     assert not should_move_stage(STAGE["discovery_completed"], STAGE["nurture"], back_signal=True)
+    assert not should_move_stage(STAGE["discovery_completed"], STAGE["no_show"], back_signal=True)
     assert should_move_stage(STAGE["replied"], STAGE["discovery_completed"])
     assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["replied"], ev) is None
     assert choose_deal_action(STAGE["proposal_sent"], STAGE["discovery_completed"], ev) is None

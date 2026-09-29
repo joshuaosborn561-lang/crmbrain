@@ -31,6 +31,7 @@ Rules:
 - Only facts the person actually said or that are obvious from the meeting.
 - Birthday, kids, spouse, school, sports, city, hobbies matter.
 - stage_hint only with clear evidence.
+- Never set stage_hint to no_show for a meeting that has a transcript. A held call is discovery_completed.
 - ticker_reason if they punted, no-showed, or the deal died.
 - amount_hint / deal_amount: USD number only when THIS deal's price was clearly stated
   (monthly retainer, proposal dollar amount, package). Examples: "3000", "8500".
@@ -273,6 +274,12 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
             pass
     if ev.stage_hint:
         facts["stage_hint"] = facts.get("stage_hint") or ev.stage_hint
+    if ev.source in {"fireflies", "cube_acr", "allo"}:
+        hint = str(facts.get("stage_hint") or "").strip().lower()
+        if hint in {"no_show", STAGE["no_show"]}:
+            facts["stage_hint"] = "discovery_completed"
+        if str(facts.get("ticker_reason") or "").strip().lower() == "no_show":
+            facts["ticker_reason"] = ""
     amount = normalize_amount_hint(facts.get("amount_hint") or facts.get("deal_amount"), text)
     facts["amount_hint"] = amount
     facts["deal_amount"] = amount
