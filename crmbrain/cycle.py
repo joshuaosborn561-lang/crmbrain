@@ -108,6 +108,8 @@ def _handle_engagement(
     reason = facts.get("ticker_reason") or ev.ticker_reason
     if ev.source == "smartlead" and not reason:
         reason = "never_booked"
+    if reason == "no_show" and policy.is_meeting_held(ev):
+        reason = ""
     if reason:
         ticker.enroll(memory, ev, reason, hs_contact_id=contact["id"])
         report.ticker_enrolled.append(f"{ev.display_name()} {reason}")
@@ -358,6 +360,120 @@ def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> Non
         memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
 
 
+def _mail_contact(hs: HubSpot, ev: Engagement) -> dict | None:
+    contact_id = (ev.extra or {}).get("hubspot_contact_id") or ""
+    found = None
+    if ev.email or ev.phone or ev.display_name():
+        try:
+            found = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+        except Exception:
+            found = None
+    if found:
+        return found
+    if contact_id:
+        return {"id": contact_id, "properties": {}}
+    return None
+
+
+def _contact_deal_context(hs: HubSpot, contact: dict | None) -> tuple[str, bool]:
+    """Return (current live stage, has closed-won deal)."""
+    if not contact or not contact.get("id"):
+        return "", False
+    try:
+        existing = hs.open_deals_for_contact(contact["id"])
+    except Exception:
+        return "", False
+    live = policy.live_open_deals(existing)
+    current = ""
+    if live:
+        deal = max(live, key=policy.deal_richness)
+        current = (deal.get("properties") or {}).get("dealstage") or ""
+    return current, policy.has_closed_won_deal(existing)
+
+
+def _has_reschedule(hs: HubSpot, ev: Engagement) -> bool:
+    email = (ev.email or "").strip().lower()
+    if not email:
+        return False
+    upcoming = {e.lower() for e in (getattr(hs, "scheduled_attendee_emails", None) or set())}
+    return email in upcoming
+
+
+def apply_gmail_stage_update(
+    ev: Engagement,
+    settings: Settings,
+    hs: HubSpot,
+    memory: Memory,
+    hey: HeyReach | None,
+    report: CycleReport,
+    *,
+    held_events: list[Engagement] | None = None,
+) -> None:
+    """Apply a Gmail calendar/billing signal. Re-check held meetings before No Show."""
+    already = memory.already_processed(ev.source, ev.external_id)
+    contact = _mail_contact(hs, ev)
+    contact_id = (contact or {}).get("id") or (ev.extra or {}).get("hubspot_contact_id") or ""
+    if ev.stage_hint == STAGE["no_show"]:
+        scheduled_at = policy.scheduled_at_from_engagement(ev)
+        if scheduled_at is None:
+            scheduled_at = gmail_scan.parse_meeting_at(ev.raw_subject, ev.summary)
+        current_stage, has_closed_won = _contact_deal_context(hs, contact)
+        write_stage = policy.no_show_write_stage(
+            prospect=ev,
+            contact=contact,
+            current_stage=current_stage,
+            held_events=held_events,
+            scheduled_at=scheduled_at,
+            has_reschedule=_has_reschedule(hs, ev),
+            already_processed=already,
+            has_closed_won=has_closed_won,
+        )
+        ev.stage_hint = write_stage
+        if already and not write_stage:
+            report.skipped.append(f"{ev.source}:{ev.external_id} stale no_show")
+            return
+        if already and write_stage == STAGE["discovery_completed"] and contact_id:
+            deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage)
+            if deal.get("id"):
+                report.deals_moved.append(f"{ev.email} gmail -> {write_stage} ({deal.get('id')})")
+            memory.stop_ticker(email=ev.email, hs_contact_id=contact_id)
+            return
+        if not write_stage:
+            report.skipped.append(f"{ev.email or ev.external_id} no_show blocked")
+            if not already:
+                memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject, "skip": "no_show_blocked"})
+                report.processed.append(f"gmail:{ev.raw_subject[:60]}")
+            return
+    elif already:
+        return
+
+    if ev.extra.get("create_new"):
+        ev.source = "calendly"
+        _handle_engagement(ev, settings, hs, memory, hey, report)
+        return
+    if ev.stage_hint and contact_id:
+        deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, ev.stage_hint)
+        report.deals_moved.append(f"{ev.email} gmail -> {ev.stage_hint} ({deal.get('id')})")
+        if ev.stage_hint == STAGE["no_show"]:
+            ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
+            report.ticker_enrolled.append(f"{ev.email} no_show")
+        if ev.stage_hint in {
+            STAGE["paid"],
+            STAGE["signed"],
+            STAGE["discovery_scheduled"],
+            STAGE["discovery_completed"],
+        }:
+            memory.stop_ticker(email=ev.email, hs_contact_id=contact_id)
+    if contact_id:
+        try:
+            found = contact or (hs.find_contact(email=ev.email) if ev.email else {"id": contact_id})
+        except Exception:
+            found = {"id": contact_id}
+        _queue_linkedin(settings, hey, ev, hs, memory, report, contact=found)
+    memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject})
+    report.processed.append(f"gmail:{ev.raw_subject[:60]}")
+
+
 def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleReport:
     settings = settings or Settings.from_env()
     report = CycleReport()
@@ -427,10 +543,13 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         except Exception as exc:
             report.errors.append(f"gmail_person: {exc}")
 
+    held_this_cycle: list[Engagement] = []
     for ev in engagements:
         if not _in_window(ev, settings) and ev.source not in {"heyreach"}:
             report.skipped.append(f"{ev.source}:{ev.external_id} outside window")
             continue
+        if policy.is_meeting_held(ev):
+            held_this_cycle.append(ev)
         try:
             _handle_engagement(ev, settings, hs, memory, hey, report)
         except Exception as exc:
@@ -440,30 +559,15 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         try:
             mail_events = gmail_scan.scan(settings, gmail, hs, report)
             for ev in mail_events:
-                if memory.already_processed(ev.source, ev.external_id):
-                    continue
-                if ev.extra.get("create_new"):
-                    ev.source = "calendly"
-                    _handle_engagement(ev, settings, hs, memory, hey, report)
-                    continue
-                contact_id = ev.extra.get("hubspot_contact_id")
-                if ev.stage_hint and contact_id:
-                    contact = {"id": contact_id, "properties": {}}
-                    deal = hs.upsert_deal(contact, ev, ev.stage_hint)
-                    report.deals_moved.append(f"{ev.email} gmail -> {ev.stage_hint} ({deal.get('id')})")
-                    if ev.stage_hint == STAGE["no_show"]:
-                        ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
-                        report.ticker_enrolled.append(f"{ev.email} no_show")
-                    if ev.stage_hint in {STAGE["paid"], STAGE["signed"], STAGE["discovery_scheduled"]}:
-                        memory.stop_ticker(email=ev.email, hs_contact_id=contact_id)
-                if contact_id:
-                    try:
-                        found = hs.find_contact(email=ev.email) if ev.email else {"id": contact_id}
-                    except Exception:
-                        found = {"id": contact_id}
-                    _queue_linkedin(settings, hey, ev, hs, memory, report, contact=found)
-                memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject})
-                report.processed.append(f"gmail:{ev.raw_subject[:60]}")
+                apply_gmail_stage_update(
+                    ev,
+                    settings,
+                    hs,
+                    memory,
+                    hey,
+                    report,
+                    held_events=held_this_cycle,
+                )
             briefing.send_due(settings, gmail, hs, memory, report)
         except Exception as exc:
             report.errors.append(f"gmail: {exc}")

@@ -221,6 +221,8 @@ class FakeHubSpot:
             self.archive_deal(dup["id"])
         existing = self.open_deals_for_contact(contact["id"])
         live = policy.live_open_deals(existing)
+        if not live and policy.blocks_no_show_create(existing, stage):
+            return {}
         wanted = policy.deal_name_for(ev, contact)
         if live:
             deal = max(live, key=policy.deal_richness)
@@ -439,6 +441,7 @@ def test_no_stage_regression_to_replied_or_nurture():
     assert not should_move_stage(STAGE["discovery_completed"], STAGE["nurture"])
     assert should_move_stage(STAGE["discovery_scheduled"], STAGE["nurture"], back_signal=True)
     assert not should_move_stage(STAGE["discovery_completed"], STAGE["nurture"], back_signal=True)
+    assert not should_move_stage(STAGE["discovery_completed"], STAGE["no_show"], back_signal=True)
     assert should_move_stage(STAGE["replied"], STAGE["discovery_completed"])
     assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["replied"], ev) is None
     assert choose_deal_action(STAGE["proposal_sent"], STAGE["discovery_completed"], ev) is None

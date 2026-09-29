@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 
-from crmbrain.config import STAGE, is_client_context
+from crmbrain.config import JOSH_DOMAINS, JOSH_EMAILS, STAGE, is_client_context, now_utc
 from crmbrain.intelligence import stage_id
 from crmbrain.models import Engagement
-from crmbrain.names import format_deal_name, is_weak_deal_name, looks_like_meeting_title, prefer_deal_name
+from crmbrain.names import (
+    format_deal_name,
+    is_confident_person_name,
+    is_weak_deal_name,
+    looks_like_meeting_title,
+    parse_attendee_token,
+    prefer_deal_name,
+)
 
 # Sources that may CREATE a HubSpot contact (meeting booked or held).
 HUBSPOT_CREATE_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
@@ -15,6 +23,28 @@ HUBSPOT_CREATE_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"}
 NEVER_OPEN_DEAL_SOURCES = frozenset({"smartlead", "heyreach", "rvm", "gmail_person"})
 TICKER_WITHOUT_HUBSPOT = frozenset({"smartlead", "heyreach", "rvm"})
 MEETING_CRM_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
+NO_SHOW_GRACE = timedelta(hours=2)
+HELD_MATCH_WINDOW = timedelta(hours=24)
+FREE_MAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "yahoo.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "icloud.com",
+        "me.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "msn.com",
+    }
+)
+JOSH_NAME_KEYS = frozenset({"joshua osborn", "josh osborn", "joshua", "josh"})
+_NOTETAKER_DOMAINS = frozenset(
+    {"fireflies.ai", "otter.ai", "fathom.video", "read.ai", "krisp.ai", "tldv.io"}
+)
 
 DISCOVERY_HINTS = (
     "salesglider intro",
@@ -200,16 +230,19 @@ def should_enroll_ticker_without_hubspot(ev: Engagement) -> bool:
 def is_explicit_back_signal(stage: str, ev: Engagement) -> bool:
     if stage not in BACK_STAGES:
         return False
+    if is_meeting_held(ev) and stage == STAGE["no_show"]:
+        return False
     if ev.source in NEVER_OPEN_DEAL_SOURCES and not (ev.stage_hint or ""):
         return False
     return True
 
 
 def should_move_stage(current: str, target: str, *, back_signal: bool = False) -> bool:
-    """Advance on stronger evidence. Never regress a held-meeting deal to Nurture."""
+    """Advance on stronger evidence. Never regress a held-meeting deal to Nurture or No Show."""
     if not target or current == target:
         return False
-    if target == STAGE["nurture"] and STAGE_RANK.get(current, 0) >= STAGE_RANK[STAGE["discovery_completed"]]:
+    held_floor = STAGE_RANK[STAGE["discovery_completed"]]
+    if target in {STAGE["nurture"], STAGE["no_show"]} and STAGE_RANK.get(current, 0) >= held_floor:
         return False
     if target in BACK_STAGES and back_signal:
         return True
@@ -226,7 +259,7 @@ def choose_deal_action(current: str | None, requested: str, ev: Engagement) -> s
         return None
     held = is_meeting_held(ev)
     target = requested
-    if held and target == STAGE["nurture"]:
+    if held and target in {STAGE["nurture"], STAGE["no_show"]}:
         target = STAGE["discovery_completed"]
     if current == STAGE["replied"] and held:
         target = STAGE["discovery_completed"]
@@ -253,7 +286,7 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     stage = stage_id(hint) if hint else ""
     if ev.source != "gmail" and stage in MONEY_STAGES:
         stage = ""
-    if stage == STAGE["nurture"] and is_meeting_held(ev):
+    if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
         return STAGE["discovery_completed"]
     if stage:
         if ev.source in NEVER_OPEN_DEAL_SOURCES and stage in {STAGE["replied"], STAGE["nurture"]}:
@@ -268,6 +301,339 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     if ev.source == "allo" and is_allo_discovery(ev):
         return STAGE["discovery_completed"]
     return ""
+
+
+def _norm_email(email: str | None) -> str:
+    return (email or "").strip().lower()
+
+
+def _domain_of(email: str = "", domain: str = "") -> str:
+    raw = (domain or "").strip().lower()
+    if raw:
+        return raw.split("@")[-1]
+    email_l = _norm_email(email)
+    if "@" in email_l:
+        return email_l.rsplit("@", 1)[-1]
+    return ""
+
+
+def _name_key(first: str = "", last: str = "", name: str = "") -> str:
+    full = f"{(first or '').strip()} {(last or '').strip()}".strip() or (name or "").strip()
+    return " ".join(full.lower().split())
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def parse_iso_datetime(value: object) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return _aware(value)
+    raw = str(value).strip().replace("Z", "+00:00")
+    try:
+        return _aware(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def scheduled_at_from_engagement(ev: Engagement) -> datetime | None:
+    extra = ev.extra or {}
+    return parse_iso_datetime(extra.get("meeting_at") or extra.get("scheduled_at"))
+
+
+def held_near_scheduled(
+    held_at: datetime | None,
+    scheduled_at: datetime | None,
+    *,
+    window: timedelta = HELD_MATCH_WINDOW,
+    require_scheduled: bool = False,
+) -> bool:
+    """True when a held call lines up with the booked slot.
+
+    Email matches may omit scheduled_at. Name-only matches must pass
+    ``require_scheduled=True`` so a missing scheduled time is not a match.
+    """
+    held_at = _aware(held_at)
+    scheduled_at = _aware(scheduled_at)
+    if require_scheduled and not scheduled_at:
+        return False
+    if not held_at or not scheduled_at:
+        return not require_scheduled
+    return abs(held_at - scheduled_at) <= window
+
+
+def scheduled_past_grace(
+    scheduled_at: datetime | None,
+    now: datetime | None = None,
+    *,
+    grace: timedelta = NO_SHOW_GRACE,
+) -> bool:
+    scheduled_at = _aware(scheduled_at)
+    if not scheduled_at:
+        return True
+    now = _aware(now) or now_utc()
+    return now >= scheduled_at + grace
+
+
+def _usable_match_domain(domain: str) -> bool:
+    raw = (domain or "").strip().lower()
+    if not raw:
+        return False
+    return raw not in FREE_MAIL_DOMAINS and raw not in JOSH_DOMAINS
+
+
+def _is_josh_name(name: str) -> bool:
+    key = _name_key(name=name)
+    return bool(key) and (key in JOSH_NAME_KEYS or key.startswith("joshua osborn"))
+
+
+def _excluded_held_email(email: str) -> bool:
+    low = _norm_email(email)
+    if not low:
+        return False
+    if low in JOSH_EMAILS or is_system_address_local(low) or is_notetaker_email_local(low):
+        return True
+    return _domain_of(low) in JOSH_DOMAINS
+
+
+def is_system_address_local(email: str) -> bool:
+    low = _norm_email(email)
+    if not low or low in JOSH_EMAILS:
+        return True
+    if any(
+        h in low
+        for h in (
+            "noreply",
+            "no-reply",
+            "donotreply",
+            "mailer-daemon",
+            "notifications@",
+            "calendar-notification",
+            "calendar-noreply",
+            "@calendar.google.com",
+        )
+    ):
+        return True
+    domain = _domain_of(low)
+    if domain in {"calendar.google.com", "googlemail.com"}:
+        return True
+    local = low.split("@", 1)[0]
+    if local.startswith("noreply") or local.startswith("no-reply") or local.startswith("donotreply"):
+        return True
+    return False
+
+
+def is_notetaker_email_local(email: str) -> bool:
+    low = _norm_email(email)
+    if not low or "@" not in low:
+        return False
+    domain = _domain_of(low)
+    if domain in _NOTETAKER_DOMAINS:
+        return True
+    return "notetaker" in low
+
+
+def _drop_held_identity(email: str, name: str) -> bool:
+    if email and _excluded_held_email(email):
+        return True
+    if _is_josh_name(name):
+        return True
+    if "notetaker" in (name or ""):
+        return True
+    if name and looks_like_meeting_title(name):
+        return True
+    return False
+
+
+def _held_attendee_pairs(ev: Engagement) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    own_name = _name_key(ev.first_name, ev.last_name, ev.name or ev.display_name())
+    own_email = _norm_email(ev.email)
+    if own_name or own_email:
+        pairs.append((own_name, own_email))
+    extra = ev.extra or {}
+    for raw in extra.get("participants") or []:
+        display, email = parse_attendee_token(str(raw))
+        pairs.append((_name_key(name=display), _norm_email(email)))
+    for raw in extra.get("meeting_attendees") or []:
+        if isinstance(raw, dict):
+            display = (raw.get("displayName") or raw.get("name") or "").strip()
+            email = _norm_email(raw.get("email") or "")
+        else:
+            display, email = parse_attendee_token(str(raw))
+            email = _norm_email(email)
+        pairs.append((_name_key(name=display), email))
+    return pairs
+
+
+def _kept_held_pairs(ev: Engagement) -> list[tuple[str, str]]:
+    kept: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for name, email in _held_attendee_pairs(ev):
+        if _drop_held_identity(email, name):
+            continue
+        key = (name, email)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append((name, email))
+    return kept
+
+
+def held_participant_emails(ev: Engagement) -> set[str]:
+    return {email for _name, email in _kept_held_pairs(ev) if email}
+
+
+def held_participant_names(ev: Engagement) -> set[str]:
+    return {name for name, _email in _kept_held_pairs(ev) if name}
+
+
+def _prospect_emails(prospect: Engagement, contact: dict | None = None) -> set[str]:
+    emails = {_norm_email(prospect.email)}
+    if contact:
+        emails.add(_norm_email(((contact.get("properties") or {}).get("email")) or ""))
+    return {e for e in emails if e}
+
+
+def _prospect_name(prospect: Engagement, contact: dict | None = None) -> str:
+    name = _name_key(prospect.first_name, prospect.last_name, prospect.name or prospect.display_name())
+    if name:
+        return name
+    if not contact:
+        return ""
+    props = contact.get("properties") or {}
+    return _name_key(props.get("firstname") or "", props.get("lastname") or "")
+
+
+def _prospect_domain(prospect: Engagement, contact: dict | None = None) -> str:
+    domain = _domain_of(prospect.email, prospect.domain)
+    if domain:
+        return domain
+    if not contact:
+        return ""
+    props = contact.get("properties") or {}
+    return _domain_of(props.get("email") or "")
+
+
+def _prospect_company(prospect: Engagement, contact: dict | None = None) -> str:
+    company = (prospect.company or "").strip().lower()
+    if company:
+        return company
+    if not contact:
+        return ""
+    return ((contact.get("properties") or {}).get("company") or "").strip().lower()
+
+
+def _names_align(left: str, right: str) -> bool:
+    """Exact normalized first+last only. No first-initial fallback."""
+    return bool(left) and left == right
+
+
+def prospect_matches_held(
+    held: Engagement,
+    prospect: Engagement,
+    contact: dict | None = None,
+    *,
+    scheduled_at: datetime | None = None,
+) -> bool:
+    """Match a held Fireflies/Cube call to the booked prospect.
+
+    Prefer attendee email. Name-only matches need an exact first+last on
+    exactly one non-Josh participant and a known scheduled time within 24h.
+    """
+    if not is_meeting_held(held):
+        return False
+    prospect_emails = _prospect_emails(prospect, contact)
+    held_emails = held_participant_emails(held)
+    if prospect_emails & held_emails:
+        return held_near_scheduled(held.occurred_at, scheduled_at)
+    prospect_name = _prospect_name(prospect, contact)
+    kept = _kept_held_pairs(held)
+    held_names = [name for name, _email in kept if name]
+    if not prospect_name or prospect_name not in held_names:
+        return False
+    held_domain = _domain_of(held.email, held.domain)
+    if held_domain and _excluded_held_email(held.email):
+        held_domain = ""
+    prospect_domain = _prospect_domain(prospect, contact)
+    if _usable_match_domain(held_domain) and _usable_match_domain(prospect_domain) and held_domain == prospect_domain:
+        return held_near_scheduled(held.occurred_at, scheduled_at)
+    held_company = _prospect_company(held)
+    prospect_company = _prospect_company(prospect, contact)
+    if held_company and prospect_company and held_company == prospect_company:
+        return held_near_scheduled(held.occurred_at, scheduled_at)
+    if held_emails and prospect_emails:
+        return False
+    if not is_confident_person_name(prospect_name):
+        return False
+    if held_names.count(prospect_name) != 1:
+        return False
+    return held_near_scheduled(held.occurred_at, scheduled_at, require_scheduled=True)
+
+
+def matching_held_event(
+    prospect: Engagement,
+    contact: dict | None,
+    held_events: list[Engagement] | None,
+    scheduled_at: datetime | None = None,
+) -> Engagement | None:
+    for held in held_events or []:
+        if prospect_matches_held(held, prospect, contact, scheduled_at=scheduled_at):
+            return held
+    return None
+
+
+def has_closed_won_deal(deals: list[dict] | None) -> bool:
+    for deal in deals or []:
+        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        if stage in CLOSED_WON_STAGES:
+            return True
+    return False
+
+
+def blocks_no_show_create(deals: list[dict] | None, stage: str) -> bool:
+    """Do not open a No Show deal when the contact already has Paid/Signed."""
+    return stage == STAGE["no_show"] and has_closed_won_deal(deals)
+
+
+def no_show_write_stage(
+    *,
+    prospect: Engagement,
+    contact: dict | None = None,
+    current_stage: str = "",
+    held_events: list[Engagement] | None = None,
+    scheduled_at: datetime | None = None,
+    now: datetime | None = None,
+    has_reschedule: bool = False,
+    already_processed: bool = False,
+    has_closed_won: bool = False,
+) -> str:
+    """Stage to write for a No Show signal. Empty means skip the write.
+
+    Only a held event matched in this cycle may promote to Discovery Completed.
+    A stale processed no_show event must not re-fire or re-promote.
+    """
+    held = matching_held_event(prospect, contact, held_events, scheduled_at)
+    completed_or_better = STAGE_RANK.get(current_stage, 0) >= STAGE_RANK[STAGE["discovery_completed"]]
+    if already_processed:
+        if held:
+            return STAGE["discovery_completed"]
+        return ""
+    if held:
+        return STAGE["discovery_completed"]
+    if completed_or_better or has_closed_won or current_stage in CLOSED_WON_STAGES:
+        return ""
+    if has_reschedule:
+        return ""
+    if scheduled_at and not scheduled_past_grace(scheduled_at, now):
+        return ""
+    return STAGE["no_show"]
 
 
 _DEAL_NAME_NOISE = r"(replied|appointment scheduled|discovery scheduled)"

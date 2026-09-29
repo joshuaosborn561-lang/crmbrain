@@ -685,10 +685,11 @@ def test_gmail_scan_ignores_body_emails_on_pandadoc_and_stripe():
 
 
 def test_gmail_scan_uses_ics_body_for_calendar_and_can_create():
-    ics = """
+    start = datetime.now(timezone.utc) + timedelta(days=2)
+    ics = f"""
 BEGIN:VEVENT
 SUMMARY:SalesGlider Intro
-DTSTART:20260929T150000Z
+DTSTART:{start.strftime("%Y%m%dT%H%M%SZ")}
 ORGANIZER;CN=Joshua Osborn:mailto:joshua@salesglidergrowth.com
 ATTENDEE;CN=Joshua;PARTSTAT=ACCEPTED:mailto:joshua@salesglidergrowth.com
 ATTENDEE;CN=Brian Donigan;PARTSTAT=ACCEPTED:mailto:bdonigan@wtrenovations.com
