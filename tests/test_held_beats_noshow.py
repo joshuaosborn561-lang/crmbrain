@@ -288,3 +288,132 @@ def test_policy_never_demotes_held_or_completed_to_no_show():
         "discovery_completed"
     ]
     assert resolve_stage(held, {"stage_hint": "no_show"}) == STAGE["discovery_completed"]
+
+
+def test_crm_source_fireflies_without_held_event_writes_no_show(tmp_path):
+    past = SCHEDULED - timedelta(hours=4)
+    hs, memory, report = _prep(tmp_path, crm_source="fireflies")
+    ev = _gmail_no_show(scheduled_at=past)
+    assert (
+        no_show_write_stage(
+            prospect=ev,
+            contact=hs.contacts[0],
+            current_stage=STAGE["discovery_scheduled"],
+            held_events=[],
+            scheduled_at=past,
+            now=CYCLE_5PM,
+        )
+        == STAGE["no_show"]
+    )
+    apply_gmail_stage_update(ev, make_settings(), hs, memory, None, report, held_events=[])
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+
+    hs2, memory2, report2 = _prep(tmp_path / "crm-src-stale", crm_source="fireflies")
+    stale = _gmail_no_show(scheduled_at=past, already_id="g-crm-src")
+    memory2.mark_processed(stale.source, stale.external_id, {"subject": stale.raw_subject})
+    apply_gmail_stage_update(stale, make_settings(), hs2, memory2, None, report2, held_events=[])
+    assert hs2.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
+    assert any("stale no_show" in s for s in report2.skipped)
+
+
+def test_already_processed_no_show_without_held_stays_no_show(tmp_path):
+    hs, memory, report = _prep(tmp_path, stage=STAGE["no_show"])
+    ev = _gmail_no_show(scheduled_at=SCHEDULED - timedelta(hours=4))
+    memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject})
+    apply_gmail_stage_update(ev, make_settings(), hs, memory, None, report, held_events=[])
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert not any(STAGE["discovery_completed"] in str(item) for item in report.deals_moved)
+
+
+def test_tim_smith_gmail_does_not_match_tom_smith_gmail():
+    held = Engagement(
+        source="fireflies",
+        external_id="ff-tim",
+        occurred_at=HELD_AT,
+        email="tim@gmail.com",
+        first_name="Tim",
+        last_name="Smith",
+        name="Tim Smith",
+        domain="gmail.com",
+        extra={
+            "participants": ["tim@gmail.com"],
+            "meeting_attendees": [{"displayName": "Tim Smith", "email": "tim@gmail.com"}],
+        },
+    )
+    prospect = Engagement(
+        source="gmail",
+        external_id="g-tom",
+        email="tom@gmail.com",
+        first_name="Tom",
+        last_name="Smith",
+        name="Tom Smith",
+        domain="gmail.com",
+        extra={"meeting_at": SCHEDULED.isoformat()},
+    )
+    assert not prospect_matches_held(held, prospect, scheduled_at=SCHEDULED)
+    assert matching_held_event(prospect, None, [held], SCHEDULED) is None
+
+
+def test_same_name_on_josh_domain_is_rejected():
+    held = _fireflies(email="tyler@salesglidergrowth.com")
+    held.domain = "salesglidergrowth.com"
+    held.company = ""
+    held.extra = {
+        "participants": ["tyler@salesglidergrowth.com"],
+        "meeting_attendees": [
+            {"displayName": "Tyler Leverington", "email": "tyler@salesglidergrowth.com"}
+        ],
+    }
+    prospect = _gmail_no_show()
+    assert not prospect_matches_held(held, prospect, _tyler_contact(), scheduled_at=SCHEDULED)
+
+
+def test_josh_name_on_held_call_produces_no_match():
+    held = Engagement(
+        source="fireflies",
+        external_id="ff-josh",
+        occurred_at=HELD_AT,
+        email="joshua@salesglidergrowth.com",
+        first_name="Joshua",
+        last_name="Osborn",
+        name="Joshua Osborn",
+        extra={
+            "participants": ["Joshua Osborn", "joshua@salesglidergrowth.com"],
+            "meeting_attendees": [
+                {"displayName": "Joshua Osborn", "email": "joshua@salesglidergrowth.com"}
+            ],
+        },
+    )
+    prospect = Engagement(
+        source="gmail",
+        external_id="g-josh",
+        email="joshua@deeprootscapital.com",
+        first_name="Joshua",
+        last_name="Osborn",
+        name="Joshua Osborn",
+        extra={"meeting_at": SCHEDULED.isoformat()},
+    )
+    assert not prospect_matches_held(held, prospect, scheduled_at=SCHEDULED)
+    assert matching_held_event(prospect, None, [held], SCHEDULED) is None
+
+
+def test_paid_only_contact_gmail_no_show_creates_no_deal(tmp_path):
+    contact = _tyler_contact()
+    hs = FakeHubSpot([contact])
+    hs.deals.append(
+        {
+            "id": "paid-deal",
+            "contact_id": "tyler-1",
+            "properties": {
+                "dealstage": STAGE["paid"],
+                "dealname": "Tyler Leverington - Deep Roots Capital",
+            },
+        }
+    )
+    memory = Memory(make_settings(), data_dir=tmp_path)
+    report = CycleReport()
+    ev = _gmail_no_show(scheduled_at=SCHEDULED - timedelta(hours=4))
+    apply_gmail_stage_update(ev, make_settings(), hs, memory, None, report, held_events=[])
+    assert len(hs.deals) == 1
+    assert hs.deals[0]["id"] == "paid-deal"
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["paid"]

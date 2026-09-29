@@ -375,17 +375,20 @@ def _mail_contact(hs: HubSpot, ev: Engagement) -> dict | None:
     return None
 
 
-def _current_deal_stage(hs: HubSpot, contact: dict | None) -> str:
+def _contact_deal_context(hs: HubSpot, contact: dict | None) -> tuple[str, bool]:
+    """Return (current live stage, has closed-won deal)."""
     if not contact or not contact.get("id"):
-        return ""
+        return "", False
     try:
-        live = policy.live_open_deals(hs.open_deals_for_contact(contact["id"]))
+        existing = hs.open_deals_for_contact(contact["id"])
     except Exception:
-        return ""
-    if not live:
-        return ""
-    deal = max(live, key=policy.deal_richness)
-    return (deal.get("properties") or {}).get("dealstage") or ""
+        return "", False
+    live = policy.live_open_deals(existing)
+    current = ""
+    if live:
+        deal = max(live, key=policy.deal_richness)
+        current = (deal.get("properties") or {}).get("dealstage") or ""
+    return current, policy.has_closed_won_deal(existing)
 
 
 def _has_reschedule(hs: HubSpot, ev: Engagement) -> bool:
@@ -414,14 +417,16 @@ def apply_gmail_stage_update(
         scheduled_at = policy.scheduled_at_from_engagement(ev)
         if scheduled_at is None:
             scheduled_at = gmail_scan.parse_meeting_at(ev.raw_subject, ev.summary)
+        current_stage, has_closed_won = _contact_deal_context(hs, contact)
         write_stage = policy.no_show_write_stage(
             prospect=ev,
             contact=contact,
-            current_stage=_current_deal_stage(hs, contact),
+            current_stage=current_stage,
             held_events=held_events,
             scheduled_at=scheduled_at,
             has_reschedule=_has_reschedule(hs, ev),
             already_processed=already,
+            has_closed_won=has_closed_won,
         )
         ev.stage_hint = write_stage
         if already and not write_stage:

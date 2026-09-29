@@ -394,6 +394,8 @@ class HubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        if policy.blocks_no_show_create(existing, stage):
+            return {}
         target = policy.choose_deal_action(None, stage, ev) if stage else None
         if not target:
             return {}
@@ -403,6 +405,8 @@ class HubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        if policy.blocks_no_show_create(existing, stage):
+            return {}
         name = policy.deal_name_for(ev, contact) or ev.email or "SalesGlider deal"
         props = {
             "dealname": name,

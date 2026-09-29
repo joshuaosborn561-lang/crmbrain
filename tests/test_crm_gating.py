@@ -221,6 +221,8 @@ class FakeHubSpot:
             self.archive_deal(dup["id"])
         existing = self.open_deals_for_contact(contact["id"])
         live = policy.live_open_deals(existing)
+        if not live and policy.blocks_no_show_create(existing, stage):
+            return {}
         wanted = policy.deal_name_for(ev, contact)
         if live:
             deal = max(live, key=policy.deal_richness)
