@@ -164,7 +164,7 @@ def test_integration_status_present_missing_only():
     assert "HeyReach key: missing" in rows
     assert "Slack token: missing" in rows
     assert "Supabase key: missing" in rows
-    assert "Cube folder: missing" in rows
+    assert "Cube ACR: missing" in rows
     blob = " ".join(rows)
     assert "hs-secret-value" not in blob
     assert "gmail-client-secret-value" not in blob

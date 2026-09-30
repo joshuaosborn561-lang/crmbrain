@@ -12,8 +12,12 @@ from typing import Any
 import requests
 
 from crmbrain.config import Settings
+from crmbrain.google_auth import CALENDAR_READONLY
 
 logger = logging.getLogger(__name__)
+
+# Calendar listing uses Calendar API v3 when the refresh token has calendar.readonly.
+CALENDAR_READONLY_SCOPE = CALENDAR_READONLY
 
 # Listing/scanning messages can stall past 30s; retry transient reads.
 READ_TIMEOUT = 45
@@ -212,7 +216,7 @@ class Gmail:
             logger.info("calendar api %s — falling back to Gmail invites", resp.status_code)
             raise PermissionError(
                 f"calendar api {resp.status_code} — grant Calendar readonly scope "
-                "on the Gmail OAuth token (https://www.googleapis.com/auth/calendar.readonly)"
+                f"on the Gmail OAuth token ({CALENDAR_READONLY_SCOPE})"
             )
         resp.raise_for_status()
         return resp.json().get("items") or []

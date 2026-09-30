@@ -11,7 +11,7 @@ from datetime import datetime
 
 from crmbrain import evidence, intent, policy, prune
 from crmbrain.budget import WriteBudget
-from crmbrain.config import STAGE, Settings
+from crmbrain.config import STAGE, Settings, is_non_deal_person
 from crmbrain.evidence import (
     KIND_BOOKED,
     KIND_CANCELED,
@@ -181,6 +181,19 @@ def _commit(
     deal: dict | None,
     dry_run: bool,
 ) -> bool:
+    if is_non_deal_person(
+        name=timeline.display_name(),
+        email=timeline.email,
+        company=timeline.company,
+        phone=timeline.phone,
+    ) or is_non_deal_person(
+        name=ev.display_name() or ev.name,
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+    ):
+        report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} excluded")
+        return False
     if budget.aborted:
         _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
         return False
@@ -360,6 +373,13 @@ def restore_missing_deals(
     """If meeting evidence exists and there is no open deal, create or restore one."""
     budget = budget or WriteBudget.from_settings(settings)
     for timeline in timelines.values():
+        if is_non_deal_person(
+            name=timeline.display_name(),
+            email=timeline.email,
+            company=timeline.company,
+            phone=timeline.phone,
+        ):
+            continue
         if _open_deal(timeline):
             continue
         if policy.has_closed_won_deal(timeline.deals):
@@ -562,6 +582,13 @@ def reeval_discovery_scheduled(
             continue
         contact = contacts[0]
         props = contact.get("properties") or {}
+        if is_non_deal_person(
+            name=f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip(),
+            email=props.get("email") or "",
+            company=props.get("company") or "",
+            phone=props.get("phone") or "",
+        ):
+            continue
         email = (props.get("email") or "").strip().lower()
         key = evidence.person_key(
             email,
@@ -756,6 +783,14 @@ def run(
             return timelines
         budget.aborted = False
     for timeline in timelines.values():
+        if is_non_deal_person(
+            name=timeline.display_name(),
+            email=timeline.email,
+            company=timeline.company,
+            phone=timeline.phone,
+        ):
+            report.skipped.append(f"reconcile:{timeline.display_name() or timeline.email} excluded")
+            continue
         email = timeline.email
         canceled = KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails)
         if canceled and _calendar_blocks_back_move(hs, email, timeline.contact):

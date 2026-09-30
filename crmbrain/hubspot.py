@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings, digits_phone
+from crmbrain.config import STAGE, Settings, digits_phone, is_non_deal_person
 from crmbrain.models import Engagement
 from crmbrain.names import prefer_contact_name
 from crmbrain import intelligence, policy
@@ -240,7 +240,27 @@ class HubSpot:
             if not after:
                 break
 
+    def _is_excluded(self, ev: Engagement | None = None, contact: dict | None = None) -> bool:
+        props = (contact or {}).get("properties") or {}
+        name = ""
+        email = ""
+        company = ""
+        phone = ""
+        if ev is not None:
+            name = ev.display_name() or ev.name
+            email = ev.email
+            company = ev.company
+            phone = ev.phone
+        name = name or f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+        email = email or props.get("email") or ""
+        company = company or props.get("company") or ""
+        phone = phone or props.get("phone") or ""
+        return is_non_deal_person(name=name, email=email, company=company, phone=phone)
+
     def upsert_contact(self, ev: Engagement) -> dict:
+        if self._is_excluded(ev):
+            logger.info("skip hubspot contact write for excluded person")
+            return {"id": "", "properties": {}, "skipped": "non_deal"}
         existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         existing_props = (existing or {}).get("properties") or {}
         first = prefer_contact_name(
@@ -393,6 +413,9 @@ class HubSpot:
         return deal
 
     def upsert_deal(self, contact: dict, ev: Engagement, stage: str, amount: str = "") -> dict:
+        if self._is_excluded(ev, contact):
+            logger.info("skip hubspot deal write for excluded person")
+            return {}
         contact_id = contact["id"]
         existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
         live = policy.live_open_deals(existing)

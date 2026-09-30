@@ -22,17 +22,21 @@ from crmbrain.config import (
     STAGE,
     Settings,
     compute_lookback_start,
+    is_non_deal_person,
     is_personal,
+    is_personal_family_intent,
     now_utc,
     settings_lookback_start,
 )
 from crmbrain.gmail_client import Gmail
+from crmbrain.google_auth import drive_auth_detail, has_drive_access
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement, ProposedWrite
 from crmbrain.leadmagic import should_skip_email, usable_linkedin
-from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartlead
+from crmbrain.sources import cube_acr, fireflies, gmail_scan, rvm, smartlead
+from crmbrain.sources.cube_acr import CubeAuthError
 from crmbrain.sources.gmail_scan import is_junk_crm_email
 
 logger = logging.getLogger(__name__)
@@ -89,6 +93,15 @@ def _handle_engagement(
         report.junk_blocked.append(f"{ev.source}:{ev.email} system address")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "system_email"})
         return
+    if is_non_deal_person(
+        name=ev.display_name() or ev.name,
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+    ):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         if not policy.personal_allowed_for_sales_intro(ev):
             report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} personal")
@@ -103,6 +116,10 @@ def _handle_engagement(
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_transcript"})
         return
     decision = intent.classify(settings, ev)
+    if is_personal_family_intent(decision.intent):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {decision.intent}")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent or "personal"})
+        return
     already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
     if settings.dry_run:
         _propose_engagement(report, ev, decision, already)
@@ -386,8 +403,7 @@ def integration_status(settings: Settings) -> list[str]:
         ("HeyReach key", bool(settings.heyreach_key)),
         ("Slack token", bool(settings.slack_token)),
         ("Supabase key", bool(settings.supabase_key)),
-        ("Cube folder", bool(settings.cube_folder)),
-        ("Allo key", bool(settings.allo_key)),
+        ("Cube ACR", bool(settings.cube_folder) and has_drive_access(settings)),
     )
     return [f"{name}: {'present' if ok else 'missing'}" for name, ok in checks]
 
@@ -518,7 +534,29 @@ def apply_gmail_stage_update(
 ) -> None:
     """Apply a Gmail calendar/billing signal. Re-check held meetings before No Show."""
     already = memory.already_processed(ev.source, ev.external_id)
+    if is_non_deal_person(
+        name=ev.display_name() or ev.name,
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+    ):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        if not already:
+            memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
     contact = _mail_contact(hs, ev)
+    contact_props = (contact or {}).get("properties") or {}
+    if is_non_deal_person(
+        name=f"{contact_props.get('firstname') or ''} {contact_props.get('lastname') or ''}".strip()
+        or ev.display_name(),
+        email=contact_props.get("email") or ev.email,
+        company=contact_props.get("company") or ev.company,
+        phone=contact_props.get("phone") or ev.phone,
+    ):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        if not already:
+            memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
     contact_id = (contact or {}).get("id") or (ev.extra or {}).get("hubspot_contact_id") or ""
     if ev.stage_hint == STAGE["no_show"]:
         scheduled_at = policy.scheduled_at_from_engagement(ev)
@@ -652,8 +690,8 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                 _stale_source_warning(report, "calendar", str(exc))
             else:
                 report.errors.append(f"calendar: {exc}")
-    if not settings.allo_key:
-        _stale_source_warning(report, "allo", "ALLO_API_KEY missing")
+    if not has_drive_access(settings):
+        _stale_source_warning(report, "cube_acr", drive_auth_detail(settings))
     hey = None if briefs_only else (HeyReach(settings) if settings.heyreach_key else None)
     if briefs_only:
         if gmail and not settings.dry_run:
@@ -668,14 +706,17 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         return report
 
     engagements: list[Engagement] = list(calendar_creates)
-    try:
-        cube_events = cube_acr.scan(settings)
-        engagements += cube_events
-        if hasattr(memory, "upsert_cube_call"):
-            for ev in cube_events:
-                memory.upsert_cube_call(ev)
-    except Exception as exc:
-        report.errors.append(f"cube_acr: {exc}")
+    if has_drive_access(settings):
+        try:
+            cube_events = cube_acr.scan(settings)
+            engagements += cube_events
+            if hasattr(memory, "upsert_cube_call"):
+                for ev in cube_events:
+                    memory.upsert_cube_call(ev)
+        except CubeAuthError as exc:
+            _stale_source_warning(report, "cube_acr", str(exc))
+        except Exception as exc:
+            report.errors.append(f"cube_acr: {exc}")
     try:
         engagements += fireflies.scan(settings)
     except Exception as exc:
@@ -693,10 +734,6 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         engagements += rvm.scan(settings)
     except Exception as exc:
         report.errors.append(f"rvm: {exc}")
-    try:
-        engagements += allo.scan(settings, gmail, memory=memory, errors=report.errors)
-    except Exception as exc:
-        report.errors.append(f"allo: {exc}")
     if gmail:
         try:
             engagements += gmail_scan.scan_people(settings, gmail)
@@ -790,15 +827,18 @@ def _record_staleness(
         "gmail": _latest_source_at(engagements, "gmail") or _latest_source_at(engagements, "gmail_person"),
         "fireflies": _latest_source_at(engagements, "fireflies"),
         "calendar": calendar_last,
-        "allo": _latest_source_at(engagements, "allo"),
+        "cube_acr": _latest_source_at(engagements, "cube_acr"),
         "smartlead": _latest_source_at(engagements, "smartlead"),
     }
     errors = {}
     if calendar_error:
         errors["calendar"] = calendar_error
+    for warn in report.warnings:
+        if warn.lower().startswith("cube_acr"):
+            errors["cube_acr"] = warn
     for err in report.errors:
         low = err.lower()
-        for source in ("gmail", "fireflies", "allo", "smartlead"):
+        for source in ("gmail", "fireflies", "cube_acr", "smartlead"):
             if low.startswith(source):
                 errors[source] = err
     staleness.record_and_alarm(memory, report, observed, errors=errors)

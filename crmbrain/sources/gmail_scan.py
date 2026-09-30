@@ -9,6 +9,7 @@ from crmbrain.config import (
     STAGE,
     Settings,
     gmail_after_clause,
+    is_non_deal_person,
     is_personal,
     settings_lookback_start,
 )
@@ -433,6 +434,8 @@ def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
                 headers.get("cc", ""),
             )
             if not email or is_personal(name=f"{first} {last}", email=email):
+                continue
+            if is_non_deal_person(name=f"{first} {last}", email=email):
                 continue
             domain = email.split("@")[1] if "@" in email else ""
             out.append(

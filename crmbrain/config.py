@@ -21,6 +21,8 @@ PERSONAL_PHONES = {
     "19415927144",
     "+15612255142",  # Cayden
     "15612255142",
+    "+19734613447",  # Nonna
+    "19734613447",
 }
 # Exact full-name matches plus first-token matches for the short set.
 PERSONAL_NAMES = {
@@ -35,8 +37,17 @@ PERSONAL_NAMES = {
     "dad",
     "mom",
     "father",
+    "nonna",
 }
-PERSONAL_FIRST_NAMES = {"sarah", "jeremy", "diana", "cayden", "dad", "mom", "father"}
+PERSONAL_FIRST_NAMES = {"sarah", "jeremy", "diana", "cayden", "dad", "mom", "father", "nonna"}
+# Never write these people to HubSpot (contacts, notes, or deals).
+SEEDED_NON_DEAL_NAMES = (
+    "cynthia hernandez",
+    "alex branning",
+    "chorbie",
+)
+SEEDED_NON_DEAL_EMAILS: tuple[str, ...] = ()
+PERSONAL_FAMILY_INTENTS = frozenset({"personal", "family"})
 JOSH_EMAILS = {
     "joshua@salesglidergrowth.com",
     "joshuaosborn561@gmail.com",
@@ -151,6 +162,8 @@ class Settings:
     max_creates: int = 10
     max_stage_moves: int = 20
     max_change_fraction: float = 0.15
+    google_api_key: str = ""
+    cube_lookback_days: int = 14
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -189,6 +202,8 @@ class Settings:
             max_creates=int(os.getenv("MAX_CREATES", "10")),
             max_stage_moves=int(os.getenv("MAX_STAGE_MOVES", "20")),
             max_change_fraction=float(os.getenv("MAX_CHANGE_FRACTION", "0.15")),
+            google_api_key=os.getenv("GOOGLE_API_KEY", ""),
+            cube_lookback_days=int(os.getenv("CUBE_LOOKBACK_DAYS", "14")),
         )
 
 
@@ -265,14 +280,43 @@ def digits_phone(value: str | None) -> str:
     return "".join(ch for ch in value if ch.isdigit())
 
 
+def _csv_env(name: str) -> set[str]:
+    return {part.strip() for part in os.getenv(name, "").split(",") if part.strip()}
+
+
+def personal_numbers() -> set[str]:
+    """Seeded family numbers plus PERSONAL_NUMBERS (comma-separated)."""
+    phones = set(PERSONAL_PHONES)
+    for raw in _csv_env("PERSONAL_NUMBERS"):
+        phones.add(raw)
+        digits = digits_phone(raw)
+        if digits:
+            phones.add(digits)
+            phones.add(f"+{digits}")
+    return phones
+
+
+def non_deal_emails() -> set[str]:
+    emails = {e.strip().lower() for e in SEEDED_NON_DEAL_EMAILS if e.strip()}
+    emails.update(e.lower() for e in _csv_env("NON_DEAL_EMAILS"))
+    return emails
+
+
+def non_deal_names() -> set[str]:
+    names = {n.strip().lower() for n in SEEDED_NON_DEAL_NAMES if n.strip()}
+    names.update(n.lower() for n in _csv_env("NON_DEAL_NAMES"))
+    return names
+
+
 def is_personal(name: str | None = None, phone: str | None = None, email: str | None = None) -> bool:
     if email and email.lower() in JOSH_EMAILS:
         return False
     if phone:
         raw = digits_phone(phone)
-        if raw in PERSONAL_PHONES or f"+{raw}" in PERSONAL_PHONES:
+        phones = personal_numbers()
+        if raw in phones or f"+{raw}" in phones:
             return True
-        if raw[-10:] in {p[-10:] for p in PERSONAL_PHONES if len(p) >= 10}:
+        if raw[-10:] in {p[-10:] for p in phones if len(p) >= 10}:
             return True
     if name:
         n = name.strip().lower()
@@ -285,6 +329,34 @@ def is_personal(name: str | None = None, phone: str | None = None, email: str | 
         if first in PERSONAL_FIRST_NAMES:
             return True
     return False
+
+
+def is_non_deal_person(
+    name: str | None = None,
+    email: str | None = None,
+    company: str | None = None,
+    phone: str | None = None,
+) -> bool:
+    """Hard block: no HubSpot contact, note, or deal writes for these people."""
+    email_l = (email or "").strip().lower()
+    if email_l and email_l in non_deal_emails():
+        return True
+    blob = " ".join(part for part in (name or "", company or "", email_l, phone or "") if part).lower()
+    if not blob.strip():
+        return False
+    for token in non_deal_names():
+        if token and token in blob:
+            return True
+    return False
+
+
+def is_personal_family_intent(intent: str | None) -> bool:
+    value = (intent or "").strip().lower()
+    if not value:
+        return False
+    if value in PERSONAL_FAMILY_INTENTS:
+        return True
+    return "family" in value
 
 
 def is_client_context(name: str = "", company: str = "", title: str = "") -> bool:

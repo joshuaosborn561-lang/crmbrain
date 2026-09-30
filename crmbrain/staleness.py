@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from crmbrain.config import CDT, now_utc
 from crmbrain.models import CycleReport
 
-WATCHED_SOURCES = ("gmail", "fireflies", "calendar", "allo", "smartlead")
+WATCHED_SOURCES = ("gmail", "fireflies", "calendar", "cube_acr", "smartlead")
 STALE_BUSINESS_DAYS = 2
 
 
