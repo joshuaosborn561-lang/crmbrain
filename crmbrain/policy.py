@@ -179,11 +179,43 @@ POC_HINTS = (
     "paid poc",
     "paid pilot",
 )
+POC_HINT_RE = re.compile(
+    r"\b(?:poc|proof of concept|pilot|kickoff|onboarding|paid poc|paid pilot)\b",
+    re.I,
+)
+
+
+def has_word_hint(blob: str, hints: tuple[str, ...] | list[str]) -> str:
+    """Match hints on word boundaries so 'apocalypse' is not a POC."""
+    text = blob or ""
+    for hint in hints:
+        if not hint:
+            continue
+        if re.search(rf"\b{re.escape(hint)}\b", text, re.I):
+            return hint
+    return ""
 
 
 def has_poc_evidence(ev: Engagement) -> bool:
-    blob = f"{_blob(ev)} {ev.transcript or ''}".lower()
-    return any(h in blob for h in POC_HINTS)
+    blob = f"{_blob(ev)} {ev.transcript or ''}"
+    return bool(POC_HINT_RE.search(blob))
+
+
+def document_matches_deal(deal: dict | None, ev: Engagement) -> bool:
+    """True only when THIS deal already stores the same document id or name."""
+    if not deal:
+        return False
+    extra = ev.extra or {}
+    incoming_id = str(extra.get("document_id") or "").strip().lower()
+    incoming_name = str(extra.get("document_name") or "").strip().lower()
+    props = deal.get("properties") or {}
+    stored_id = str(props.get("document_id") or "").strip().lower()
+    stored_name = str(props.get("document_name") or "").strip().lower()
+    if incoming_id and stored_id and incoming_id == stored_id:
+        return True
+    if incoming_name and stored_name and incoming_name == stored_name:
+        return True
+    return False
 
 
 def is_allo_discovery(ev: Engagement) -> bool:
@@ -278,7 +310,9 @@ def should_move_stage(current: str, target: str, *, back_signal: bool = False) -
     return target_rank > current_rank
 
 
-def choose_deal_action(current: str | None, requested: str, ev: Engagement) -> str | None:
+def choose_deal_action(
+    current: str | None, requested: str, ev: Engagement, deal: dict | None = None
+) -> str | None:
     """Stage to write, or None to leave the deal / skip create."""
     if not requested:
         return None
@@ -296,14 +330,12 @@ def choose_deal_action(current: str | None, requested: str, ev: Engagement) -> s
         return target
     if current == target:
         return None
-    extra = ev.extra or {}
-    if (
-        current == STAGE["signed"]
-        and target == STAGE["proposal_sent"]
-        and ev.source == "gmail"
-        and (extra.get("document_name") or extra.get("amount"))
-    ):
-        return target
+    if current == STAGE["paid"] and target != STAGE["paid"]:
+        return None
+    if current == STAGE["signed"] and target == STAGE["proposal_sent"]:
+        if document_matches_deal(deal, ev):
+            return target
+        return None
     back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
     if not should_move_stage(current, target, back_signal=back):
         return None
@@ -321,8 +353,6 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
         stage = ""
     if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
         return STAGE["discovery_completed"]
-    if has_poc_evidence(ev) and ev.source not in NEVER_OPEN_DEAL_SOURCES:
-        return STAGE["signed"]
     if stage:
         if ev.source in NEVER_OPEN_DEAL_SOURCES and stage in {STAGE["replied"], STAGE["nurture"]}:
             return ""

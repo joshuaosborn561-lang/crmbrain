@@ -125,8 +125,6 @@ def _usable_call(row: dict) -> bool:
 def fetch_items_since(settings: Settings, since: datetime, errors: list[str] | None = None) -> list[dict]:
     """Page Allo search from `since` through now. Raises nothing; appends errors."""
     if not settings.allo_key:
-        if errors is not None:
-            errors.append("allo: ALLO_API_KEY missing — cannot incremental-sync")
         return []
     host = _host(settings)
     url = host + SEARCH_PATH

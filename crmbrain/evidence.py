@@ -7,7 +7,7 @@ from datetime import datetime
 
 from crmbrain.config import STAGE, digits_phone
 from crmbrain.models import Engagement
-from crmbrain.policy import is_meeting_held, is_meeting_scheduled
+from crmbrain.policy import POC_HINT_RE, is_meeting_held, is_meeting_scheduled
 
 KIND_BOOKED = "meeting_booked"
 KIND_HELD = "meeting_held"
@@ -90,10 +90,9 @@ def kind_for(ev: Engagement) -> str:
         return KIND_SIGNED
     if ev.stage_hint == STAGE["proposal_sent"]:
         return KIND_PROPOSAL
-    blob = f"{ev.raw_subject} {ev.summary} {ev.transcript}".lower()
-    if any(h in blob for h in ("poc", "proof of concept", "pilot", "kickoff", "onboarding")):
-        if ev.source not in {"smartlead", "heyreach", "rvm"}:
-            return KIND_POC
+    blob = f"{ev.raw_subject} {ev.summary} {ev.transcript}"
+    if POC_HINT_RE.search(blob) and ev.source not in {"smartlead", "heyreach", "rvm", "gmail_person"}:
+        return KIND_POC
     if is_meeting_held(ev):
         return KIND_HELD
     if is_meeting_scheduled(ev) or extra.get("gcal_create") or extra.get("create_new"):

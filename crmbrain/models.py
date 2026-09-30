@@ -59,12 +59,15 @@ class CycleReport:
     deals_restored: list[str] = field(default_factory=list)
     review_queue: list[str] = field(default_factory=list)
     stale_sources: list[str] = field(default_factory=list)
-    proposed_writes: list[str] = field(default_factory=list)
+    proposed_writes: list[Any] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     integrations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     dry_run: bool = False
+    calendar_api_ok: bool = True
+    reconcile_aborted: bool = False
 
-    def as_dict(self) -> dict[str, list[str]]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "integrations": self.integrations,
             "processed": self.processed,
@@ -84,13 +87,21 @@ class CycleReport:
             "review_queue": self.review_queue,
             "stale_sources": self.stale_sources,
             "proposed_writes": self.proposed_writes,
+            "warnings": self.warnings,
             "errors": self.errors,
+            "dry_run": self.dry_run,
+            "calendar_api_ok": self.calendar_api_ok,
+            "reconcile_aborted": self.reconcile_aborted,
         }
 
     def summary_text(self) -> str:
         title = "CRM Brain cycle (dry-run)" if self.dry_run else "CRM Brain cycle"
         lines = [title]
+        if self.reconcile_aborted:
+            lines.append("reconcile_aborted: true")
         for key, values in self.as_dict().items():
+            if not isinstance(values, list):
+                continue
             lines.append(f"{key}: {len(values)}")
             for item in values[:20]:
                 lines.append(f"  - {item}")
@@ -119,6 +130,18 @@ class ProposedWrite:
     amount: str = ""
     contact_id: str = ""
     deal_id: str = ""
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "action": self.action,
+            "label": self.label,
+            "stage": self.stage,
+            "amount": self.amount,
+            "contact_id": self.contact_id,
+            "deal_id": self.deal_id,
+            "reason": self.reason,
+        }
 
     def as_line(self) -> str:
         bits = [self.action, self.label]
@@ -128,4 +151,6 @@ class ProposedWrite:
             bits.append(f"${self.amount}")
         if self.deal_id:
             bits.append(f"deal:{self.deal_id}")
+        if self.reason:
+            bits.append(f"({self.reason})")
         return " ".join(bits)

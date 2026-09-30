@@ -44,7 +44,6 @@ def mail_queries(settings: Settings) -> list[str]:
         f'{after} (from:calendly.com ("New Event" OR Accepted OR canceled OR "no-show" OR "Invitee"))',
         f'{after} (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR "new event")',
         f"{after} (from:docusign.net OR subject:DocuSign completed)",
-        f'{after} (poc OR "proof of concept" OR kickoff OR onboarding OR "paid pilot" OR "paid poc")',
     ]
 
 
@@ -103,8 +102,6 @@ def _stage_from_mail(subject: str, sender: str, snippet: str, body: str = "") ->
         w in blob for w in ("new event", "accepted", "confirmed", "invitee", "invitation", "scheduled")
     ):
         return STAGE["discovery_scheduled"]
-    if any(h in blob for h in ("poc", "proof of concept", "pilot kickoff", "kickoff", "onboarding")):
-        return STAGE["signed"]
     return ""
 
 

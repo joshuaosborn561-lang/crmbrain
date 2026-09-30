@@ -15,6 +15,7 @@ import requests
 
 from crmbrain.config import JOSH_DOMAINS, NON_SALES_TITLE_HINTS, STAGE, Settings, is_client_context
 from crmbrain.models import Engagement, IntentDecision
+from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES, has_word_hint
 
 SALES_HINTS = (
     "salesglider",
@@ -149,10 +150,32 @@ def _email_domain(email: str) -> str:
     return low.rsplit("@", 1)[-1]
 
 
+def _is_plain_gmail(ev: Engagement) -> bool:
+    if ev.source == "gmail_person":
+        return True
+    if ev.source != "gmail":
+        return False
+    extra = ev.extra or {}
+    if extra.get("create_new") or extra.get("gcal_create"):
+        return False
+    blob = _blob(ev)
+    if any(h in blob for h in ("calendly", "pandadoc", "docusign", "calendar-notification", "stripe.com")):
+        return False
+    return True
+
+
 def heuristic_intent(ev: Engagement) -> IntentDecision:
     blob = _blob(ev)
     name = (ev.display_name() or ev.name or "").strip().lower()
     domain = _email_domain(ev.email)
+
+    if ev.source in NEVER_OPEN_DEAL_SOURCES or _is_plain_gmail(ev):
+        return IntentDecision(
+            verdict="no",
+            intent="networking",
+            confidence=0.88,
+            reason="Reply/chat/RVM/plain Gmail alone is not a booked meeting",
+        )
 
     if domain in JOSH_DOMAINS or domain == "insight.com":
         return IntentDecision(
@@ -231,12 +254,10 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             reason="Existing client ops — notes only unless commercial paper",
         )
 
-    sales_hit = next((h for h in SALES_HINTS if h in blob), "")
+    sales_hit = has_word_hint(blob, SALES_HINTS)
     if sales_hit:
         stage = ""
-        if any(h in blob for h in POC_HINTS):
-            stage = STAGE["signed"]
-        elif ev.source in {"fireflies", "cube_acr", "allo"}:
+        if ev.source in {"fireflies", "cube_acr", "allo"}:
             stage = STAGE["discovery_completed"]
         elif ev.source in {"calendly", "gmail"} or ev.stage_hint in {
             STAGE["discovery_scheduled"],
@@ -250,14 +271,6 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             confidence=0.9,
             reason=f"Sales evidence ({sales_hit})",
             stage=stage,
-        )
-
-    if ev.source in {"smartlead", "heyreach", "rvm", "gmail_person"}:
-        return IntentDecision(
-            verdict="no",
-            intent="networking",
-            confidence=0.88,
-            reason="Reply/chat/RVM alone is not a booked meeting",
         )
 
     return IntentDecision(

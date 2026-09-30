@@ -17,11 +17,11 @@ FREE_DOC_HINTS = (
     "free statement of work",
     "complimentary",
     "no charge",
-    "$0",
-    "0.00",
     "unpaid sow",
     "free agreement",
 )
+# $0 / $0.00 as a whole amount only — "$21,000.00" is not free.
+FREE_AMOUNT_RE = re.compile(r"\$0(?:\.00)?(?![\d,])")
 PAID_DOC_HINTS = (
     "growth partners",
     "retainer",
@@ -57,6 +57,8 @@ def is_payment_mail(subject: str, sender: str, snippet: str = "") -> bool:
 def looks_free_document(subject: str, body: str, document_name: str = "") -> bool:
     blob = f"{subject} {body} {document_name}".lower()
     if any(h in blob for h in FREE_DOC_HINTS):
+        return True
+    if FREE_AMOUNT_RE.search(blob):
         return True
     if re.search(r"\bfree\b.{0,24}\b(sow|statement of work|agreement)\b", blob):
         return True

@@ -22,7 +22,7 @@ def _now():
     return datetime(2026, 9, 30, 18, 0, tzinfo=timezone.utc)
 
 
-def test_tyler_poc_advances_from_discovery_completed(tmp_path):
+def test_tyler_poc_hint_goes_to_review_not_signed(tmp_path):
     ev = Engagement(
         source="fireflies",
         external_id="ff-tyler-poc",
@@ -34,7 +34,7 @@ def test_tyler_poc_advances_from_discovery_completed(tmp_path):
         raw_subject="Tyler Leverington POC kickoff",
     )
     assert kind_for(ev) == KIND_POC
-    assert resolve_stage(ev) == STAGE["signed"]
+    assert resolve_stage(ev) == STAGE["discovery_completed"]
     hs = FakeHubSpot(
         [
             {
@@ -68,8 +68,9 @@ def test_tyler_poc_advances_from_discovery_completed(tmp_path):
         Memory(make_settings(), data_dir=tmp_path),
         report,
     )
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["signed"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
     assert hs.deals[0]["properties"]["amount"] == "5000"
+    assert any("poc_hint" in x for x in report.review_queue)
 
 
 def test_boyd_cold_email_future_invite_creates_even_outside_lookback():
@@ -182,7 +183,12 @@ def test_goliath_free_sow_is_not_signed_viewed_agreement_is_proposal():
         stage_hint=STAGE["proposal_sent"],
         extra={"document_name": "Growth Partners Agreement", "amount": "21000"},
     )
-    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev) == STAGE["proposal_sent"]
+    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev) is None
+    matched = {
+        "id": "g1",
+        "properties": {"dealstage": STAGE["signed"], "document_name": "Growth Partners Agreement"},
+    }
+    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev, deal=matched) == STAGE["proposal_sent"]
 
 
 def test_allo_uses_api_key_scheme_and_skips_voicemail_blasts():
@@ -207,6 +213,9 @@ def test_allo_uses_api_key_scheme_and_skips_voicemail_blasts():
 
 
 def test_discovery_scheduled_reeval_noshow_completed_nurture(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    past = datetime.now(timezone.utc) - timedelta(hours=5)
     hs = FakeHubSpot(
         [
             {
@@ -226,12 +235,17 @@ def test_discovery_scheduled_reeval_noshow_completed_nurture(tmp_path):
                 "id": "cx-1",
                 "properties": {"email": "cx@x.com", "firstname": "Cancel", "lastname": "Lead"},
             },
+            {
+                "id": "unk-1",
+                "properties": {"email": "unk@x.com", "firstname": "Unknown", "lastname": "Time"},
+            },
         ]
     )
     hs.deals = [
         {"id": "d-past", "contact_id": "past-1", "properties": {"dealstage": STAGE["discovery_scheduled"], "dealname": "Past"}},
         {"id": "d-held", "contact_id": "held-1", "properties": {"dealstage": STAGE["discovery_scheduled"], "dealname": "Held"}},
         {"id": "d-cx", "contact_id": "cx-1", "properties": {"dealstage": STAGE["discovery_scheduled"], "dealname": "Cancel"}},
+        {"id": "d-unk", "contact_id": "unk-1", "properties": {"dealstage": STAGE["discovery_scheduled"], "dealname": "Unknown"}},
     ]
     canceled = Engagement(
         source="calendly",
@@ -242,7 +256,27 @@ def test_discovery_scheduled_reeval_noshow_completed_nurture(tmp_path):
         extra={"canceled": True},
         raw_subject="Canceled: SalesGlider Intro",
     )
-    timelines = build_timelines([canceled])
+    past_booked = Engagement(
+        source="calendly",
+        external_id="past",
+        email="past@x.com",
+        first_name="Past",
+        last_name="Lead",
+        extra={"meeting_at": past.isoformat()},
+        raw_subject="SalesGlider Intro",
+    )
+    held = Engagement(
+        source="fireflies",
+        external_id="ff-held",
+        email="held@x.com",
+        first_name="Held",
+        last_name="Lead",
+        occurred_at=past + timedelta(minutes=10),
+        extra={"meeting_attendees": [{"email": "held@x.com", "name": "Held Lead"}]},
+        transcript="Discovery held with Held Lead.",
+        raw_subject="Held Lead and Joshua Osborn",
+    )
+    timelines = build_timelines([canceled, past_booked, held])
     report = CycleReport()
     reeval_discovery_scheduled(
         hs,
@@ -251,11 +285,15 @@ def test_discovery_scheduled_reeval_noshow_completed_nurture(tmp_path):
         report,
         timelines,
         upcoming_emails=set(),
+        held_events=[held],
+        calendar_api_ok=True,
     )
     by_id = {d["id"]: d["properties"]["dealstage"] for d in hs.deals}
     assert by_id["d-past"] == STAGE["no_show"]
     assert by_id["d-held"] == STAGE["discovery_completed"]
     assert by_id["d-cx"] == STAGE["nurture"]
+    assert by_id["d-unk"] == STAGE["discovery_scheduled"]
+    assert any("unknown_scheduled_time" in x for x in report.review_queue)
 
 
 def test_boyd_gibbons_reply_only_is_not_a_booked_meeting(tmp_path):
@@ -373,4 +411,5 @@ def test_dry_run_prints_diff_without_writing(tmp_path):
     )
     assert hs.contacts == []
     assert hs.deals == []
-    assert any("Laura" in x or "lklein" in x for x in report.proposed_writes)
+    blob = " ".join(str(x) for x in report.proposed_writes)
+    assert "Laura" in blob or "lklein" in blob

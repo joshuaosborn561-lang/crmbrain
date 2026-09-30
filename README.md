@@ -124,9 +124,11 @@ python -m crmbrain cycle
 python -m crmbrain cycle --dry-run
 ```
 
-`CRMBRAIN_DRY_RUN=1` is the same as `--dry-run`: read sources + HubSpot, print the proposed contact/deal diff, write nothing.
+`CRMBRAIN_DRY_RUN=1` is the same as `--dry-run`: HubSpot `/search` reads are allowed; mutations are blocked. Supabase writes are skipped except the `cycle_runs` report JSON (full proposed creates/moves/archives/review items). HeyReach `add_lead`, email-waterfall/enrichment, and briefing sends are skipped.
 
-New env vars: `CRMBRAIN_DRY_RUN`, `INTENT_MIN_CONFIDENCE` (default 0.75), `CALENDAR_UPCOMING_DAYS` (default 30), `ALLO_API_URL` (default `https://api.withallo.com`). Allo auth is `Authorization: Api-Key`, not Bearer.
+New env vars: `CRMBRAIN_DRY_RUN`, `INTENT_MIN_CONFIDENCE` (default 0.75), `CALENDAR_UPCOMING_DAYS` (default 30), `ALLO_API_URL` (default `https://api.withallo.com`), `MAX_ARCHIVES_REGRESSIONS` (default 10), `MAX_CREATES` (default 10), `MAX_STAGE_MOVES` (default 20), `MAX_CHANGE_FRACTION` (default 0.15). Allo auth is `Authorization: Api-Key`, not Bearer.
+
+Write budget: over a per-kind cap, remaining writes go to `review_queue` with reason `cap`. If more than 15% of open deals would change in one cycle, all reconcile writes abort and the report is flagged. POC/pilot hints go to review (`poc_hint`) and never write Signed. Signed requires a completed non-free PandaDoc/DocuSign document or a payment. Calendar create uses the intent classifier (not title keywords); low-confidence Josh 1:1s go to review.
 
 ## Model
 

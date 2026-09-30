@@ -30,7 +30,7 @@ from crmbrain.gmail_client import Gmail
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
-from crmbrain.models import CycleReport, Engagement
+from crmbrain.models import CycleReport, Engagement, ProposedWrite
 from crmbrain.leadmagic import should_skip_email, usable_linkedin
 from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartlead
 from crmbrain.sources.gmail_scan import is_junk_crm_email
@@ -54,6 +54,27 @@ def _in_window(ev: Engagement, settings: Settings) -> bool:
     if ev.occurred_at and ev.occurred_at < start:
         return False
     return True
+
+
+def _propose_engagement(
+    report: CycleReport,
+    ev: Engagement,
+    decision,
+    already: dict | None,
+) -> None:
+    report.proposed_writes.append(
+        ProposedWrite(
+            action="create" if not already else "update",
+            label=ev.display_name() or ev.email or ev.phone,
+            stage=decision.stage or ev.stage_hint,
+            reason=decision.reason,
+            contact_id=str((already or {}).get("id") or ""),
+        ).as_dict()
+    )
+    if not intent.is_confident_sales(decision) and not intent.is_confident_non_sales(decision):
+        report.review_queue.append(
+            f"{ev.display_name() or ev.email} {decision.verdict} {decision.reason}"
+        )
 
 
 def _handle_engagement(
@@ -83,6 +104,9 @@ def _handle_engagement(
         return
     decision = intent.classify(settings, ev)
     already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+    if settings.dry_run:
+        _propose_engagement(report, ev, decision, already)
+        return
     if ev.source in policy.HUBSPOT_CREATE_SOURCES and intent.is_confident_non_sales(
         decision, settings.intent_min_confidence
     ):
@@ -260,7 +284,7 @@ def _queue_linkedin(
     contact: dict | None = None,
 ) -> None:
     """Anyone Josh called, emailed, or talked to on LinkedIn gets a HeyReach invite."""
-    if not hey or ev.source == "heyreach":
+    if settings.dry_run or not hey or ev.source == "heyreach":
         return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         return
@@ -362,6 +386,20 @@ def _recovered_rate_limit_note(err: str) -> bool:
         token in lower
         for token in ("recovered", "succeeded after", "retried ok", "retry succeeded")
     )
+
+
+def _is_calendar_auth_error(msg: str) -> bool:
+    low = (msg or "").lower()
+    return "401" in low or "403" in low or "permissionerror" in low or "calendar api 401" in low or "calendar api 403" in low
+
+
+def _stale_source_warning(report: CycleReport, source: str, detail: str) -> None:
+    line = f"{source}: {detail}"
+    if line in report.warnings or any(w.startswith(f"{source}:") for w in report.warnings):
+        return
+    report.warnings.append(line)
+    if not any(s.startswith(source) for s in report.stale_sources):
+        report.stale_sources.append(f"{source} stale-source warning ({detail})")
 
 
 def cycle_status(report: CycleReport) -> str:
@@ -481,6 +519,17 @@ def apply_gmail_stage_update(
             report.skipped.append(f"{ev.source}:{ev.external_id} stale no_show")
             return
         if already and write_stage == STAGE["discovery_completed"] and contact_id:
+            if settings.dry_run:
+                report.proposed_writes.append(
+                    ProposedWrite(
+                        action="move",
+                        label=ev.email or ev.display_name(),
+                        stage=write_stage,
+                        contact_id=str(contact_id),
+                        reason="held_beats_noshow",
+                    ).as_dict()
+                )
+                return
             deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage)
             if deal.get("id"):
                 report.deals_moved.append(f"{ev.email} gmail -> {write_stage} ({deal.get('id')})")
@@ -500,6 +549,18 @@ def apply_gmail_stage_update(
         _handle_engagement(ev, settings, hs, memory, hey, report)
         return
     if ev.stage_hint and contact_id:
+        if settings.dry_run:
+            report.proposed_writes.append(
+                ProposedWrite(
+                    action="move",
+                    label=ev.email or ev.display_name(),
+                    stage=ev.stage_hint,
+                    amount=str((ev.extra or {}).get("amount") or ""),
+                    contact_id=str(contact_id),
+                    reason="gmail",
+                ).as_dict()
+            )
+            return
         amount = str((ev.extra or {}).get("amount") or "")
         deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, ev.stage_hint, amount=amount)
         report.deals_moved.append(f"{ev.email} gmail -> {ev.stage_hint} ({deal.get('id')})")
@@ -555,17 +616,29 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             if snap.events:
                 starts = [e.start for e in snap.events if e.start]
                 calendar_last = max(starts) if starts else now_utc()
+            report.calendar_api_ok = snap.calendar_api_ok
             if not snap.calendar_api_ok:
                 calendar_error = snap.calendar_api_error or "calendar api unavailable"
-                report.errors.append(f"calendar: {calendar_error}")
+                if _is_calendar_auth_error(calendar_error):
+                    _stale_source_warning(report, "calendar", calendar_error)
+                else:
+                    report.errors.append(f"calendar: {calendar_error}")
         except Exception as exc:
             calendar_error = str(exc)
             logger.warning("calendar attendees unavailable: %s", exc)
-            report.errors.append(f"calendar: {exc}")
+            report.calendar_api_ok = False
+            if _is_calendar_auth_error(str(exc)):
+                _stale_source_warning(report, "calendar", str(exc))
+            else:
+                report.errors.append(f"calendar: {exc}")
+    if not settings.allo_key:
+        _stale_source_warning(report, "allo", "ALLO_API_KEY missing")
     hey = None if briefs_only else (HeyReach(settings) if settings.heyreach_key else None)
     if briefs_only:
-        if gmail:
+        if gmail and not settings.dry_run:
             briefing.send_due(settings, gmail, hs, memory, report)
+        elif gmail and settings.dry_run:
+            report.skipped.append("briefing skipped (dry-run)")
         else:
             report.errors.append("Gmail missing, cannot send briefs")
         _flush_memory_errors(memory, report)
@@ -634,7 +707,8 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                     report,
                     held_events=held_this_cycle,
                 )
-            briefing.send_due(settings, gmail, hs, memory, report)
+            if not settings.dry_run:
+                briefing.send_due(settings, gmail, hs, memory, report)
             engagements.extend(mail_events)
         except Exception as exc:
             report.errors.append(f"gmail: {exc}")
@@ -648,6 +722,8 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             [ev for ev in engagements if _in_window(ev, settings) or ev.source == "heyreach"],
             upcoming_emails=set(getattr(hs, "scheduled_attendee_emails", set()) or set()),
             dry_run=settings.dry_run,
+            calendar_api_ok=report.calendar_api_ok,
+            held_events=held_this_cycle,
         )
     except Exception as exc:
         report.errors.append(f"reconcile: {exc}")

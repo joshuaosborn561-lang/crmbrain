@@ -147,6 +147,10 @@ class Settings:
     dry_run: bool = False
     intent_min_confidence: float = 0.75
     calendar_upcoming_days: int = 30
+    max_archives_regressions: int = 10
+    max_creates: int = 10
+    max_stage_moves: int = 20
+    max_change_fraction: float = 0.15
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -181,6 +185,10 @@ class Settings:
             dry_run=os.getenv("CRMBRAIN_DRY_RUN", "").strip().lower() in {"1", "true", "yes"},
             intent_min_confidence=float(os.getenv("INTENT_MIN_CONFIDENCE", "0.75")),
             calendar_upcoming_days=int(os.getenv("CALENDAR_UPCOMING_DAYS", "30")),
+            max_archives_regressions=int(os.getenv("MAX_ARCHIVES_REGRESSIONS", "10")),
+            max_creates=int(os.getenv("MAX_CREATES", "10")),
+            max_stage_moves=int(os.getenv("MAX_STAGE_MOVES", "20")),
+            max_change_fraction=float(os.getenv("MAX_CHANGE_FRACTION", "0.15")),
         )
 
 

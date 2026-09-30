@@ -124,7 +124,7 @@ class HubSpot:
     ) -> requests.Response:
         """HubSpot HTTP. Reads retry timeouts with backoff so one 30s stall is not fatal."""
         url = path if path.startswith("http") else f"{self.base}{path}"
-        if self.dry_run and method.upper() in {"POST", "PATCH", "PUT", "DELETE"}:
+        if self.dry_run and _is_hubspot_mutation(method, path):
             self.proposed.append(f"{method.upper()} {path}")
             return _DryResp()
         timeout = READ_TIMEOUT if timeout is None else timeout
@@ -368,7 +368,7 @@ class HubSpot:
 
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
         current = (deal.get("properties") or {}).get("dealstage") or ""
-        target = policy.choose_deal_action(current, stage, ev) if stage else None
+        target = policy.choose_deal_action(current, stage, ev, deal=deal) if stage else None
         current_name = (deal.get("properties") or {}).get("dealname") or ""
         wanted = policy.deal_name_for(ev, contact)
         cleaned = policy.prefer_deal_name(
@@ -541,6 +541,10 @@ class HubSpot:
 
     def contact_has_meetings(self, contact_id: str) -> bool:
         """True only for real HubSpot meeting engagements. Emails do not count."""
+        return bool(self._meeting_association_ids(contact_id))
+
+    def _meeting_association_ids(self, contact_id: str) -> list[str]:
+        ids: list[str] = []
         for object_name in MEETING_ASSOCIATION_OBJECTS:
             resp = self._request(
                 "GET",
@@ -550,9 +554,62 @@ class HubSpot:
             )
             if resp.status_code >= 400:
                 continue
-            if resp.json().get("results"):
+            for row in resp.json().get("results") or []:
+                mid = row.get("toObjectId") or row.get("id")
+                if mid:
+                    ids.append(str(mid))
+        return ids
+
+    def contact_has_future_meetings(self, contact_id: str, now=None) -> bool:
+        """True when a HubSpot meeting engagement is still in the future."""
+        from crmbrain.config import now_utc
+        from datetime import datetime, timezone
+
+        now = now or now_utc()
+        ids = self._meeting_association_ids(contact_id)
+        if not ids:
+            return False
+        unknown = False
+        for mid in ids:
+            resp = self._request(
+                "GET",
+                f"/crm/v3/objects/meetings/{mid}",
+                params={"properties": "hs_meeting_start_time,hs_timestamp"},
+                retry=True,
+                timeout=20,
+            )
+            if resp.status_code >= 400:
+                unknown = True
+                continue
+            props = (resp.json() or {}).get("properties") or {}
+            raw = props.get("hs_meeting_start_time") or props.get("hs_timestamp")
+            if not raw:
+                unknown = True
+                continue
+            try:
+                if str(raw).isdigit():
+                    stamp = datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
+                else:
+                    stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError, OSError):
+                unknown = True
+                continue
+            if stamp > now:
                 return True
-        return False
+        return unknown
+
+    def count_open_deals(self) -> int:
+        n = 0
+        try:
+            for deal in self.iter_deals(["dealstage"]):
+                stage = (deal.get("properties") or {}).get("dealstage") or ""
+                if stage and stage != STAGE["closed_lost"]:
+                    n += 1
+        except Exception:
+            return n
+        return n
 
     def disassociate_contact_from_deal(self, contact_id: str, deal_id: str) -> None:
         resp = self._request(
@@ -580,6 +637,16 @@ class HubSpot:
 def _sleep(seconds: float) -> None:
     if seconds > 0:
         time.sleep(seconds)
+
+
+def _is_hubspot_mutation(method: str, path: str) -> bool:
+    """True for real writes. HubSpot /search POSTs are reads."""
+    verb = (method or "").upper()
+    if verb in {"PATCH", "PUT", "DELETE"}:
+        return True
+    if verb != "POST":
+        return False
+    return "/search" not in (path or "")
 
 
 class _DryResp:

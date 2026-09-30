@@ -132,18 +132,12 @@ def looks_like_non_sales_meeting(title: str, description: str = "") -> bool:
 def looks_like_sales_meeting(
     title: str, description: str = "", *, josh_one_on_one: bool = False
 ) -> bool:
-    """Sales title, or a Josh-organized 1:1 that is not clearly non-sales.
-
-    'SalesGlider Boyd Cold Email' must pass. Lunch / Meraki / mentor must not.
-    A Josh-booked 1:1 with an external prospect is a sales booking unless the
-    title is a known non-opportunity (the intent classifier is the second gate).
-    """
+    """Legacy title-keyword helper. Create gating uses the intent classifier."""
+    del josh_one_on_one
     if looks_like_non_sales_meeting(title, description):
         return False
     blob = f"{title} {description}".lower()
-    if any(hint in blob for hint in SALES_MEETING_HINTS):
-        return True
-    return bool(josh_one_on_one)
+    return any(hint in blob for hint in SALES_MEETING_HINTS)
 
 
 def primary_prospect(emails: Iterable[str], title: str = "") -> str:
@@ -330,7 +324,8 @@ def usable_event(ev: ClassifiedEvent) -> bool:
     return True
 
 
-def may_create_contact_from_event(ev: ClassifiedEvent) -> bool:
+def passes_calendar_create_gate(ev: ClassifiedEvent) -> bool:
+    """PR #13 structural gate: upcoming, Josh org/accepted, not all-day, one prospect."""
     if not usable_event(ev):
         return False
     if not ev.upcoming:
@@ -339,10 +334,24 @@ def may_create_contact_from_event(ev: ClassifiedEvent) -> bool:
         return False
     if not ev.primary_prospect:
         return False
-    one_on_one = bool(ev.josh_organized and len(ev.external_attendees) == 1)
-    if not looks_like_sales_meeting(ev.title, ev.description, josh_one_on_one=one_on_one):
-        return False
     return True
+
+
+def _intent_for_classified(ev: ClassifiedEvent, settings: Settings | None = None):
+    from crmbrain.intent import classify
+
+    return classify(settings, _engagement_from_event(ev, "calendar-intent"))
+
+
+def may_create_contact_from_event(ev: ClassifiedEvent, settings: Settings | None = None) -> bool:
+    """Create only when the structural gate passes AND intent is a sales opportunity."""
+    if not passes_calendar_create_gate(ev):
+        return False
+    from crmbrain.intent import is_confident_sales
+
+    min_c = float(getattr(settings, "intent_min_confidence", 0.75) or 0.75)
+    decision = _intent_for_classified(ev, settings)
+    return is_confident_sales(decision, min_c)
 
 
 def attendees_from_gcal_event(event: dict) -> set[str]:
@@ -404,7 +413,7 @@ def load_calendar(gmail: Gmail, settings: Settings | None = None) -> CalendarSna
             emails = set(classified.external_attendees)
             if classified.upcoming:
                 snap.upcoming.update(emails)
-                if may_create_contact_from_event(classified):
+                if passes_calendar_create_gate(classified):
                     eid = str((event.get("id") or classified.primary_prospect) or "")
                     if eid:
                         snap.create_engagements.append(_engagement_from_event(classified, f"gcal:{eid}"))
@@ -463,7 +472,7 @@ def _snapshot_from_gmail_invites(gmail: Gmail, start: datetime) -> CalendarSnaps
         emails = set(classified.external_attendees)
         if classified.upcoming:
             snap.upcoming.update(emails)
-            if may_create_contact_from_event(classified):
+            if passes_calendar_create_gate(classified):
                 eid = f"gmail-ics:{stub['id']}:{classified.primary_prospect}"
                 snap.create_engagements.append(_engagement_from_event(classified, eid))
         else:

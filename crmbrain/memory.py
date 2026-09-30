@@ -56,16 +56,25 @@ class Memory:
         self.path = self.data_dir / "account_memory.json"
         self._local = self._load_local()
         self.use_supabase = bool(settings.supabase_url and settings.supabase_key)
+        self.dry_run = bool(getattr(settings, "dry_run", False))
         self.errors: list[str] = []
         self._run_started_at = ""
+        self.writes: list[str] = []
 
     def _load_local(self) -> dict[str, Any]:
         if self.path.exists():
             return json.loads(self.path.read_text())
         return {"processed": [], "ticker": [], "facts": [], "runs": []}
 
-    def save_local(self) -> None:
+    def save_local(self, *, force: bool = False) -> None:
+        if self.dry_run and not force:
+            return
         self.path.write_text(json.dumps(self._local, indent=2, default=str))
+
+    def _skip_side_write(self, op: str) -> bool:
+        """Dry-run may only persist the cycle_runs report."""
+        del op
+        return bool(self.dry_run)
 
     def _record_error(self, op: str, exc: BaseException) -> None:
         msg = f"memory {op}: {exc}"
@@ -138,6 +147,8 @@ class Memory:
         return resp.json()
 
     def mark_processed(self, source: str, external_id: str, payload: dict | None = None) -> None:
+        if self._skip_side_write("processed_events"):
+            return
         key = f"{source}:{external_id}"
         processed = self._local.setdefault("processed", [])
         if key not in processed:
@@ -158,6 +169,7 @@ class Memory:
 
     def start_run(self) -> int | None:
         self._run_started_at = now_utc().isoformat()
+        self.writes.append("cycle_runs")
         if not self.use_supabase:
             return None
         try:
@@ -207,7 +219,8 @@ class Memory:
                 "report": report,
             }
         )
-        self.save_local()
+        self.writes.append("cycle_runs")
+        self.save_local(force=True)
         if self.use_supabase and run_id is not None:
             try:
                 self._sb_schema(
@@ -220,6 +233,8 @@ class Memory:
                 self._record_error("finish_run", exc)
 
     def enroll_ticker(self, row: dict) -> None:
+        if self._skip_side_write("ticker"):
+            return
         if self._ticker_already_active(row):
             return
         self._local.setdefault("ticker", []).append(row)
@@ -280,6 +295,8 @@ class Memory:
         return local
 
     def bump_ticker(self, ticker_id: str, next_fire_at: str, last_fired_at: str) -> None:
+        if self._skip_side_write("ticker"):
+            return
         for t in self._local.get("ticker", []):
             if str(t.get("id")) == str(ticker_id) or (
                 t.get("email") and t.get("email") == ticker_id
@@ -299,6 +316,8 @@ class Memory:
                 self._record_error("bump_ticker", exc)
 
     def stop_ticker(self, email: str | None = None, hs_contact_id: str | None = None) -> None:
+        if self._skip_side_write("ticker"):
+            return
         for t in self._local.get("ticker", []):
             if email and t.get("email") == email:
                 t["status"] = "stopped"
@@ -346,6 +365,8 @@ class Memory:
         return resp.json()
 
     def enqueue_review(self, row: dict) -> None:
+        if self._skip_side_write("review_queue"):
+            return
         self._local.setdefault("review_queue", []).append(row)
         self.save_local()
         if self.use_supabase:
@@ -362,7 +383,19 @@ class Memory:
         when: datetime | None = None,
         item_count: int | None = None,
     ) -> None:
+        if self._skip_side_write("source_freshness"):
+            return
         when = when or now_utc()
+        if last_item_at is None:
+            prior = (self._local.get("source_freshness") or {}).get(source) or {}
+            raw = prior.get("last_item_at")
+            if raw:
+                try:
+                    last_item_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                except ValueError:
+                    last_item_at = None
+            if last_item_at is None:
+                last_item_at = self.latest_freshness(source)
         row = {
             "source": source,
             "last_item_at": last_item_at.isoformat() if last_item_at else None,
@@ -443,6 +476,8 @@ class Memory:
             return []
 
     def upsert_allo_call(self, row: dict) -> None:
+        if self._skip_side_write("allo.calls"):
+            return
         if not row.get("id"):
             return
         local = self._local.setdefault("allo_calls", [])
@@ -457,6 +492,8 @@ class Memory:
                 self._record_error("upsert_allo_call", exc)
 
     def upsert_cube_call(self, ev) -> None:
+        if self._skip_side_write("cube_acr_calls"):
+            return
         row = {
             "id": ev.external_id,
             "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
@@ -478,6 +515,8 @@ class Memory:
                 self._record_error("upsert_cube_call", exc)
 
     def save_fact(self, fact: dict) -> None:
+        if self._skip_side_write("relationship_facts"):
+            return
         self._local.setdefault("facts", []).append(fact)
         self.save_local()
         if self.use_supabase:
