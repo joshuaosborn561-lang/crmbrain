@@ -324,6 +324,159 @@ class Memory:
             except Exception as exc:
                 self._record_error("stop_ticker", exc)
 
+    def _sb_named(self, schema: str, method: str, table: str, json_body: Any = None, params: dict | None = None) -> Any:
+        url = f"{self.settings.supabase_url.rstrip('/')}/rest/v1/{table}"
+        headers = {
+            "apikey": self.settings.supabase_key,
+            "Authorization": f"Bearer {self.settings.supabase_key}",
+            "Content-Type": "application/json",
+            "Accept-Profile": schema,
+            "Content-Profile": schema,
+            "Prefer": "return=representation,resolution=merge-duplicates",
+        }
+        resp = requests.request(
+            method, url, headers=headers, timeout=30, json=json_body, params=params
+        )
+        if resp.status_code == 409:
+            raise RuntimeError(f"supabase {schema}.{table} 409: {resp.text[:400]}")
+        if resp.status_code >= 400:
+            raise RuntimeError(f"supabase {schema}.{table} {resp.status_code}: {resp.text[:400]}")
+        if not resp.content:
+            return None
+        return resp.json()
+
+    def enqueue_review(self, row: dict) -> None:
+        self._local.setdefault("review_queue", []).append(row)
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema("POST", "review_queue", json_body=row)
+            except Exception as exc:
+                self._record_error("enqueue_review", exc)
+
+    def record_freshness(
+        self,
+        source: str,
+        last_item_at: datetime | None = None,
+        last_error: str = "",
+        when: datetime | None = None,
+        item_count: int | None = None,
+    ) -> None:
+        when = when or now_utc()
+        row = {
+            "source": source,
+            "last_item_at": last_item_at.isoformat() if last_item_at else None,
+            "last_success_at": when.isoformat() if not last_error else None,
+            "last_error": last_error or None,
+            "item_count": item_count,
+            "updated_at": when.isoformat(),
+        }
+        freshness = self._local.setdefault("source_freshness", {})
+        freshness[source] = row
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema("POST", "source_freshness", json_body=row)
+            except Exception as exc:
+                self._record_error("record_freshness", exc)
+
+    def latest_freshness(self, source: str) -> datetime | None:
+        local = (self._local.get("source_freshness") or {}).get(source) or {}
+        raw = local.get("last_item_at")
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema(
+                    "GET",
+                    "source_freshness",
+                    params={"source": f"eq.{source}", "select": "last_item_at", "limit": "1"},
+                )
+                if rows:
+                    raw = rows[0].get("last_item_at") or raw
+            except Exception as exc:
+                self._record_error("latest_freshness", exc)
+        if not raw:
+            return None
+        try:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+    def latest_allo_call_at(self) -> datetime | None:
+        if self.use_supabase:
+            try:
+                rows = self._sb_named(
+                    "allo",
+                    "GET",
+                    "calls",
+                    params={"select": "call_at", "order": "call_at.desc", "limit": "1"},
+                )
+                if rows:
+                    raw = rows[0].get("call_at")
+                    if raw:
+                        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+            except Exception as exc:
+                self._record_error("latest_allo_call_at", exc)
+        return None
+
+    def list_allo_calls(self, since: datetime) -> list[dict]:
+        if not self.use_supabase:
+            return list(self._local.get("allo_calls") or [])
+        try:
+            return (
+                self._sb_named(
+                    "allo",
+                    "GET",
+                    "calls",
+                    params={
+                        "call_at": f"gte.{since.isoformat()}",
+                        "select": "*",
+                        "order": "call_at.desc",
+                        "limit": "500",
+                    },
+                )
+                or []
+            )
+        except Exception as exc:
+            self._record_error("list_allo_calls", exc)
+            return []
+
+    def upsert_allo_call(self, row: dict) -> None:
+        if not row.get("id"):
+            return
+        local = self._local.setdefault("allo_calls", [])
+        local.append(row)
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_named("allo", "POST", "calls", json_body=row)
+            except Exception as exc:
+                if _is_duplicate_key(exc):
+                    return
+                self._record_error("upsert_allo_call", exc)
+
+    def upsert_cube_call(self, ev) -> None:
+        row = {
+            "id": ev.external_id,
+            "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
+            "name": ev.display_name(),
+            "phone": ev.phone,
+            "transcript": (ev.transcript or "")[:20000],
+            "summary": (ev.summary or "")[:2000],
+            "raw_subject": ev.raw_subject,
+            "extra": ev.extra or {},
+        }
+        self._local.setdefault("cube_acr_calls", []).append(row)
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema("POST", "cube_acr_calls", json_body=row)
+            except Exception as exc:
+                if _is_duplicate_key(exc):
+                    return
+                self._record_error("upsert_cube_call", exc)
+
     def save_fact(self, fact: dict) -> None:
         self._local.setdefault("facts", []).append(fact)
         self.save_local()

@@ -21,6 +21,7 @@ Return ONLY JSON with this shape:
   "gift_ideas": "",
   "birthday": "YYYY-MM-DD or empty",
   "stage_hint": "discovery_scheduled|discovery_completed|proposal_sent|signed|paid|no_show|nurture|closed_lost|",
+  // Use signed when THIS person is in an active paid POC/pilot/kickoff/onboarding.
   "ticker_reason": "kicked_can|no_show|never_booked|deal_died|",
   "amount_hint": "",
   "deal_amount": "",
@@ -78,6 +79,8 @@ _PRICE_HINTS = (
     "one time",
     "upfront",
     "invoice",
+    "agreement",
+    "sow",
     "would be",
     "that's $",
     "thats $",

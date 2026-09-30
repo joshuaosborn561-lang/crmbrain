@@ -74,6 +74,28 @@ INTERNAL_MEETING_HINTS = (
     "josh / cayden",
 )
 
+# Meetings where Josh is the buyer, learner, networker, or not selling SG.
+NON_SALES_TITLE_HINTS = (
+    "marketing masterclass",
+    "masterclass",
+    "chorbie",
+    "meraki",
+    "dotstech",
+    "dots tech",
+    "cisco",
+    "insight.com",
+    "lunch",
+    "coffee chat",
+    "catch up",
+    "recruiter",
+    "recruiting",
+    "mark/josh",
+    "mark / josh",
+    "josh/mark",
+    "mentor",
+    "seo partner",
+)
+
 # Josh's clients. Talk to them, but do not open a new SalesGlider deal.
 CLIENT_HINTS = (
     "goliath",
@@ -122,6 +144,9 @@ class Settings:
     allo_key: str
     lookback_hours: int
     lookback_start_at: datetime | None = None
+    dry_run: bool = False
+    intent_min_confidence: float = 0.75
+    calendar_upcoming_days: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -150,9 +175,12 @@ class Settings:
             supabase_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
             gemini_key=os.getenv("GEMINI_API_KEY", ""),
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-            allo_url=os.getenv("ALLO_API_URL", ""),
+            allo_url=os.getenv("ALLO_API_URL", "https://api.withallo.com"),
             allo_key=os.getenv("ALLO_API_KEY", ""),
             lookback_hours=int(os.getenv("CYCLE_LOOKBACK_HOURS", "36")),
+            dry_run=os.getenv("CRMBRAIN_DRY_RUN", "").strip().lower() in {"1", "true", "yes"},
+            intent_min_confidence=float(os.getenv("INTENT_MIN_CONFIDENCE", "0.75")),
+            calendar_upcoming_days=int(os.getenv("CALENDAR_UPCOMING_DAYS", "30")),
         )
 
 

@@ -50,6 +50,24 @@ class CycleHubSpot:
     def iter_contacts(self, _properties):
         return iter(())
 
+    def iter_deals(self, properties, stage=""):
+        return iter(())
+
+    def open_deals_for_contact(self, _cid):
+        return []
+
+    def contacts_for_deal(self, _did):
+        return []
+
+    def upsert_contact(self, ev):
+        return {"id": "dry", "properties": {}}
+
+    def upsert_deal(self, contact, ev, stage, amount=""):
+        return {}
+
+    def archive_deal(self, _did):
+        return None
+
 
 class FakeResp:
     def __init__(self, status, payload=None, headers=None, text=""):
@@ -275,7 +293,7 @@ def test_cycle_ok_when_smartlead_429_then_200(tmp_path, monkeypatch):
     monkeypatch.setattr("crmbrain.cycle.cube_acr.scan", lambda s: [])
     monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda s: [])
     monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda s: [])
-    monkeypatch.setattr("crmbrain.cycle.allo.scan", lambda s, g: [])
+    monkeypatch.setattr("crmbrain.cycle.allo.scan", lambda s, g, memory=None, errors=None: [])
     monkeypatch.setattr("crmbrain.cycle.prune.run", lambda hs, report: None)
     monkeypatch.setattr("crmbrain.cycle._fire_ticker", lambda *a, **k: None)
     monkeypatch.setattr(smartlead, "_sleep", lambda _s: None)
@@ -309,7 +327,7 @@ def test_cycle_partial_when_one_campaign_exhausted(tmp_path, monkeypatch):
     monkeypatch.setattr("crmbrain.cycle.cube_acr.scan", lambda s: [])
     monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda s: [])
     monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda s: [])
-    monkeypatch.setattr("crmbrain.cycle.allo.scan", lambda s, g: [])
+    monkeypatch.setattr("crmbrain.cycle.allo.scan", lambda s, g, memory=None, errors=None: [])
     monkeypatch.setattr("crmbrain.cycle.prune.run", lambda hs, report: None)
     monkeypatch.setattr("crmbrain.cycle._fire_ticker", lambda *a, **k: None)
     monkeypatch.setattr(smartlead, "_sleep", lambda _s: None)

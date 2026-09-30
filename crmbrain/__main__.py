@@ -1,24 +1,38 @@
 from __future__ import annotations
 
+import os
 import sys
+from dataclasses import replace
 
-from crmbrain.config import now_utc
+from crmbrain.config import Settings, now_utc
 from crmbrain.cycle import cycle_status, run
 
 FULL_CYCLE_HOURS_UTC = {12, 22}
 
 
+def _wants_dry_run(argv: list[str]) -> bool:
+    if "--dry-run" in argv:
+        return True
+    return os.getenv("CRMBRAIN_DRY_RUN", "").strip().lower() in {"1", "true", "yes"}
+
+
 def main() -> int:
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "auto"
+    raw = list(sys.argv[1:])
+    dry_run = _wants_dry_run(raw)
+    args = [a for a in raw if a != "--dry-run"]
+    cmd = args[0] if args else "auto"
+    settings = Settings.from_env()
+    if dry_run:
+        settings = replace(settings, dry_run=True)
     if cmd == "auto":
         briefs_only = now_utc().hour not in FULL_CYCLE_HOURS_UTC
-        report = run(briefs_only=briefs_only)
+        report = run(settings=settings, briefs_only=briefs_only)
     elif cmd == "cycle":
-        report = run()
+        report = run(settings=settings)
     elif cmd == "briefs":
-        report = run(briefs_only=True)
+        report = run(settings=settings, briefs_only=True)
     else:
-        print("usage: python -m crmbrain [auto|cycle|briefs]")
+        print("usage: python -m crmbrain [auto|cycle|briefs] [--dry-run]")
         return 2
     print(report.summary_text())
     return 0 if cycle_status(report) == "ok" else 1

@@ -44,6 +44,7 @@ def mail_queries(settings: Settings) -> list[str]:
         f'{after} (from:calendly.com ("New Event" OR Accepted OR canceled OR "no-show" OR "Invitee"))',
         f'{after} (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR "new event")',
         f"{after} (from:docusign.net OR subject:DocuSign completed)",
+        f'{after} (poc OR "proof of concept" OR kickoff OR onboarding OR "paid pilot" OR "paid poc")',
     ]
 
 
@@ -85,16 +86,15 @@ def _addresses(header_value: str) -> list[str]:
     return [a.lower() for a in re.findall(r"[\w.+-]+@[\w.-]+", header_value or "")]
 
 
-def _stage_from_mail(subject: str, sender: str, snippet: str) -> str:
-    blob = f"{subject} {sender} {snippet}".lower()
+def _stage_from_mail(subject: str, sender: str, snippet: str, body: str = "") -> str:
+    from crmbrain.documents import stage_from_signature_mail
+
+    blob = f"{subject} {sender} {snippet} {body}".lower()
     if "you received a payment" in blob or "payment received" in blob:
         return STAGE["paid"]
-    if "pandadoc" in blob and any(w in blob for w in ("completed", "signed", "has been signed")):
-        return STAGE["signed"]
-    if "docusign" in blob and "completed" in blob:
-        return STAGE["signed"]
-    if "pandadoc" in blob and any(w in blob for w in ("sent you", "viewed", "document was sent")):
-        return STAGE["proposal_sent"]
+    if "pandadoc" in blob or "docusign" in blob:
+        stage, _amount, _name = stage_from_signature_mail(subject, sender, snippet, body)
+        return stage
     if any(h in blob for h in ("calendly", "calendar-notification", "zoom.us")) and any(
         w in blob for w in ("canceled", "cancelled", "no-show", "no show")
     ):
@@ -103,6 +103,8 @@ def _stage_from_mail(subject: str, sender: str, snippet: str) -> str:
         w in blob for w in ("new event", "accepted", "confirmed", "invitee", "invitation", "scheduled")
     ):
         return STAGE["discovery_scheduled"]
+    if any(h in blob for h in ("poc", "proof of concept", "pilot kickoff", "kickoff", "onboarding")):
+        return STAGE["signed"]
     return ""
 
 
@@ -260,7 +262,10 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 contact = hubspot.find_contact(email=email)
                 if contact:
                     break
-            stage = _stage_from_mail(subject, sender, f"{snippet} {body}")
+            stage = _stage_from_mail(subject, sender, snippet, body)
+            from crmbrain.documents import stage_from_signature_mail
+
+            sig_stage, sig_amount, sig_name = stage_from_signature_mail(subject, sender, snippet, body)
             ev_email = cal.get("email") or (emails[0] if emails else "")
             calendly_create = (
                 (not contact)
@@ -304,7 +309,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                     domain=domain,
                     raw_subject=subject,
                     summary=f"{snippet}\n{cal.get('when') or ''}\n{extra_event}".strip(),
-                    stage_hint=stage or (STAGE["discovery_scheduled"] if gcal_create else ""),
+                    stage_hint=stage or sig_stage or (STAGE["discovery_scheduled"] if gcal_create else ""),
                     extra={
                         "hubspot_contact_id": contact["id"] if contact else "",
                         "from": sender,
@@ -313,6 +318,8 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                         "meeting_when": cal.get("when", ""),
                         "meeting_at": cal.get("meeting_at", ""),
                         "gcal_create": gcal_create,
+                        "amount": sig_amount,
+                        "document_name": sig_name,
                     },
                 )
             )

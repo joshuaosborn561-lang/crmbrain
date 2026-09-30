@@ -56,8 +56,13 @@ class CycleReport:
     briefs_sent: list[str] = field(default_factory=list)
     notes_updated: list[str] = field(default_factory=list)
     amounts_set: list[str] = field(default_factory=list)
+    deals_restored: list[str] = field(default_factory=list)
+    review_queue: list[str] = field(default_factory=list)
+    stale_sources: list[str] = field(default_factory=list)
+    proposed_writes: list[str] = field(default_factory=list)
     integrations: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    dry_run: bool = False
 
     def as_dict(self) -> dict[str, list[str]]:
         return {
@@ -68,6 +73,7 @@ class CycleReport:
             "deals_moved": self.deals_moved,
             "deals_pruned": self.deals_pruned,
             "contacts_pruned": self.contacts_pruned,
+            "deals_restored": self.deals_restored,
             "junk_blocked": self.junk_blocked,
             "ticker_enrolled": self.ticker_enrolled,
             "ticker_drafts": self.ticker_drafts,
@@ -75,13 +81,51 @@ class CycleReport:
             "briefs_sent": self.briefs_sent,
             "notes_updated": self.notes_updated,
             "amounts_set": self.amounts_set,
+            "review_queue": self.review_queue,
+            "stale_sources": self.stale_sources,
+            "proposed_writes": self.proposed_writes,
             "errors": self.errors,
         }
 
     def summary_text(self) -> str:
-        lines = ["CRM Brain cycle"]
+        title = "CRM Brain cycle (dry-run)" if self.dry_run else "CRM Brain cycle"
+        lines = [title]
         for key, values in self.as_dict().items():
             lines.append(f"{key}: {len(values)}")
             for item in values[:20]:
                 lines.append(f"  - {item}")
         return "\n".join(lines)
+
+
+@dataclass
+class IntentDecision:
+    """Sales-opportunity classification for one person / meeting."""
+
+    verdict: str  # yes | no | review
+    intent: str = ""
+    confidence: float = 0.0
+    reason: str = ""
+    stage: str = ""
+    amount: str = ""
+
+
+@dataclass
+class ProposedWrite:
+    """A HubSpot mutation the cycle would make (dry-run or live)."""
+
+    action: str
+    label: str
+    stage: str = ""
+    amount: str = ""
+    contact_id: str = ""
+    deal_id: str = ""
+
+    def as_line(self) -> str:
+        bits = [self.action, self.label]
+        if self.stage:
+            bits.append(self.stage)
+        if self.amount:
+            bits.append(f"${self.amount}")
+        if self.deal_id:
+            bits.append(f"deal:{self.deal_id}")
+        return " ".join(bits)

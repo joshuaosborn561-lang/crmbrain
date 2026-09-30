@@ -110,6 +110,8 @@ class HubSpot:
         # Upcoming GCal attendees may promote. Recent/past only protect from prune.
         self.scheduled_attendee_emails: set[str] = set()
         self.recent_attendee_emails: set[str] = set()
+        self.dry_run = bool(getattr(settings, "dry_run", False))
+        self.proposed: list[str] = []
 
     def _request(
         self,
@@ -122,6 +124,9 @@ class HubSpot:
     ) -> requests.Response:
         """HubSpot HTTP. Reads retry timeouts with backoff so one 30s stall is not fatal."""
         url = path if path.startswith("http") else f"{self.base}{path}"
+        if self.dry_run and method.upper() in {"POST", "PATCH", "PUT", "DELETE"}:
+            self.proposed.append(f"{method.upper()} {path}")
+            return _DryResp()
         timeout = READ_TIMEOUT if timeout is None else timeout
         attempts = MAX_READ_RETRIES + 1 if retry else 1
         last_exc: BaseException | None = None
@@ -575,3 +580,16 @@ class HubSpot:
 def _sleep(seconds: float) -> None:
     if seconds > 0:
         time.sleep(seconds)
+
+
+class _DryResp:
+    status_code = 200
+    text = "{}"
+    content = b"{}"
+    ok = True
+
+    def json(self) -> dict:
+        return {"id": "dry-run", "properties": {}, "results": []}
+
+    def raise_for_status(self) -> None:
+        return None

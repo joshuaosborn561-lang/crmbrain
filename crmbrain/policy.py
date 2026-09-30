@@ -170,8 +170,33 @@ def is_cube_business_discovery(ev: Engagement) -> bool:
     return True
 
 
+POC_HINTS = (
+    "poc",
+    "proof of concept",
+    "pilot",
+    "kickoff",
+    "onboarding",
+    "paid poc",
+    "paid pilot",
+)
+
+
+def has_poc_evidence(ev: Engagement) -> bool:
+    blob = f"{_blob(ev)} {ev.transcript or ''}".lower()
+    return any(h in blob for h in POC_HINTS)
+
+
 def is_allo_discovery(ev: Engagement) -> bool:
-    return is_discovery_meeting(ev) and bool((ev.transcript or ev.summary or ev.raw_subject).strip())
+    extra = ev.extra or {}
+    duration = 0
+    try:
+        duration = int(extra.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    text = (ev.transcript or ev.summary or "").strip()
+    if duration >= 45 and len(text) >= 40:
+        return True
+    return is_discovery_meeting(ev) and bool(text)
 
 
 def is_meeting_held(ev: Engagement) -> bool:
@@ -271,6 +296,14 @@ def choose_deal_action(current: str | None, requested: str, ev: Engagement) -> s
         return target
     if current == target:
         return None
+    extra = ev.extra or {}
+    if (
+        current == STAGE["signed"]
+        and target == STAGE["proposal_sent"]
+        and ev.source == "gmail"
+        and (extra.get("document_name") or extra.get("amount"))
+    ):
+        return target
     back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
     if not should_move_stage(current, target, back_signal=back):
         return None
@@ -284,10 +317,12 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
         return ""
     hint = facts.get("stage_hint") or ev.stage_hint
     stage = stage_id(hint) if hint else ""
-    if ev.source != "gmail" and stage in MONEY_STAGES:
+    if ev.source != "gmail" and stage in MONEY_STAGES and not has_poc_evidence(ev):
         stage = ""
     if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
         return STAGE["discovery_completed"]
+    if has_poc_evidence(ev) and ev.source not in NEVER_OPEN_DEAL_SOURCES:
+        return STAGE["signed"]
     if stage:
         if ev.source in NEVER_OPEN_DEAL_SOURCES and stage in {STAGE["replied"], STAGE["nurture"]}:
             return ""
