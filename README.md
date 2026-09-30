@@ -46,6 +46,8 @@ The cycle will not regress a more advanced open stage to Replied or Nurture with
 
 Fireflies and Cube `*-transcript.docx` always run extract → `merge_contact_props` so relational notes (family, school, hooks) land on the contact. If the transcript clearly states **this deal's** price (monthly retainer, proposal $, package), the cycle PATCHes HubSpot deal `amount` when that field is empty. It never invents an amount and never copies Josh's case-study stats ($2M pipeline, $100K closed, meeting guarantee).
 
+Each cycle **reconciles** HubSpot to a per-person evidence timeline (Calendar upcoming events are always scanned, not just the email lookback). Low-confidence meetings go to `crmbrain.review_queue` and the cycle report — they do not open a deal. Paid/Signed deals are never archived.
+
 Each cycle also **prunes** junk:
 
 - Archives (or closed-lost fallback) deals stuck in Appointment Scheduled (`appointmentscheduled`) with no Calendly / Fireflies / GCal meeting evidence
@@ -108,6 +110,8 @@ Full cycle:
 10. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
 11. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
 12. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
+13. Reconciles HubSpot to the per-person evidence timeline (create / restore / advance / regress). Upcoming Calendar events are always scanned (next 30 days), not just the email lookback. Low-confidence meetings go to `crmbrain.review_queue`.
+14. Alarms in the cycle report when Gmail, Fireflies, Calendar, Allo, or Smartlead has not produced data in more than two business days.
 
 ## Run locally
 
@@ -117,7 +121,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill values
 python -m crmbrain cycle
+python -m crmbrain cycle --dry-run
 ```
+
+`CRMBRAIN_DRY_RUN=1` is the same as `--dry-run`: HubSpot `/search` reads are allowed; mutations are blocked. Supabase writes are skipped except the `cycle_runs` report JSON (full proposed creates/moves/archives/review items). HeyReach `add_lead`, email-waterfall/enrichment, and briefing sends are skipped.
+
+New env vars: `CRMBRAIN_DRY_RUN`, `INTENT_MIN_CONFIDENCE` (default 0.75), `CALENDAR_UPCOMING_DAYS` (default 30), `ALLO_API_URL` (default `https://api.withallo.com`), `MAX_ARCHIVES_REGRESSIONS` (default 10), `MAX_CREATES` (default 10), `MAX_STAGE_MOVES` (default 20), `MAX_CHANGE_FRACTION` (default 0.15). Allo auth is `Authorization: Api-Key`, not Bearer.
+
+Write budget: over a per-kind cap, remaining writes go to `review_queue` with reason `cap`. If more than 15% of open deals would change in one cycle, all reconcile writes abort and the report is flagged. POC/pilot hints go to review (`poc_hint`) and never write Signed. Signed requires a completed non-free PandaDoc/DocuSign document or a payment. Calendar create uses the intent classifier (not title keywords); low-confidence Josh 1:1s go to review.
 
 ## Model
 

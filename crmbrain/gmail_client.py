@@ -210,7 +210,10 @@ class Gmail:
         )
         if resp.status_code in {401, 403}:
             logger.info("calendar api %s — falling back to Gmail invites", resp.status_code)
-            return []
+            raise PermissionError(
+                f"calendar api {resp.status_code} — grant Calendar readonly scope "
+                "on the Gmail OAuth token (https://www.googleapis.com/auth/calendar.readonly)"
+            )
         resp.raise_for_status()
         return resp.json().get("items") or []
 

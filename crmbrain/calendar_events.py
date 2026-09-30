@@ -15,7 +15,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from crmbrain.config import JOSH_DOMAINS, JOSH_EMAILS, Settings, is_internal_meeting, now_utc
+from crmbrain.config import (
+    JOSH_DOMAINS,
+    JOSH_EMAILS,
+    NON_SALES_TITLE_HINTS,
+    Settings,
+    is_internal_meeting,
+    now_utc,
+)
 from crmbrain.gmail_client import Gmail
 from crmbrain.models import Engagement
 from crmbrain.names import person_name_from_attendee
@@ -24,7 +31,7 @@ from crmbrain.sources.gmail_scan import is_notetaker_email, is_system_address
 logger = logging.getLogger(__name__)
 
 RECENT_DAYS = 7
-UPCOMING_DAYS = 45
+UPCOMING_DAYS = 30
 ATTENDEE_RE = re.compile(
     r"^ATTENDEE([^\n]*):(?:mailto:)?([^\s\n>]+)",
     re.I | re.M,
@@ -45,6 +52,12 @@ SALES_MEETING_HINTS = (
     "discovery",
     "disco",
     "demo",
+    "cold email",
+    "kickoff",
+    "onboarding",
+    "poc",
+    "pilot",
+    "proposal",
     "call with josh",
     "call with joshua",
 )
@@ -71,14 +84,17 @@ class CalendarSnapshot:
     upcoming: set[str] = field(default_factory=set)
     recent: set[str] = field(default_factory=set)
     create_engagements: list[Engagement] = field(default_factory=list)
+    events: list[ClassifiedEvent] = field(default_factory=list)
+    calendar_api_ok: bool = True
+    calendar_api_error: str = ""
 
     def protect_emails(self) -> set[str]:
         return set(self.upcoming) | set(self.recent)
 
 
-def event_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+def event_window(now: datetime | None = None, upcoming_days: int = UPCOMING_DAYS) -> tuple[datetime, datetime]:
     now = now or now_utc()
-    return now - timedelta(days=RECENT_DAYS), now + timedelta(days=UPCOMING_DAYS)
+    return now - timedelta(days=RECENT_DAYS), now + timedelta(days=upcoming_days)
 
 
 def is_josh_address(email: str) -> bool:
@@ -108,7 +124,18 @@ def is_excluded_attendee(email: str) -> bool:
     return is_system_address(low)
 
 
-def looks_like_sales_meeting(title: str, description: str = "") -> bool:
+def looks_like_non_sales_meeting(title: str, description: str = "") -> bool:
+    blob = f"{title} {description}".lower()
+    return any(hint in blob for hint in NON_SALES_TITLE_HINTS)
+
+
+def looks_like_sales_meeting(
+    title: str, description: str = "", *, josh_one_on_one: bool = False
+) -> bool:
+    """Legacy title-keyword helper. Create gating uses the intent classifier."""
+    del josh_one_on_one
+    if looks_like_non_sales_meeting(title, description):
+        return False
     blob = f"{title} {description}".lower()
     return any(hint in blob for hint in SALES_MEETING_HINTS)
 
@@ -297,7 +324,8 @@ def usable_event(ev: ClassifiedEvent) -> bool:
     return True
 
 
-def may_create_contact_from_event(ev: ClassifiedEvent) -> bool:
+def passes_calendar_create_gate(ev: ClassifiedEvent) -> bool:
+    """PR #13 structural gate: upcoming, Josh org/accepted, not all-day, one prospect."""
     if not usable_event(ev):
         return False
     if not ev.upcoming:
@@ -306,9 +334,24 @@ def may_create_contact_from_event(ev: ClassifiedEvent) -> bool:
         return False
     if not ev.primary_prospect:
         return False
-    if not looks_like_sales_meeting(ev.title, ev.description):
-        return False
     return True
+
+
+def _intent_for_classified(ev: ClassifiedEvent, settings: Settings | None = None):
+    from crmbrain.intent import classify
+
+    return classify(settings, _engagement_from_event(ev, "calendar-intent"))
+
+
+def may_create_contact_from_event(ev: ClassifiedEvent, settings: Settings | None = None) -> bool:
+    """Create only when the structural gate passes AND intent is a sales opportunity."""
+    if not passes_calendar_create_gate(ev):
+        return False
+    from crmbrain.intent import is_confident_sales
+
+    min_c = float(getattr(settings, "intent_min_confidence", 0.75) or 0.75)
+    decision = _intent_for_classified(ev, settings)
+    return is_confident_sales(decision, min_c)
 
 
 def attendees_from_gcal_event(event: dict) -> set[str]:
@@ -356,30 +399,36 @@ def _engagement_from_event(ev: ClassifiedEvent, external_id: str) -> Engagement:
 
 
 def load_calendar(gmail: Gmail, settings: Settings | None = None) -> CalendarSnapshot:
-    del settings
-    start, end = event_window()
+    upcoming_days = getattr(settings, "calendar_upcoming_days", None) or UPCOMING_DAYS
+    start, end = event_window(upcoming_days=upcoming_days)
     snap = CalendarSnapshot()
     try:
-        for event in gmail.list_calendar_events(start, end):
+        events = gmail.list_calendar_events(start, end)
+        snap.calendar_api_ok = True
+        for event in events:
             classified = classify_gcal_event(event)
+            snap.events.append(classified)
             if not usable_event(classified):
                 continue
             emails = set(classified.external_attendees)
             if classified.upcoming:
                 snap.upcoming.update(emails)
-                if may_create_contact_from_event(classified):
+                if passes_calendar_create_gate(classified):
                     eid = str((event.get("id") or classified.primary_prospect) or "")
                     if eid:
                         snap.create_engagements.append(_engagement_from_event(classified, f"gcal:{eid}"))
             else:
                 snap.recent.update(emails)
     except Exception as exc:
+        snap.calendar_api_ok = False
+        snap.calendar_api_error = str(exc)
         logger.warning("calendar api attendees skipped: %s", exc)
     try:
         gmail_snap = _snapshot_from_gmail_invites(gmail, start)
         snap.upcoming.update(gmail_snap.upcoming)
         snap.recent.update(gmail_snap.recent)
         snap.create_engagements.extend(gmail_snap.create_engagements)
+        snap.events.extend(gmail_snap.events)
     except Exception as exc:
         logger.warning("gmail invite attendees skipped: %s", exc)
     return snap
@@ -409,6 +458,7 @@ def _snapshot_from_gmail_invites(gmail: Gmail, start: datetime) -> CalendarSnaps
             if parsed.title:
                 classified = parsed
                 break
+        snap.events.append(classified)
         if classified.start is None:
             people = attendees_from_text(body)
             for ics in gmail.calendar_parts(msg):
@@ -422,6 +472,9 @@ def _snapshot_from_gmail_invites(gmail: Gmail, start: datetime) -> CalendarSnaps
         emails = set(classified.external_attendees)
         if classified.upcoming:
             snap.upcoming.update(emails)
+            if passes_calendar_create_gate(classified):
+                eid = f"gmail-ics:{stub['id']}:{classified.primary_prospect}"
+                snap.create_engagements.append(_engagement_from_event(classified, eid))
         else:
             snap.recent.update(emails)
     return snap

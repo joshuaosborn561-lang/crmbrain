@@ -64,10 +64,18 @@ def _meeting_evidence(hs: HubSpot, contact: dict, deals: list[dict] | None = Non
     return False
 
 
-def has_live_meeting_evidence(hs: HubSpot, contact: dict, deals: list[dict] | None = None) -> bool:
+def has_live_meeting_evidence(
+    hs: HubSpot,
+    contact: dict,
+    deals: list[dict] | None = None,
+    *,
+    exclude_deal_id: str = "",
+) -> bool:
     """True when the contact may stay in HubSpot (held or scheduled meeting)."""
     if deals is None and contact.get("id"):
         deals = hs.open_deals_for_contact(contact["id"])
+    if exclude_deal_id:
+        deals = [d for d in (deals or []) if str(d.get("id") or "") != str(exclude_deal_id)]
     return _meeting_evidence(hs, contact, deals)
 
 

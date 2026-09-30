@@ -177,6 +177,18 @@ class FakeHubSpot:
     def contact_has_meetings(self, contact_id):
         return bool(getattr(self, "meetings", {}).get(str(contact_id)))
 
+    def contact_has_future_meetings(self, contact_id, now=None):
+        del now
+        return str(contact_id) in set(getattr(self, "future_meetings", set()) or set())
+
+    def count_open_deals(self):
+        n = 0
+        for deal in self.deals:
+            stage = (deal.get("properties") or {}).get("dealstage") or ""
+            if stage and stage != STAGE["closed_lost"]:
+                n += 1
+        return n
+
     def archive_deal(self, deal_id):
         self.deals = [d for d in self.deals if d["id"] != deal_id]
         self.writes.append(("archive_deal", deal_id))
@@ -227,7 +239,7 @@ class FakeHubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             current = (deal.get("properties") or {}).get("dealstage") or ""
-            target = choose_deal_action(current, stage, ev) if stage else None
+            target = choose_deal_action(current, stage, ev, deal=deal) if stage else None
             current_name = deal["properties"].get("dealname") or ""
             cleaned = policy.prefer_deal_name(
                 clean_deal_name(current_name, fallback=wanted or ev.display_name()),
