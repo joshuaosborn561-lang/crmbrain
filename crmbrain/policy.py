@@ -349,7 +349,7 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
         return ""
     hint = facts.get("stage_hint") or ev.stage_hint
     stage = stage_id(hint) if hint else ""
-    if ev.source != "gmail" and stage in MONEY_STAGES and not has_poc_evidence(ev):
+    if ev.source != "gmail" and stage in MONEY_STAGES:
         stage = ""
     if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
         return STAGE["discovery_completed"]

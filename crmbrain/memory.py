@@ -173,7 +173,8 @@ class Memory:
         if not self.use_supabase:
             return None
         try:
-            rows = self._sb_schema("POST", "cycle_runs", json_body={"status": "running"})
+            initial = "dry_run" if self.dry_run else "running"
+            rows = self._sb_schema("POST", "cycle_runs", json_body={"status": initial})
             if rows:
                 stamp = rows[0].get("started_at")
                 if stamp:
@@ -367,6 +368,10 @@ class Memory:
     def enqueue_review(self, row: dict) -> None:
         if self._skip_side_write("review_queue"):
             return
+        row = dict(row)
+        row.setdefault("status", "open")
+        if self._review_already_open(row):
+            return
         self._local.setdefault("review_queue", []).append(row)
         self.save_local()
         if self.use_supabase:
@@ -374,6 +379,42 @@ class Memory:
                 self._sb_schema("POST", "review_queue", json_body=row)
             except Exception as exc:
                 self._record_error("enqueue_review", exc)
+
+    def _review_already_open(self, row: dict) -> bool:
+        """Same person + reason stays one open review_queue row across cycles."""
+        email = (row.get("email") or "").strip().lower()
+        person = (row.get("person_key") or "").strip()
+        reason = (row.get("reason") or "").strip()
+        if not reason or not (email or person):
+            return False
+        for existing in self._local.get("review_queue") or []:
+            if (existing.get("status") or "open") != "open":
+                continue
+            if (existing.get("reason") or "").strip() != reason:
+                continue
+            existing_email = (existing.get("email") or "").strip().lower()
+            existing_person = (existing.get("person_key") or "").strip()
+            if email and existing_email == email:
+                return True
+            if person and existing_person == person:
+                return True
+        if self.use_supabase:
+            try:
+                params = {
+                    "reason": f"eq.{reason}",
+                    "select": "id,email,person_key,status",
+                    "limit": "20",
+                }
+                if person:
+                    params["person_key"] = f"eq.{person}"
+                elif email:
+                    params["email"] = f"eq.{email}"
+                for existing in self._sb_schema("GET", "review_queue", params=params) or []:
+                    if (existing.get("status") or "open") == "open":
+                        return True
+            except Exception as exc:
+                self._record_error("review_already_open", exc)
+        return False
 
     def record_freshness(
         self,

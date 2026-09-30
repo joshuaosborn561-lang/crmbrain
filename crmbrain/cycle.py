@@ -234,6 +234,21 @@ def _apply_transcript_intelligence(
             )
 
     stage = policy.resolve_stage(ev, facts)
+    if policy.has_poc_evidence(ev) and stage not in {STAGE["signed"], STAGE["paid"]}:
+        line = f"{ev.display_name() or ev.email} poc_hint"
+        if line not in report.review_queue:
+            report.review_queue.append(line)
+        if hasattr(memory, "enqueue_review"):
+            memory.enqueue_review(
+                {
+                    "person_key": ev.email or ev.phone or ev.display_name(),
+                    "email": ev.email,
+                    "name": ev.display_name(),
+                    "company": ev.company,
+                    "reason": "poc_hint",
+                    "evidence": {"source": ev.source, "subject": ev.raw_subject},
+                }
+            )
     if not stage and policy.is_client_context_ev(ev):
         report.skipped.append(f"{ev.display_name()} client conversation, notes only")
     amount = facts.get("amount_hint") or facts.get("deal_amount") or ""
@@ -400,6 +415,12 @@ def _stale_source_warning(report: CycleReport, source: str, detail: str) -> None
     report.warnings.append(line)
     if not any(s.startswith(source) for s in report.stale_sources):
         report.stale_sources.append(f"{source} stale-source warning ({detail})")
+
+
+def _finish_status(settings: Settings, report: CycleReport) -> str:
+    if settings.dry_run:
+        return "dry_run"
+    return cycle_status(report)
 
 
 def cycle_status(report: CycleReport) -> str:
@@ -642,7 +663,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         else:
             report.errors.append("Gmail missing, cannot send briefs")
         _flush_memory_errors(memory, report)
-        memory.finish_run(run_id, cycle_status(report), report.as_dict())
+        memory.finish_run(run_id, _finish_status(settings, report), report.as_dict())
         _flush_memory_errors(memory, report)
         return report
 
@@ -747,7 +768,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
     if not settings.dry_run:
         _fire_ticker(settings, memory, report)
     _flush_memory_errors(memory, report)
-    memory.finish_run(run_id, cycle_status(report), report.as_dict())
+    memory.finish_run(run_id, _finish_status(settings, report), report.as_dict())
     _flush_memory_errors(memory, report)
     return report
 

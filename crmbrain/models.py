@@ -66,6 +66,7 @@ class CycleReport:
     dry_run: bool = False
     calendar_api_ok: bool = True
     reconcile_aborted: bool = False
+    would_abort: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,13 +93,16 @@ class CycleReport:
             "dry_run": self.dry_run,
             "calendar_api_ok": self.calendar_api_ok,
             "reconcile_aborted": self.reconcile_aborted,
+            "would_abort": self.would_abort,
         }
 
     def summary_text(self) -> str:
         title = "CRM Brain cycle (dry-run)" if self.dry_run else "CRM Brain cycle"
         lines = [title]
-        if self.reconcile_aborted:
+        if self.reconcile_aborted or self.would_abort:
             lines.append("reconcile_aborted: true")
+            if self.would_abort:
+                lines.append("would_abort: true")
         for key, values in self.as_dict().items():
             if not isinstance(values, list):
                 continue

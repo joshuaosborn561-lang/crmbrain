@@ -147,6 +147,8 @@ def _queue_review(
     conf = f"{decision.confidence:.2f}" if decision else ""
     verdict = decision.verdict if decision else ""
     line = " ".join(p for p in (label, verdict, conf, why) if p)
+    if line in report.review_queue:
+        return
     report.review_queue.append(line)
     if dry_run:
         return
@@ -429,6 +431,18 @@ def _scheduled_at(timeline: PersonTimeline, deal: dict | None) -> datetime | Non
     return policy.parse_iso_datetime(props.get("meeting_at") or props.get("scheduled_at"))
 
 
+def _calendar_blocks_back_move(hs: HubSpot, email: str, contact: dict | None) -> bool:
+    """Upcoming/recent calendar or a future HubSpot meeting blocks No Show / Nurture."""
+    if _attendee_hit(hs, email):
+        return True
+    if contact and contact.get("id") and hasattr(hs, "contact_has_future_meetings"):
+        try:
+            return bool(hs.contact_has_future_meetings(str(contact["id"])))
+        except Exception:
+            return True
+    return False
+
+
 def _explicit_cancel(timeline: PersonTimeline) -> bool:
     if KIND_CANCELED in timeline.kinds():
         return True
@@ -477,6 +491,41 @@ def _may_archive_reply_only(hs: HubSpot, contact: dict | None, deal: dict) -> bo
     if _attendee_hit(hs, email):
         return False
     return True
+
+
+def _reeval_decision(
+    hs: HubSpot,
+    timeline: PersonTimeline,
+    deal: dict,
+    contact: dict,
+    upcoming_emails: set[str],
+    held_events: list[Engagement],
+) -> tuple[str, str]:
+    """Return (target_stage, reason). Empty target means no write.
+
+    reason ``unknown_scheduled_time`` means review, not a HubSpot write.
+    """
+    email = ((contact.get("properties") or {}).get("email") or timeline.email or "").strip().lower()
+    ev = representative_engagement(timeline)
+    scheduled_at = _scheduled_at(timeline, deal)
+    matched_held = policy.matching_held_event(ev, contact, held_events, scheduled_at)
+    has_upcoming = bool(email and email in upcoming_emails)
+    calendar_or_future = _calendar_blocks_back_move(hs, email, contact)
+    canceled = _explicit_cancel(timeline)
+    if matched_held:
+        return STAGE["discovery_completed"], "held_this_cycle"
+    if canceled and not has_upcoming and not calendar_or_future:
+        return STAGE["nurture"], "canceled_no_reschedule"
+    if not scheduled_at:
+        return "", "unknown_scheduled_time"
+    if (
+        policy.scheduled_past_grace(scheduled_at)
+        and not matched_held
+        and not has_upcoming
+        and not calendar_or_future
+    ):
+        return STAGE["no_show"], "past_grace_no_show"
+    return "", ""
 
 
 def reeval_discovery_scheduled(
@@ -535,42 +584,12 @@ def reeval_discovery_scheduled(
             timeline.contact = timeline.contact or contact
             if deal not in timeline.deals:
                 timeline.deals.append(deal)
-        ev = representative_engagement(timeline)
-        scheduled_at = _scheduled_at(timeline, deal)
-        matched_held = policy.matching_held_event(ev, contact, held_events, scheduled_at)
-        has_upcoming = bool(email and email in upcoming)
-        has_recent = _attendee_hit(hs, email)
-        has_reschedule = has_upcoming
-        has_future_meeting = False
-        if contact.get("id") and hasattr(hs, "contact_has_future_meetings"):
-            try:
-                has_future_meeting = bool(hs.contact_has_future_meetings(str(contact["id"])))
-            except Exception:
-                has_future_meeting = True
-        canceled = _explicit_cancel(timeline)
+        target, reason = _reeval_decision(
+            hs, timeline, deal, contact, upcoming, held_events
+        )
         label = timeline.display_name() or (deal.get("properties") or {}).get("dealname") or deal_id
-        target = ""
-        reason = ""
-        if matched_held:
-            target = STAGE["discovery_completed"]
-            reason = "held_this_cycle"
-        elif canceled and not has_reschedule:
-            target = STAGE["nurture"]
-            reason = "canceled_no_reschedule"
-        elif not scheduled_at:
+        if reason == "unknown_scheduled_time":
             _queue_review(memory, report, timeline, reason="unknown_scheduled_time", dry_run=dry_run)
-            continue
-        elif (
-            policy.scheduled_past_grace(scheduled_at)
-            and not matched_held
-            and not has_upcoming
-            and not has_recent
-            and not has_future_meeting
-            and not has_reschedule
-        ):
-            target = STAGE["no_show"]
-            reason = "past_grace_no_show"
-        else:
             continue
         if not target or target == STAGE["discovery_scheduled"]:
             continue
@@ -584,6 +603,7 @@ def reeval_discovery_scheduled(
         )
         if dry_run:
             continue
+        ev = representative_engagement(timeline)
         ev.stage_hint = target
         wrote = hs.upsert_deal(contact, ev, target)
         if wrote.get("id"):
@@ -643,34 +663,68 @@ def _planned_change_count(
     held_events: list[Engagement],
     calendar_api_ok: bool,
 ) -> int:
-    """How many open deals this cycle would move/archive/create against."""
-    n = 0
+    """How many open deals this cycle would actually move/archive/create."""
+    changed: set[str] = set()
+    creates = 0
     for timeline in timelines.values():
         ev = representative_engagement(timeline)
         decision = intent.classify(settings, ev)
         current = _current_stage(timeline)
         deal = _open_deal(timeline)
         email = timeline.email
+        canceled = KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails)
+        if canceled and _calendar_blocks_back_move(hs, email, timeline.contact):
+            canceled = False
         target = stage_from_timeline(
             timeline,
             decision,
             has_upcoming=bool(email and email in upcoming_emails),
-            canceled_no_reschedule=KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails),
+            canceled_no_reschedule=canceled,
             past_grace=not (email and email in upcoming_emails),
         )
+        deal_id = str((deal or {}).get("id") or "")
         if evidence.reply_only(timeline) and deal and current == STAGE["discovery_scheduled"]:
-            n += 1
+            if deal_id:
+                changed.add(deal_id)
             continue
         write = evidence_move(current, target, timeline, ev) if target else None
-        if write or (not deal and target and intent.is_confident_sales(decision, settings.intent_min_confidence)):
-            n += 1
+        if write and deal_id:
+            changed.add(deal_id)
+        elif not deal and target and intent.is_confident_sales(decision, settings.intent_min_confidence):
+            creates += 1
     if calendar_api_ok and hasattr(hs, "iter_deals"):
         try:
-            for deal in hs.iter_deals(["dealstage"], stage=STAGE["discovery_scheduled"]):
-                n += 1
+            for deal in hs.iter_deals(["dealname", "dealstage", "meeting_at"], stage=STAGE["discovery_scheduled"]):
+                deal_id = str(deal.get("id") or "")
+                if not deal_id or deal_id in changed:
+                    continue
+                contacts = hs.contacts_for_deal(deal_id) if hasattr(hs, "contacts_for_deal") else []
+                if not contacts:
+                    continue
+                contact = contacts[0]
+                props = contact.get("properties") or {}
+                email = (props.get("email") or "").strip().lower()
+                key = evidence.person_key(
+                    email,
+                    props.get("phone") or "",
+                    f"{props.get('firstname') or ''} {props.get('lastname') or ''}",
+                )
+                timeline = timelines.get(key) if key else None
+                if timeline is None:
+                    timeline = PersonTimeline(
+                        key=key or f"deal:{deal_id}",
+                        email=email,
+                        contact=contact,
+                        deals=[deal],
+                    )
+                target, reason = _reeval_decision(
+                    hs, timeline, deal, contact, upcoming_emails, held_events
+                )
+                if target and reason != "unknown_scheduled_time":
+                    changed.add(deal_id)
         except Exception:
             pass
-    return n
+    return creates + len(changed)
 
 
 def run(
@@ -695,11 +749,17 @@ def run(
     open_n = _count_open_deals(hs, timelines)
     if budget.maybe_abort(would, open_n):
         report.reconcile_aborted = True
+        report.would_abort = True
         report.warnings.append(budget.abort_reason)
-        report.skipped.append(budget.abort_reason)
-        return timelines
+        if not dry_run:
+            report.skipped.append(budget.abort_reason)
+            return timelines
+        budget.aborted = False
     for timeline in timelines.values():
         email = timeline.email
+        canceled = KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails)
+        if canceled and _calendar_blocks_back_move(hs, email, timeline.contact):
+            canceled = False
         try:
             apply_timeline(
                 timeline,
@@ -708,7 +768,7 @@ def run(
                 memory,
                 report,
                 has_upcoming=bool(email and email in upcoming_emails),
-                canceled_no_reschedule=KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails),
+                canceled_no_reschedule=canceled,
                 past_grace=not (email and email in upcoming_emails),
                 dry_run=dry_run,
                 budget=budget,
