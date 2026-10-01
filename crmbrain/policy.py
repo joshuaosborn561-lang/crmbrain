@@ -152,8 +152,8 @@ def is_discovery_meeting(ev: Engagement) -> bool:
     return any(h in _blob(ev) for h in DISCOVERY_HINTS)
 
 
-def is_cube_business_discovery(ev: Engagement) -> bool:
-    """Real Cube ACR disco: transcript.docx text, not HTML scrape, not family chat."""
+def cube_transcript_usable(ev: Engagement) -> bool:
+    """Real Cube transcript, not HTML scrape or family chat."""
     text = (ev.transcript or ev.summary or "").strip()
     if len(text) < 80:
         return False
@@ -163,11 +163,41 @@ def is_cube_business_discovery(ev: Engagement) -> bool:
     if extra.get("transcript_kind") == "html_txt":
         return False
     low = text.lower()
-    if is_discovery_meeting(ev):
-        return True
     if any(x in low for x in FAMILY_ONLY_HINTS) and not any(x in low for x in BUSINESS_HINTS):
         return False
     return True
+
+
+def cube_has_sales_intent(ev: Engagement) -> bool:
+    blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}".lower()
+    if is_discovery_meeting(ev):
+        return True
+    return bool(has_word_hint(blob, DISCOVERY_HINTS) or has_word_hint(blob, BUSINESS_HINTS))
+
+
+def contact_is_prospect(contact: dict | None) -> bool:
+    """True when HubSpot already treats this person as a sales prospect."""
+    if not contact:
+        return False
+    props = contact.get("properties") or {}
+    source = (props.get("crm_source") or "").lower()
+    return source in MEETING_CRM_SOURCES
+
+
+def is_cube_business_discovery(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
+    """Held Discovery only for sales intent, or a 1:1 with an existing prospect.
+
+    Routine client/partner calls must not create deals.
+    """
+    if not cube_transcript_usable(ev):
+        return False
+    if is_client_context_ev(ev) and not cube_has_sales_intent(ev):
+        return False
+    if cube_has_sales_intent(ev):
+        return True
+    if already_prospect is None:
+        already_prospect = bool((ev.extra or {}).get("already_prospect"))
+    return bool(already_prospect)
 
 
 POC_HINTS = (

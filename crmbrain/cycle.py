@@ -22,6 +22,7 @@ from crmbrain.config import (
     STAGE,
     Settings,
     compute_lookback_start,
+    is_excluded_contact,
     is_non_deal_person,
     is_personal,
     is_personal_family_intent,
@@ -223,7 +224,7 @@ def _apply_transcript_intelligence(
     merged = intelligence.merge_contact_props(contact, facts)
     if merged:
         try:
-            hs.patch_contact(contact["id"], merged)
+            hs.patch_contact(contact["id"], merged, ev=ev, contact=contact)
             report.notes_updated.append(f"{ev.display_name() or ev.email} ({ev.source})")
             props = contact.setdefault("properties", {})
             props.update(merged)
@@ -235,7 +236,12 @@ def _apply_transcript_intelligence(
         note = ev.summary or ev.transcript[:1500] or ev.raw_subject
         if note:
             try:
-                hs.add_note(contact["id"], f"{ev.source} {ev.occurred_at or ''}\n\n{note}")
+                hs.add_note(
+                    contact["id"],
+                    f"{ev.source} {ev.occurred_at or ''}\n\n{note}",
+                    ev=ev,
+                    contact=contact,
+                )
             except Exception as exc:
                 report.errors.append(f"timeline note {ev.display_name() or ev.email}: {exc}")
     for fact_type in ("personal_details", "family_notes", "relationship_hooks"):
@@ -283,7 +289,7 @@ def _apply_transcript_intelligence(
         live_amount = (deal.get("properties") or {}).get("amount")
         wrote_amount = bool(deal.get("id") and amount and intelligence.amounts_equal(live_amount, amount))
         if deal.get("id") and amount and not wrote_amount:
-            wrote_amount = hs.fill_deal_amount(deal, amount)
+            wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
         if wrote_amount:
             report.amounts_set.append(f"{ev.display_name() or ev.email} {amount}")
             logger.info("amounts_set %s %s", ev.display_name() or ev.email, amount)
@@ -318,6 +324,8 @@ def _queue_linkedin(
     """Anyone Josh called, emailed, or talked to on LinkedIn gets a HeyReach invite."""
     if settings.dry_run or not hey or ev.source == "heyreach":
         return
+    if is_excluded_contact(ev, contact):
+        return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         return
     if ev.email and (ev.email.lower() in JOSH_EMAILS or should_skip_email(ev.email)):
@@ -347,7 +355,9 @@ def _queue_linkedin(
     memory.mark_processed("heyreach", hid, {"linkedin": ev.linkedin_url, "email": ev.email})
     if ev.linkedin_url and contact and contact.get("id"):
         try:
-            hs.patch_contact(contact["id"], {"hs_linkedin_url": ev.linkedin_url})
+            hs.patch_contact(
+                contact["id"], {"hs_linkedin_url": ev.linkedin_url}, ev=ev, contact=contact
+            )
         except Exception:
             pass
     report.linkedin_queued.append(ev.display_name() or ev.email)
@@ -384,6 +394,9 @@ def _backfill_hubspot_invites(
             title=props.get("jobtitle") or "",
             linkedin_url=props.get("hs_linkedin_url") or "",
         )
+        if is_excluded_contact(ev, row):
+            report.skipped.append(f"hubspot_backfill:{ev.display_name() or ev.email} excluded")
+            continue
         before = len(report.linkedin_queued)
         _queue_linkedin(settings, hey, ev, hs, memory, report, contact=row)
         if len(report.linkedin_queued) > before:
@@ -706,9 +719,17 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         return report
 
     engagements: list[Engagement] = list(calendar_creates)
+    cube_backfill = hasattr(memory, "latest_freshness") and memory.latest_freshness("cube_acr") is None
     if has_drive_access(settings):
         try:
-            cube_events = cube_acr.scan(settings)
+            cube_events = cube_acr.scan(settings, backfill=cube_backfill)
+            if cube_backfill:
+                report.warnings.append(
+                    f"cube_acr: one-time backfill ({getattr(settings, 'cube_lookback_days', 14)}d)"
+                )
+                for ev in cube_events:
+                    ev.extra["skip_lookback"] = True
+                    ev.extra["cube_backfill"] = True
             engagements += cube_events
             if hasattr(memory, "upsert_cube_call"):
                 for ev in cube_events:
@@ -745,6 +766,12 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         if not _in_window(ev, settings) and ev.source not in {"heyreach"}:
             report.skipped.append(f"{ev.source}:{ev.external_id} outside window")
             continue
+        if ev.source == "cube_acr":
+            try:
+                found = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+            except Exception:
+                found = None
+            ev.extra["already_prospect"] = policy.contact_is_prospect(found)
         if policy.is_meeting_held(ev):
             held_this_cycle.append(ev)
         try:

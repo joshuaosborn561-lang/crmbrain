@@ -535,6 +535,12 @@ class Memory:
     def upsert_cube_call(self, ev) -> None:
         if self._skip_side_write("cube_acr_calls"):
             return
+        fid = getattr(ev, "external_id", None) or ""
+        if not fid:
+            return
+        local = self._local.setdefault("cube_acr_calls", [])
+        if any(str(row.get("id") or "") == str(fid) for row in local):
+            return
         row = {
             "id": ev.external_id,
             "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
@@ -545,7 +551,7 @@ class Memory:
             "raw_subject": ev.raw_subject,
             "extra": ev.extra or {},
         }
-        self._local.setdefault("cube_acr_calls", []).append(row)
+        local.append(row)
         self.save_local()
         if self.use_supabase:
             try:

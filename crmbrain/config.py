@@ -331,6 +331,33 @@ def is_personal(name: str | None = None, phone: str | None = None, email: str | 
     return False
 
 
+def date_window_cdt(days: int) -> list[str]:
+    """Inclusive Chicago dates covering the last `days` through today."""
+    end = now_cdt().date()
+    span = max(1, int(days or 1))
+    return [(end - timedelta(days=i)).isoformat() for i in range(span, -1, -1)]
+
+
+def is_excluded_contact(ev=None, contact: dict | None = None) -> bool:
+    """True when the engagement or HubSpot contact is on the non-deal list."""
+    props = (contact or {}).get("properties") or {}
+    name = ""
+    email = ""
+    company = ""
+    phone = ""
+    if ev is not None:
+        display = getattr(ev, "display_name", None)
+        name = (display() if callable(display) else "") or getattr(ev, "name", "") or ""
+        email = getattr(ev, "email", "") or ""
+        company = getattr(ev, "company", "") or ""
+        phone = getattr(ev, "phone", "") or ""
+    name = name or f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+    email = email or props.get("email") or ""
+    company = company or props.get("company") or ""
+    phone = phone or props.get("phone") or ""
+    return is_non_deal_person(name=name, email=email, company=company, phone=phone)
+
+
 def is_non_deal_person(
     name: str | None = None,
     email: str | None = None,

@@ -3,25 +3,40 @@
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
-from crmbrain.config import is_non_deal_person, is_personal, now_utc, personal_numbers
-from crmbrain.cycle import _handle_engagement, apply_gmail_stage_update, integration_status, run as cycle_run
+from crmbrain.config import CDT, is_non_deal_person, is_personal, now_utc, personal_numbers
+from crmbrain.cycle import (
+    _backfill_hubspot_invites,
+    _handle_engagement,
+    apply_gmail_stage_update,
+    integration_status,
+    run as cycle_run,
+)
 from crmbrain.gmail_client import CALENDAR_READONLY_SCOPE
 from crmbrain.google_auth import CALENDAR_READONLY, DRIVE_READONLY, report_scopes
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
+from crmbrain.policy import is_cube_business_discovery, resolve_stage
+from crmbrain.config import STAGE
 from crmbrain.sources import cube_acr, gmail_scan
 from crmbrain.sources.cube_acr import (
     CubeAuthError,
     DriveAuth,
+    cube_call_key,
     docx_text,
     list_transcript_candidates,
     parse_cube_title,
     resolve_drive_auth,
     should_skip_cube_call,
+    to_e164,
 )
 from crmbrain.staleness import WATCHED_SOURCES
 from tests.test_crm_gating import FakeHubSpot, make_settings
+
+TYLER_TITLE = "Tyler Cook (+1 419-705-5122) ↗ (phone) 2026-09-30 13-17-54 - transcript.docx"
+PHONE_ONLY_TITLE = "(310) 991-2017 ↗ (phone) 2026-09-30 14-33-47 - transcript"
+NONNA_TITLE = "Nonna Iphone (+1 973-461-3447) ↗ (phone) 2026-09-30 13-39-48 - transcript"
+CAYDEN_TITLE = "Cayden (+1 561-225-5142) ↘ (phone) 2026-08-12 11-37-54 - transcript.docx"
 
 
 ROOT = "cube-root-folder"
@@ -77,7 +92,7 @@ def test_cube_lists_past_html_50_folder_cap(monkeypatch):
                 "files": [
                     _docx_row(
                         LATE_FILE,
-                        "2026-09-29 14:32 +15559876543 Rob Lawson - transcript.docx",
+                        "Tyler Cook (+1 419-705-5122) ↗ (phone) 2026-09-29 13-17-54 - transcript.docx",
                     )
                 ]
             }
@@ -99,14 +114,38 @@ def test_cube_lists_past_html_50_folder_cap(monkeypatch):
     assert not any(f.folder_date == "2026-09-10" and f.file_id for f in found if f.file_id == LATE_FILE)
 
 
-def test_parse_cube_title_and_docx_text():
+def test_parse_cube_title_real_filenames():
     from docx import Document
 
-    meta = parse_cube_title("2026-09-29 14-32-05 +15559876543 Rob Lawson - transcript.docx")
-    assert meta["date"] == "2026-09-29"
-    assert meta["phone"].endswith("5559876543")
-    assert "Rob Lawson" in meta["name"]
-    assert meta["time"]
+    tyler = parse_cube_title(TYLER_TITLE)
+    assert tyler == {
+        "name": "Tyler Cook",
+        "phone": "+14197055122",
+        "date": "2026-09-30",
+        "time": "13:17:54",
+    }
+    phone_only = parse_cube_title(PHONE_ONLY_TITLE)
+    assert phone_only == {
+        "name": "",
+        "phone": "+13109912017",
+        "date": "2026-09-30",
+        "time": "14:33:47",
+    }
+    nonna = parse_cube_title(NONNA_TITLE)
+    assert nonna["name"] == "Nonna Iphone"
+    assert nonna["phone"] == "+19734613447"
+    assert nonna["date"] == "2026-09-30"
+    assert nonna["time"] == "13:39:48"
+    cayden = parse_cube_title(CAYDEN_TITLE)
+    assert cayden["name"] == "Cayden"
+    assert cayden["phone"] == "+15612255142"
+    assert cayden["date"] == "2026-08-12"
+    assert cayden["time"] == "11:37:54"
+    assert to_e164("(310) 991-2017") == "+13109912017"
+
+    local = datetime(2026, 9, 30, 13, 17, 54, tzinfo=CDT)
+    item = cube_acr.DriveFile(file_id="x", name=TYLER_TITLE, mime_type="docx")
+    assert cube_acr._occurred_at(tyler, item) == local.astimezone(timezone.utc)
 
     doc = Document()
     doc.add_paragraph("SalesGlider discovery call about their roofing pipeline.")
@@ -122,41 +161,43 @@ def test_personal_number_nonna_is_skipped():
     assert is_personal(phone="+1 973-461-3447")
     assert is_personal(phone="19734613447")
     assert is_personal(name="Nonna")
-    assert should_skip_cube_call(name="Nonna", phone="+19734613447")
-    assert should_skip_cube_call(
-        title="2026-09-30 10:00 +19734613447 Nonna - transcript.docx",
-        phone="+19734613447",
-    )
-    assert not should_skip_cube_call(name="Rob Lawson", phone="+15559876543")
+    nonna = parse_cube_title(NONNA_TITLE)
+    cayden = parse_cube_title(CAYDEN_TITLE)
+    assert should_skip_cube_call(name=nonna["name"], phone=nonna["phone"], title=NONNA_TITLE)
+    assert should_skip_cube_call(name=cayden["name"], phone=cayden["phone"], title=CAYDEN_TITLE)
+    tyler = parse_cube_title(TYLER_TITLE)
+    assert not should_skip_cube_call(name=tyler["name"], phone=tyler["phone"], title=TYLER_TITLE)
 
 
-def test_scan_skips_personal_number_and_dedupes_md5(monkeypatch):
+def test_scan_skips_personal_and_dedupes_same_call_two_accounts(monkeypatch):
     items = [
         cube_acr.DriveFile(
-            file_id=LATE_FILE,
-            name="2026-09-29 14:32 +15559876543 Rob Lawson - transcript.docx",
-            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            modified_time=datetime(2026, 9, 29, 19, tzinfo=timezone.utc),
-            md5="same-md5",
-            folder_date="2026-09-29",
+            file_id="gdoc-copy",
+            name=TYLER_TITLE.replace(" - transcript.docx", ""),
+            mime_type="application/vnd.google-apps.document",
+            modified_time=datetime(2026, 9, 30, 19, tzinfo=timezone.utc),
+            md5="md5-gdoc",
+            folder_date="2026-09-30",
         ),
         cube_acr.DriveFile(
-            file_id=DUP_FILE,
-            name="2026-09-29 14:32 +15559876543 Rob Lawson - transcript.docx",
+            file_id=LATE_FILE,
+            name=TYLER_TITLE,
             mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            modified_time=datetime(2026, 9, 29, 19, 5, tzinfo=timezone.utc),
-            md5="same-md5",
-            folder_date="2026-09-29",
+            modified_time=datetime(2026, 9, 30, 19, 5, tzinfo=timezone.utc),
+            md5="md5-docx",
+            folder_date="2026-09-30",
         ),
         cube_acr.DriveFile(
             file_id="nonna-file",
-            name="2026-09-30 09:00 +19734613447 Nonna - transcript.docx",
+            name=NONNA_TITLE,
             mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            modified_time=datetime(2026, 9, 30, 14, tzinfo=timezone.utc),
+            modified_time=datetime(2026, 9, 30, 20, tzinfo=timezone.utc),
             md5="nonna-md5",
             folder_date="2026-09-30",
         ),
     ]
+    assert cube_call_key(parse_cube_title(items[0].name)) == cube_call_key(parse_cube_title(TYLER_TITLE))
+    assert items[0].md5 != items[1].md5
 
     monkeypatch.setattr(cube_acr, "resolve_drive_auth", lambda settings: DriveAuth("api_key", {}, "k"))
     monkeypatch.setattr(cube_acr, "list_transcript_candidates", lambda *a, **k: items)
@@ -167,8 +208,9 @@ def test_scan_skips_personal_number_and_dedupes_md5(monkeypatch):
     )
     evs = cube_acr.scan(make_settings(cube_folder=ROOT, google_api_key="k"))
     assert [e.external_id for e in evs] == [LATE_FILE]
-    assert evs[0].phone.endswith("5559876543")
-    assert evs[0].display_name() == "Rob Lawson"
+    assert evs[0].phone == "+14197055122"
+    assert evs[0].display_name() == "Tyler Cook"
+    assert evs[0].extra.get("transcript_kind") in {"docx", "docx_transcript"}
 
 
 def test_exclusion_list_blocks_cynthia_and_alex(tmp_path):
@@ -382,3 +424,171 @@ def test_family_intent_cube_call_is_skipped(tmp_path):
     assert hs.writes == []
     assert hs.contacts == []
     assert any("personal" in s or "family" in s for s in report.skipped)
+
+
+def test_backfill_skips_cynthia_heyreach_and_patch():
+    settings = make_settings(heyreach_key="k")
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "cyn-1",
+                "properties": {
+                    "email": "cynthia@chorbie.com",
+                    "firstname": "Cynthia",
+                    "lastname": "Hernandez",
+                    "company": "Chorbie",
+                    "hs_linkedin_url": "https://www.linkedin.com/in/cynthiahernandez",
+                },
+            }
+        ]
+    )
+
+    class FakeHey:
+        def __init__(self):
+            self.added = []
+
+        def add_lead(self, ev):
+            self.added.append(ev.email)
+            return "queued"
+
+    hey = FakeHey()
+    report = CycleReport()
+    from pathlib import Path
+    import tempfile
+
+    memory = Memory(settings, data_dir=Path(tempfile.mkdtemp()))
+    _backfill_hubspot_invites(settings, hs, hey, memory, report)
+    assert hey.added == []
+    assert hs.patches == []
+    assert any("excluded" in s for s in report.skipped)
+
+
+def test_hubspot_patch_note_amount_skip_excluded():
+    settings = make_settings(dry_run=True, hubspot_token="tok")
+    hs = HubSpot(settings)
+    ev = Engagement(
+        source="gmail_person",
+        external_id="c1",
+        email="cynthia@chorbie.com",
+        first_name="Cynthia",
+        last_name="Hernandez",
+        name="Cynthia Hernandez",
+    )
+    contact = {"id": "cyn-1", "properties": {"email": "cynthia@chorbie.com", "firstname": "Cynthia"}}
+    hs.patch_contact("cyn-1", {"hs_linkedin_url": "https://linkedin.com/in/x"}, ev=ev, contact=contact)
+    hs.add_note("cyn-1", "should not write", ev=ev, contact=contact)
+    assert hs.fill_deal_amount({"id": "d1", "properties": {}}, "3000", ev=ev, contact=contact) is False
+    assert hs.proposed == []
+
+
+def test_upsert_cube_call_skips_existing_id(tmp_path):
+    settings = make_settings()
+    memory = Memory(settings, data_dir=tmp_path)
+    ev = Engagement(source="cube_acr", external_id="same-id", phone="+14197055122", name="Tyler Cook")
+    memory.upsert_cube_call(ev)
+    memory.upsert_cube_call(ev)
+    assert [row["id"] for row in memory._local["cube_acr_calls"]] == ["same-id"]
+
+
+def test_cube_backfill_uses_14d_until_freshness(tmp_path, monkeypatch):
+    settings = make_settings(dry_run=True, hubspot_token="tok", google_api_key="k", gmail_refresh_token="r")
+
+    def old_call():
+        return Engagement(
+            source="cube_acr",
+            external_id="old-tyler",
+            phone="+14197055122",
+            first_name="Tyler",
+            last_name="Cook",
+            name="Tyler Cook",
+            transcript="SalesGlider discovery call about their roofing pipeline and the monthly retainer.",
+            raw_subject=TYLER_TITLE,
+            extra={"transcript_kind": "docx_transcript"},
+            occurred_at=now_utc() - timedelta(days=10),
+        )
+
+    class Snap:
+        upcoming = set()
+        recent = set()
+        create_engagements = []
+        events = []
+        calendar_api_ok = True
+        calendar_api_error = ""
+
+        def protect_emails(self):
+            return set()
+
+    def run_once(memory, hs):
+        monkeypatch.setattr("crmbrain.cycle.HubSpot", lambda settings: hs)
+        monkeypatch.setattr("crmbrain.cycle.Memory", lambda settings: memory)
+        monkeypatch.setattr("crmbrain.cycle.Gmail", lambda settings: object())
+        monkeypatch.setattr("crmbrain.cycle.calendar_events.load_calendar", lambda *a, **k: Snap())
+        monkeypatch.setattr("crmbrain.cycle.has_drive_access", lambda *a, **k: True)
+        monkeypatch.setattr("crmbrain.cycle.cube_acr.scan", lambda *a, **k: [old_call()])
+        monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda *a, **k: [])
+        monkeypatch.setattr("crmbrain.cycle.smartlead.scan", lambda *a, **k: [])
+        monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda *a, **k: [])
+        monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan_people", lambda *a, **k: [])
+        monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan", lambda *a, **k: [])
+        return cycle_run(settings)
+
+    first = Memory(settings, data_dir=tmp_path / "first")
+    report = run_once(first, FakeHubSpot())
+    assert any("backfill" in w for w in report.warnings)
+    assert any(p.get("label") == "Tyler Cook" for p in report.proposed_writes)
+    assert not any("outside window" in s for s in report.skipped if "old-tyler" in s)
+
+    later = Memory(settings, data_dir=tmp_path / "later")
+    later.dry_run = False
+    later.record_freshness("cube_acr", last_item_at=now_utc())
+    later.dry_run = True
+    later_hs = FakeHubSpot()
+    later_report = run_once(later, later_hs)
+    assert later_hs.writes == []
+    assert any("outside window" in s for s in later_report.skipped)
+
+
+def test_cube_one_on_one_held_discovery_only_for_prospect_or_sales():
+    routine = Engagement(
+        source="cube_acr",
+        external_id="ops-1",
+        phone="+15551230000",
+        first_name="Kyle",
+        last_name="Peterson",
+        name="Kyle Peterson",
+        company="Roofs by Peterson",
+        transcript=("Quick catch-up on the job site and next week's schedule. " * 8),
+        raw_subject="Kyle Peterson 1:1",
+    )
+    assert not is_cube_business_discovery(routine)
+    assert resolve_stage(routine) == ""
+
+    one_on_one = Engagement(
+        source="cube_acr",
+        external_id="11-1",
+        phone="+14197055122",
+        first_name="Tyler",
+        last_name="Cook",
+        name="Tyler Cook",
+        transcript=("Hey, just checking in on how things are going this week. " * 8),
+        raw_subject=TYLER_TITLE,
+    )
+    assert not is_cube_business_discovery(one_on_one)
+    one_on_one.extra["already_prospect"] = True
+    assert is_cube_business_discovery(one_on_one)
+    assert resolve_stage(one_on_one) == STAGE["discovery_completed"]
+
+    sales = Engagement(
+        source="cube_acr",
+        external_id="sales-1",
+        phone="+14197055122",
+        first_name="Tyler",
+        last_name="Cook",
+        transcript=(
+            "This is a SalesGlider discovery call about their roofing pipeline and campaign. "
+            "They asked about the monthly retainer after we walk the owners."
+        ),
+        raw_subject=TYLER_TITLE,
+    )
+    assert is_cube_business_discovery(sales)
+    assert resolve_stage(sales) == STAGE["discovery_completed"]

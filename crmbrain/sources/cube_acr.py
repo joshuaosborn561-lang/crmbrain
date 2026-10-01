@@ -19,7 +19,10 @@ from typing import Any, Iterable
 import requests
 
 from crmbrain.config import (
+    CDT,
     Settings,
+    date_window_cdt,
+    digits_phone,
     is_personal,
     lookback_dates_cdt,
     now_utc,
@@ -45,11 +48,23 @@ GDOC_MIME = "application/vnd.google-apps.document"
 DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 DATE_FOLDER_RE = re.compile(r"^(20\d{2}-\d{2}-\d{2})$")
 TITLE_DATE_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
-TITLE_TIME_RE = re.compile(r"\b(\d{1,2}[:.\-]\d{2}(?:[:.\-]\d{2})?)\b")
-TITLE_PHONE_RE = re.compile(r"(?:\+?1[\s\-.]?)?(?:\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})")
-JUNK_TITLE_RE = re.compile(
-    r"(?i)\b(?:transcript|incoming|outgoing|call|acr|cube)\b|\.docx$|\.doc$|\.txt$|\.gdoc$"
+TITLE_HMS_RE = re.compile(r"\b(\d{1,2}[-:]\d{2}[-:]\d{2})\b")
+TITLE_HM_RE = re.compile(r"\b(\d{1,2}[:]\d{2})\b")
+PAREN_INTL_PHONE_RE = re.compile(
+    r"\(\s*\+?1\s*(\d{3})\s*[-.\s]?\s*(\d{3})\s*[-.\s]?\s*(\d{4})\s*\)"
 )
+PAREN_US_PHONE_RE = re.compile(r"\(\s*(\d{3})\s*\)\s*(\d{3})\s*[-.\s]?\s*(\d{4})")
+NAKED_PHONE_RE = re.compile(r"(?:\+?1[\s\-.]?)?(?:\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})")
+ARROW_RE = re.compile(r"[↗↘↑↓➔➜]+")
+PHONE_WORD_RE = re.compile(r"\(\s*phone\s*\)", re.I)
+TRANSCRIPT_TAIL_RE = re.compile(r"(?i)\s*-\s*transcript(?:\.(?:docx|doc|gdoc|txt))?$")
+EXT_TAIL_RE = re.compile(r"(?i)\.(?:docx|doc|gdoc|txt)$")
+KIND_RANK = {
+    "docx_transcript": 0,
+    "docx": 1,
+    "gdoc": 2,
+    "text": 3,
+}
 
 
 class CubeAuthError(Exception):
@@ -84,12 +99,19 @@ def _parse_drive_time(raw: str) -> datetime | None:
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
 
-def cube_window_start(settings: Settings) -> datetime:
-    """Earlier of the cycle lookback and CUBE_LOOKBACK_DAYS (default 14)."""
+def cube_window_start(settings: Settings, *, backfill: bool = False) -> datetime:
+    """Cycle lookback, or the full CUBE_LOOKBACK_DAYS window on first backfill."""
     cycle = settings_lookback_start(settings)
+    if not backfill:
+        return cycle
     days = int(getattr(settings, "cube_lookback_days", 14) or 14)
-    cube = now_utc() - timedelta(days=max(1, days))
-    return min(cycle, cube)
+    return min(cycle, now_utc() - timedelta(days=max(1, days)))
+
+
+def cube_listing_dates(settings: Settings, *, backfill: bool = False) -> list[str]:
+    if backfill:
+        return date_window_cdt(int(getattr(settings, "cube_lookback_days", 14) or 14))
+    return lookback_dates_cdt(settings) or today_and_yesterday_cdt()
 
 
 def resolve_drive_auth(settings: Settings) -> DriveAuth:
@@ -197,11 +219,12 @@ def list_transcript_candidates(
     *,
     dates: Iterable[str] | None = None,
     page_size: int = 100,
+    backfill: bool = False,
 ) -> list[DriveFile]:
     """Recursive day-folder listing, newest first, lookback-bounded."""
     auth = auth or resolve_drive_auth(settings)
-    start = cube_window_start(settings)
-    allowed = set(dates or lookback_dates_cdt(settings) or today_and_yesterday_cdt())
+    start = cube_window_start(settings, backfill=backfill)
+    allowed = set(dates or cube_listing_dates(settings, backfill=backfill))
     if dates:
         allowed = set(dates)
         try:
@@ -238,28 +261,79 @@ def list_transcript_candidates(
     return files
 
 
+def to_e164(raw: str) -> str:
+    """US numbers as +1XXXXXXXXXX. Empty when there are not enough digits."""
+    digits = digits_phone(raw)
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) >= 11 and digits.startswith("1"):
+        return f"+{digits[:11]}"
+    return ""
+
+
+def _normalize_hms(raw: str) -> str:
+    parts = re.split(r"[-:.]", raw)
+    try:
+        nums = [int(p) for p in parts if p != ""]
+    except ValueError:
+        return ""
+    if len(nums) == 2:
+        nums.append(0)
+    if len(nums) != 3:
+        return ""
+    hh, mm, ss = nums
+    return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+
 def parse_cube_title(name: str) -> dict[str, str]:
-    """Name, phone, and time from a Cube ACR file title."""
+    """Name, E.164 phone, date, and Chicago-local time from a real Cube title."""
     rest = name or ""
     date = ""
     dm = TITLE_DATE_RE.search(rest)
     if dm:
         date = dm.group(1)
-        rest = rest.replace(dm.group(0), " ", 1)
+        rest = rest[: dm.start()] + " " + rest[dm.end() :]
+
     time_s = ""
-    tm = TITLE_TIME_RE.search(rest)
+    tm = TITLE_HMS_RE.search(rest) or TITLE_HM_RE.search(rest)
     if tm:
-        time_s = tm.group(1).replace(".", ":").replace("-", ":")
-        rest = rest.replace(tm.group(0), " ", 1)
+        time_s = _normalize_hms(tm.group(1))
+        rest = rest[: tm.start()] + " " + rest[tm.end() :]
+
     phone = ""
-    pm = TITLE_PHONE_RE.search(rest)
-    if pm:
-        phone = "".join(ch for ch in pm.group(0) if ch.isdigit() or ch == "+")
-        rest = rest.replace(pm.group(0), " ", 1)
-    rest = JUNK_TITLE_RE.sub(" ", rest)
-    rest = re.sub(r"[_\-]+", " ", rest)
-    person = " ".join(rest.split()).strip(" .")
+    for pattern in (PAREN_INTL_PHONE_RE, PAREN_US_PHONE_RE, NAKED_PHONE_RE):
+        pm = pattern.search(rest)
+        if not pm:
+            continue
+        phone = to_e164(pm.group(0))
+        rest = rest[: pm.start()] + " " + rest[pm.end() :]
+        break
+
+    rest = ARROW_RE.sub(" ", rest)
+    rest = PHONE_WORD_RE.sub(" ", rest)
+    rest = TRANSCRIPT_TAIL_RE.sub(" ", rest)
+    rest = EXT_TAIL_RE.sub(" ", rest)
+    rest = re.sub(r"(?i)\btranscript\b", " ", rest)
+    rest = re.sub(r"[()[\]{}<>_]+", " ", rest)
+    rest = re.sub(r"[\-–—.,:;!]+", " ", rest)
+    person = " ".join(rest.split()).strip()
+    if person and not re.search(r"[A-Za-z]", person):
+        person = ""
     return {"date": date, "time": time_s, "phone": phone, "name": person}
+
+
+def cube_call_key(meta: dict[str, str]) -> str:
+    """Same call from two accounts: last-10 phone (or name) + date + time."""
+    digits = digits_phone(meta.get("phone") or "")
+    ident = digits[-10:] if len(digits) >= 10 else " ".join((meta.get("name") or "").lower().split())
+    return f"{ident}|{meta.get('date') or ''}|{meta.get('time') or ''}"
+
+
+def _kind_rank(kind: str, filename: str) -> int:
+    low = (filename or "").lower()
+    if "transcript" in low and (kind in {"docx_transcript", "docx"} or low.endswith(".docx")):
+        return 0
+    return KIND_RANK.get(kind, 9)
 
 
 def should_skip_cube_call(name: str = "", phone: str = "", title: str = "") -> bool:
@@ -345,22 +419,17 @@ def export_google_doc(auth: DriveAuth, file_id: str) -> str:
 
 
 def _occurred_at(meta: dict[str, str], item: DriveFile) -> datetime:
+    """Title clock time is America/Chicago; store UTC."""
     date = meta.get("date") or item.folder_date
-    time_s = meta.get("time") or ""
+    time_s = meta.get("time") or "00:00:00"
     if date:
-        stamp = date
-        if time_s:
-            parts = time_s.split(":")
-            try:
-                hh = int(parts[0])
-                mm = int(parts[1]) if len(parts) > 1 else 0
-                ss = int(parts[2]) if len(parts) > 2 else 0
-                stamp = f"{date}T{hh:02d}:{mm:02d}:{ss:02d}"
-            except ValueError:
-                stamp = date
+        parts = (time_s or "00:00:00").split(":")
         try:
-            parsed = datetime.fromisoformat(stamp)
-            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+            hh = int(parts[0])
+            mm = int(parts[1]) if len(parts) > 1 else 0
+            ss = int(parts[2]) if len(parts) > 2 else 0
+            local = datetime.fromisoformat(date).replace(hour=hh, minute=mm, second=ss, tzinfo=CDT)
+            return local.astimezone(timezone.utc)
         except ValueError:
             pass
     return item.modified_time or now_utc()
@@ -377,24 +446,33 @@ def _load_text(auth: DriveAuth, item: DriveFile, kind: str) -> str:
     return ""
 
 
-def scan(settings: Settings, dates: Iterable[str] | None = None) -> list[Engagement]:
+def scan(
+    settings: Settings,
+    dates: Iterable[str] | None = None,
+    *,
+    backfill: bool = False,
+) -> list[Engagement]:
     """Read Cube ACR via Drive API v3. Prefer .docx; export Google Docs as text."""
     auth = resolve_drive_auth(settings)
     try:
-        candidates = list_transcript_candidates(settings, auth, dates=dates)
+        candidates = list_transcript_candidates(
+            settings, auth, dates=dates, backfill=backfill
+        )
     except PermissionError as exc:
         if auth.mode == "oauth" and (settings.google_api_key or "").strip():
             logger.warning("cube drive oauth denied (%s); falling back to GOOGLE_API_KEY", exc)
             auth = DriveAuth(mode="api_key", headers={}, key=settings.google_api_key.strip())
-            candidates = list_transcript_candidates(settings, auth, dates=dates)
+            candidates = list_transcript_candidates(
+                settings, auth, dates=dates, backfill=backfill
+            )
         else:
             raise CubeAuthError(
                 f"{exc}; grant {DRIVE_READONLY} or set GOOGLE_API_KEY"
             ) from exc
 
+    parsed: list[tuple[DriveFile, str, dict[str, str], str]] = []
     seen_ids: set[str] = set()
     seen_md5: set[str] = set()
-    engagements: list[Engagement] = []
     for item in candidates:
         kind = _kind_for_file(item)
         if kind not in {"docx_transcript", "docx", "gdoc", "text"}:
@@ -408,6 +486,21 @@ def scan(settings: Settings, dates: Iterable[str] | None = None) -> list[Engagem
         phone = meta.get("phone") or ""
         if should_skip_cube_call(name=name, phone=phone, title=item.name):
             continue
+        seen_ids.add(item.file_id)
+        if item.md5:
+            seen_md5.add(item.md5)
+        parsed.append((item, kind, meta, cube_call_key(meta)))
+
+    winners: dict[str, tuple[DriveFile, str, dict[str, str]]] = {}
+    for item, kind, meta, key in parsed:
+        prev = winners.get(key)
+        if prev is None or _kind_rank(kind, item.name) < _kind_rank(prev[1], prev[0].name):
+            winners[key] = (item, kind, meta)
+
+    engagements: list[Engagement] = []
+    for item, kind, meta in winners.values():
+        name = meta.get("name") or ""
+        phone = meta.get("phone") or ""
         try:
             text = _load_text(auth, item, kind)
         except Exception as exc:
@@ -415,9 +508,6 @@ def scan(settings: Settings, dates: Iterable[str] | None = None) -> list[Engagem
             continue
         if looks_like_html(text) or len(text.strip()) < 20:
             continue
-        seen_ids.add(item.file_id)
-        if item.md5:
-            seen_md5.add(item.md5)
         first, _, last = name.partition(" ")
         engagements.append(
             Engagement(
@@ -436,8 +526,10 @@ def scan(settings: Settings, dates: Iterable[str] | None = None) -> list[Engagem
                     "transcript_kind": kind,
                     "md5": item.md5,
                     "call_time": meta.get("time") or "",
+                    "call_key": cube_call_key(meta),
                     "drive_auth": auth.mode,
                 },
             )
         )
+    engagements.sort(key=lambda ev: ev.occurred_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return engagements
