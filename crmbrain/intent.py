@@ -15,7 +15,7 @@ import requests
 
 from crmbrain.config import JOSH_DOMAINS, NON_SALES_TITLE_HINTS, STAGE, Settings, is_client_context
 from crmbrain.models import Engagement, IntentDecision
-from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES, has_word_hint
+from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES, STRICT_DISCOVERY_HINTS, has_word_hint
 
 SALES_HINTS = (
     "salesglider",
@@ -254,7 +254,17 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             reason="Existing client ops — notes only unless commercial paper",
         )
 
-    sales_hit = has_word_hint(blob, SALES_HINTS)
+    if ev.source in {"cube_acr", "fireflies"}:
+        sales_hit = has_word_hint(blob, STRICT_DISCOVERY_HINTS)
+        if not sales_hit:
+            return IntentDecision(
+                verdict="review",
+                intent="",
+                confidence=0.4,
+                reason="Held call needs a discovery hint or Gemini yes",
+            )
+    else:
+        sales_hit = has_word_hint(blob, SALES_HINTS)
     if sales_hit:
         stage = ""
         if ev.source in {"fireflies", "cube_acr", "allo"}:
@@ -282,19 +292,29 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
 
 
 def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
+    cached = getattr(ev, "_intent_decision", None)
+    if isinstance(cached, IntentDecision):
+        return cached
     decision = heuristic_intent(ev)
-    if decision.verdict != "review":
-        return decision
-    if not settings or not settings.gemini_key:
-        return decision
-    text = _blob(ev)[:8000]
-    if not text.strip():
-        return decision
-    try:
-        model = _gemini_intent(settings, text)
-    except Exception:
-        return decision
-    return _merge_model(decision, model, settings.intent_min_confidence)
+    if decision.verdict == "review" and settings and settings.gemini_key:
+        text = _blob(ev)[:8000]
+        if text.strip():
+            try:
+                model = _gemini_intent(settings, text)
+                decision = _merge_model(decision, model, settings.intent_min_confidence)
+                decision.via = "gemini"
+            except Exception:
+                pass
+    ev._intent_decision = decision
+    extra = ev.extra
+    extra["intent_via"] = decision.via
+    extra["intent_gemini_yes"] = decision.via == "gemini" and is_confident_sales(
+        decision, getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    )
+    extra["intent_no"] = is_confident_non_sales(
+        decision, getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    )
+    return decision
 
 
 def is_confident_sales(decision: IntentDecision, min_confidence: float = 0.75) -> bool:
@@ -326,6 +346,7 @@ def _merge_model(base: IntentDecision, incoming: dict[str, Any], min_confidence:
         reason=str(incoming.get("reason") or base.reason).strip(),
         stage=str(incoming.get("stage") or base.stage).strip(),
         amount=amount or base.amount,
+        via="gemini",
     )
 
 

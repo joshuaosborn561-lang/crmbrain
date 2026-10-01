@@ -833,3 +833,183 @@ def test_scan_falls_back_to_next_ranked_copy(monkeypatch):
     evs = cube_acr.scan(make_settings(cube_folder=ROOT, google_api_key="k"))
     assert [e.external_id for e in evs] == ["fallback-gdoc"]
     assert evs[0].extra.get("transcript_kind") == "gdoc"
+
+
+def _partner_salesglider_onboarding() -> Engagement:
+    return Engagement(
+        source="cube_acr",
+        external_id="partner-onboard",
+        email="pat@apexmedia.com",
+        phone="+15557770000",
+        first_name="Pat",
+        last_name="Lee",
+        name="Pat Lee",
+        company="Apex Media",
+        transcript=("Josh from SalesGlider here. We talked onboarding and the campaign. " * 8),
+        raw_subject="Pat Lee SalesGlider onboarding",
+        extra={"transcript_kind": "docx_transcript"},
+    )
+
+
+def test_day_job_cube_pricing_contract_is_skipped(tmp_path):
+    ev = Engagement(
+        source="cube_acr",
+        external_id="meraki-1",
+        email="pat@insight.com",
+        first_name="Pat",
+        last_name="Lee",
+        name="Pat Lee",
+        company="Insight",
+        transcript=("Meraki discussion about pricing and the contract renewal this quarter. " * 8),
+        raw_subject="Meraki Discussion",
+        extra={"transcript_kind": "docx_transcript"},
+    )
+    assert not cube_has_sales_intent(ev)
+    hs = FakeHubSpot()
+    report = CycleReport()
+    _handle_engagement(ev, make_settings(), hs, Memory(make_settings(), data_dir=tmp_path), None, report)
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert any("day_job" in s for s in report.skipped)
+
+
+def test_seth_kingdon_intro_is_skipped(tmp_path):
+    ev = Engagement(
+        source="cube_acr",
+        external_id="seth-intro",
+        email="seth@seopartner.com",
+        first_name="Seth",
+        last_name="Kingdon",
+        name="Seth Kingdon",
+        company="SEO Partner",
+        transcript=("Quick intro on the SEO partner roadmap and next quarter. " * 8),
+        raw_subject="Seth Kingdon intro",
+        extra={"transcript_kind": "docx_transcript"},
+    )
+    assert not cube_has_sales_intent(ev)
+    hs = FakeHubSpot()
+    report = CycleReport()
+    _handle_engagement(ev, make_settings(), hs, Memory(make_settings(), data_dir=tmp_path), None, report)
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert any("vendor" in s for s in report.skipped)
+
+
+def test_unlisted_partner_salesglider_onboarding_no_deal_handle_and_reconcile(tmp_path):
+    from crmbrain.evidence import build_timelines
+    from crmbrain.reconcile import apply_timeline, restore_missing_deals
+
+    ev = _partner_salesglider_onboarding()
+    assert not cube_has_sales_intent(ev)
+    assert not is_cube_business_discovery(ev)
+    settings = make_settings()
+    hs = FakeHubSpot()
+    report = CycleReport()
+    memory = Memory(settings, data_dir=tmp_path / "handle")
+    _handle_engagement(ev, settings, hs, memory, None, report)
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert report.review_queue
+
+    hs2 = FakeHubSpot()
+    report2 = CycleReport()
+    memory2 = Memory(settings, data_dir=tmp_path / "recon")
+    timelines = build_timelines([ev])
+    apply_timeline(timelines["email:pat@apexmedia.com"], settings, hs2, memory2, report2)
+    restore_missing_deals(hs2, settings, memory2, report2, timelines)
+    assert hs2.contacts == []
+    assert hs2.deals == []
+    assert report2.review_queue
+
+
+def test_aborted_live_backfill_leaves_cube_freshness_null(tmp_path, monkeypatch):
+    settings = make_settings(hubspot_token="tok", google_api_key="k", max_change_fraction=0.15)
+    contacts = []
+    deals = []
+    for i in range(10):
+        contacts.append(
+            {
+                "id": str(i + 1),
+                "properties": {"email": f"keep{i}@x.com", "firstname": "Keep", "lastname": str(i)},
+            }
+        )
+        deals.append(
+            {
+                "id": f"d{i}",
+                "contact_id": str(i + 1),
+                "properties": {
+                    "dealstage": STAGE["paid"],
+                    "dealname": f"Keep {i}",
+                },
+            }
+        )
+    hs = FakeHubSpot(contacts)
+    hs.deals = deals
+    events = [_sales_cube(i) for i in range(5)]
+    monkeypatch.setattr("crmbrain.cycle.prune.run", lambda *a, **k: None)
+    report, memory, _ = _cycle_with_cube(tmp_path, monkeypatch, settings, hs, events)
+    assert report.reconcile_aborted
+    assert memory.latest_freshness("cube_acr") is None
+    assert not (memory._local.get("source_freshness") or {}).get("cube_acr", {}).get("last_item_at")
+
+
+def test_briefs_still_send_when_reconcile_aborts(tmp_path, monkeypatch):
+    settings = make_settings(
+        hubspot_token="tok",
+        google_api_key="k",
+        gmail_refresh_token="r",
+        max_change_fraction=0.15,
+    )
+    sent = {"n": 0}
+
+    def fake_briefs(*_a, **_k):
+        sent["n"] += 1
+
+    monkeypatch.setattr("crmbrain.cycle.briefing.send_due", fake_briefs)
+    monkeypatch.setattr("crmbrain.cycle.prune.run", lambda *a, **k: None)
+    contacts = [
+        {"id": "1", "properties": {"email": "keep@x.com", "firstname": "Keep", "lastname": "One"}}
+    ]
+    hs = FakeHubSpot(contacts)
+    hs.deals = [
+        {"id": "d1", "contact_id": "1", "properties": {"dealstage": STAGE["paid"], "dealname": "Keep"}}
+    ]
+    report, _, _ = _cycle_with_cube(tmp_path, monkeypatch, settings, hs, [_sales_cube(0)])
+    assert report.reconcile_aborted
+    assert sent["n"] == 1
+
+
+def test_over_cap_events_are_not_marked_processed(tmp_path):
+    from crmbrain.budget import WriteBudget
+
+    settings = make_settings(max_creates=2)
+    memory = Memory(settings, data_dir=tmp_path)
+    hs = FakeHubSpot()
+    report = CycleReport()
+    budget = WriteBudget.from_settings(settings)
+    events = [_sales_cube(i) for i in range(4)]
+    for ev in events:
+        _handle_engagement(ev, settings, hs, memory, None, report, budget=budget)
+    assert len(hs.deals) <= 2
+    assert sum(1 for x in report.review_queue if "cap" in x) >= 2
+    capped = [ev for ev in events if not memory.already_processed(ev.source, ev.external_id)]
+    assert len(capped) >= 2
+
+
+def test_classify_runs_once_per_event(monkeypatch):
+    from crmbrain import intent as intent_mod
+
+    n = {"c": 0}
+    real = intent_mod.heuristic_intent
+
+    def wrap(ev):
+        n["c"] += 1
+        return real(ev)
+
+    monkeypatch.setattr(intent_mod, "heuristic_intent", wrap)
+    ev = _sales_cube(0)
+    settings = make_settings()
+    first = intent_mod.classify(settings, ev)
+    second = intent_mod.classify(settings, ev)
+    assert first is second
+    assert n["c"] == 1

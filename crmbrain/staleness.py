@@ -50,17 +50,19 @@ def record_and_alarm(
     *,
     now: datetime | None = None,
     errors: dict[str, str] | None = None,
+    skip_sources: set[str] | None = None,
 ) -> list[str]:
     """Persist last-seen timestamps and append stale_sources on the report."""
     now = now or now_utc()
     errors = errors or {}
+    skip_sources = skip_sources or set()
     stale: list[str] = []
     for source in WATCHED_SOURCES:
         last = observed.get(source)
         err = errors.get(source, "")
-        if hasattr(memory, "record_freshness"):
+        if source not in skip_sources and hasattr(memory, "record_freshness"):
             memory.record_freshness(source, last_item_at=last, last_error=err, when=now)
-        stored = last
+        stored = last if source not in skip_sources else None
         if stored is None and hasattr(memory, "latest_freshness"):
             stored = memory.latest_freshness(source)
         if is_stale(stored, now):

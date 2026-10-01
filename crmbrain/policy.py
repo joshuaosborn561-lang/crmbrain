@@ -177,27 +177,43 @@ def cube_transcript_usable(ev: Engagement) -> bool:
     return True
 
 
+CONFIDENT_NO_INTENTS = frozenset(
+    {"day_job", "vendor", "mentor", "recruiter", "learning", "personal"}
+)
+HELD_CALL_SOURCES = frozenset({"cube_acr", "fireflies"})
+BOOKED_MEETING_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo", "gmail"})
+
+
 def cube_has_sales_intent(
     ev: Engagement,
     decision=None,
     min_confidence: float = 0.75,
 ) -> bool:
-    """Confident classifier yes, or strict discovery hints — not generic industry words."""
+    """Strict discovery hints or a confident Gemini yes. Confident 'no' always wins."""
+    from crmbrain.intent import is_confident_non_sales, is_confident_sales
+
+    if decision is None:
+        decision = getattr(ev, "_intent_decision", None)
+    if decision is None:
+        extra = ev.extra or {}
+        if extra.get("intent_no"):
+            return False
+        from crmbrain.intent import heuristic_intent
+
+        decision = heuristic_intent(ev)
+    if is_confident_non_sales(decision, min_confidence):
+        return False
+    if getattr(decision, "intent", "") in CONFIDENT_NO_INTENTS and decision.verdict == "no":
+        return False
     blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}"
     if has_word_hint(blob, STRICT_DISCOVERY_HINTS):
         return True
     extra = ev.extra or {}
-    if extra.get("intent_yes"):
+    if extra.get("intent_gemini_yes"):
         return True
-    if extra.get("intent_no") and decision is None:
-        return False
-    if decision is None:
-        from crmbrain.intent import heuristic_intent
-
-        decision = heuristic_intent(ev)
-    from crmbrain.intent import is_confident_sales
-
-    return is_confident_sales(decision, min_confidence)
+    if getattr(decision, "via", "heuristic") == "gemini" and is_confident_sales(decision, min_confidence):
+        return True
+    return False
 
 
 def contact_is_prospect(contact: dict | None, deals: list[dict] | None = None) -> bool:
@@ -249,6 +265,13 @@ def held_call_may_open_deal(ev: Engagement, *, already_prospect: bool | None = N
     if already_prospect is None:
         already_prospect = bool((ev.extra or {}).get("already_prospect"))
     return bool(already_prospect)
+
+
+def only_held_call_evidence(engagements: list) -> bool:
+    """True when the person's meeting evidence is Cube/Fireflies only."""
+    sources = {getattr(ev, "source", "") for ev in engagements or []}
+    meeting = {s for s in sources if s in BOOKED_MEETING_SOURCES}
+    return bool(meeting) and meeting <= HELD_CALL_SOURCES
 
 
 POC_HINTS = (
@@ -441,9 +464,7 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     if ev.source == "calendly":
         return STAGE["discovery_scheduled"]
     if ev.source == "fireflies":
-        if held_call_may_open_deal(ev):
-            return STAGE["discovery_completed"]
-        return ""
+        return STAGE["discovery_completed"]
     if ev.source == "cube_acr" and is_cube_business_discovery(ev):
         return STAGE["discovery_completed"]
     if ev.source == "allo" and is_allo_discovery(ev):

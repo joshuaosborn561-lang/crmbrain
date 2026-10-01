@@ -122,6 +122,7 @@ class IntentDecision:
     reason: str = ""
     stage: str = ""
     amount: str = ""
+    via: str = "heuristic"  # heuristic | gemini
 
 
 @dataclass

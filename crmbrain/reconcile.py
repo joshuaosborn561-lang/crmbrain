@@ -270,6 +270,16 @@ def apply_timeline(
         if target == STAGE["signed"]:
             target = STAGE["discovery_completed"] if KIND_HELD in kinds else current or ""
 
+    if not deal and policy.only_held_call_evidence(timeline.engagements):
+        if intent.is_confident_non_sales(decision, settings.intent_min_confidence):
+            report.skipped.append(f"{label} {decision.intent}, skip HubSpot")
+            return decision
+        if not policy.held_call_may_open_deal(ev) and not policy.contact_is_prospect(
+            timeline.contact, timeline.deals
+        ):
+            _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+            return decision
+
     if evidence.reply_only(timeline) and not has_upcoming:
         if deal and current == STAGE["discovery_scheduled"] and current not in PROTECTED_STAGES:
             if _may_archive_reply_only(hs, timeline.contact, deal):
@@ -309,6 +319,13 @@ def apply_timeline(
     if not intent.is_confident_sales(decision, settings.intent_min_confidence):
         _queue_review(memory, report, timeline, decision, dry_run=dry_run)
         return decision
+
+    if not deal and policy.only_held_call_evidence(timeline.engagements):
+        if not policy.held_call_may_open_deal(ev) and not policy.contact_is_prospect(
+            timeline.contact, timeline.deals
+        ):
+            _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+            return decision
 
     if policy.has_closed_won_deal(timeline.deals) and not deal:
         _queue_review(memory, report, timeline, decision, reason="closed_won_exists", dry_run=dry_run)
@@ -398,6 +415,12 @@ def restore_missing_deals(
         if not intent.is_confident_sales(decision, settings.intent_min_confidence):
             if decision.verdict != "no":
                 _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+            continue
+        if policy.only_held_call_evidence(timeline.engagements) and not (
+            policy.held_call_may_open_deal(ev)
+            or policy.contact_is_prospect(timeline.contact, timeline.deals)
+        ):
+            _queue_review(memory, report, timeline, decision, dry_run=dry_run)
             continue
         target = stage_from_timeline(timeline, decision) or STAGE["discovery_completed"]
         if target == STAGE["signed"] and KIND_SIGNED not in timeline.kinds() and KIND_PAYMENT not in timeline.kinds():
@@ -752,6 +775,63 @@ def _planned_change_count(
         except Exception:
             pass
     return creates + len(changed)
+
+
+def _timeline_has_unprocessed(timeline: PersonTimeline, memory: Memory | None) -> bool:
+    if memory is None or not hasattr(memory, "already_processed"):
+        return bool(timeline.engagements)
+    return any(not memory.already_processed(ev.source, ev.external_id) for ev in timeline.engagements)
+
+
+def planned_change_person_keys(
+    hs: HubSpot,
+    settings: Settings,
+    timelines: dict[str, PersonTimeline],
+    upcoming_emails: set[str],
+    held_events: list[Engagement],
+    calendar_api_ok: bool,
+    memory: Memory | None = None,
+) -> set[str]:
+    """People reconcile would write, from unprocessed events only."""
+    del calendar_api_ok, held_events
+    keys: set[str] = set()
+    upcoming_emails = {e.lower() for e in (upcoming_emails or set())}
+    for timeline in timelines.values():
+        if not _timeline_has_unprocessed(timeline, memory):
+            continue
+        ev = representative_engagement(timeline)
+        decision = intent.classify(settings, ev)
+        current = _current_stage(timeline)
+        deal = _open_deal(timeline)
+        email = timeline.email
+        canceled = KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails)
+        if canceled and _calendar_blocks_back_move(hs, email, timeline.contact):
+            canceled = False
+        target = stage_from_timeline(
+            timeline,
+            decision,
+            has_upcoming=bool(email and email in upcoming_emails),
+            canceled_no_reschedule=canceled,
+            past_grace=not (email and email in upcoming_emails),
+        )
+        if evidence.reply_only(timeline) and deal and current == STAGE["discovery_scheduled"]:
+            keys.add(timeline.key)
+            continue
+        write = evidence_move(current, target, timeline, ev) if target else None
+        if write and deal:
+            keys.add(timeline.key)
+        elif (
+            not deal
+            and target
+            and intent.is_confident_sales(decision, settings.intent_min_confidence)
+        ):
+            if policy.only_held_call_evidence(timeline.engagements) and not (
+                policy.held_call_may_open_deal(ev)
+                or policy.contact_is_prospect(timeline.contact, timeline.deals)
+            ):
+                continue
+            keys.add(timeline.key)
+    return {k for k in keys if k}
 
 
 def run(
