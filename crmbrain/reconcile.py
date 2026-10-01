@@ -766,22 +766,24 @@ def run(
     calendar_api_ok: bool = True,
     held_events: list[Engagement] | None = None,
     budget: WriteBudget | None = None,
+    skip_abort: bool = False,
 ) -> dict[str, PersonTimeline]:
     upcoming_emails = {e.lower() for e in (upcoming_emails or set())}
     held_events = held_events or []
     budget = budget or WriteBudget.from_settings(settings)
     timelines = evidence.build_timelines(engagements)
     _attach_hubspot(hs, timelines)
-    would = _planned_change_count(hs, settings, timelines, upcoming_emails, held_events, calendar_api_ok)
-    open_n = _count_open_deals(hs, timelines)
-    if budget.maybe_abort(would, open_n):
-        report.reconcile_aborted = True
-        report.would_abort = True
-        report.warnings.append(budget.abort_reason)
-        if not dry_run:
-            report.skipped.append(budget.abort_reason)
-            return timelines
-        budget.aborted = False
+    if not skip_abort:
+        would = _planned_change_count(hs, settings, timelines, upcoming_emails, held_events, calendar_api_ok)
+        open_n = _count_open_deals(hs, timelines)
+        if budget.maybe_abort(would, open_n):
+            report.reconcile_aborted = True
+            report.would_abort = True
+            report.warnings.append(budget.abort_reason)
+            if not dry_run:
+                report.skipped.append(budget.abort_reason)
+                return timelines
+            budget.aborted = False
     for timeline in timelines.values():
         if is_non_deal_person(
             name=timeline.display_name(),

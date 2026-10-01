@@ -16,7 +16,13 @@ from crmbrain.google_auth import CALENDAR_READONLY, DRIVE_READONLY, report_scope
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
-from crmbrain.policy import is_cube_business_discovery, resolve_stage
+from crmbrain.budget import DEFAULT_MAX_CREATES
+from crmbrain.policy import (
+    contact_is_prospect,
+    cube_has_sales_intent,
+    is_cube_business_discovery,
+    resolve_stage,
+)
 from crmbrain.config import STAGE
 from crmbrain.sources import cube_acr, gmail_scan
 from crmbrain.sources.cube_acr import (
@@ -592,3 +598,238 @@ def test_cube_one_on_one_held_discovery_only_for_prospect_or_sales():
     )
     assert is_cube_business_discovery(sales)
     assert resolve_stage(sales) == STAGE["discovery_completed"]
+
+
+def _cycle_with_cube(tmp_path, monkeypatch, settings, hs, events, memory=None):
+    class Snap:
+        upcoming = set()
+        recent = set()
+        create_engagements = []
+        events = []
+        calendar_api_ok = True
+        calendar_api_error = ""
+
+        def protect_emails(self):
+            return set()
+
+    memory = memory or Memory(settings, data_dir=tmp_path)
+    monkeypatch.setattr("crmbrain.cycle.HubSpot", lambda settings: hs)
+    monkeypatch.setattr("crmbrain.cycle.Memory", lambda settings: memory)
+    monkeypatch.setattr("crmbrain.cycle.Gmail", lambda settings: object())
+    monkeypatch.setattr("crmbrain.cycle.calendar_events.load_calendar", lambda *a, **k: Snap())
+    monkeypatch.setattr("crmbrain.cycle.has_drive_access", lambda *a, **k: True)
+    monkeypatch.setattr("crmbrain.cycle.cube_acr.scan", lambda *a, **k: list(events))
+    monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.smartlead.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan_people", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan", lambda *a, **k: [])
+    return cycle_run(settings), memory, hs
+
+
+def _sales_cube(i: int) -> Engagement:
+    return Engagement(
+        source="cube_acr",
+        external_id=f"sale-{i}",
+        email=f"lead{i}@prospect.com",
+        phone=f"+1555101{i:04d}",
+        first_name="Lead",
+        last_name=str(i),
+        name=f"Lead {i}",
+        transcript=("SalesGlider discovery call about pricing and the monthly retainer. " * 6),
+        raw_subject=f"Lead {i} discovery",
+        extra={"transcript_kind": "docx_transcript", "skip_lookback": True},
+        occurred_at=now_utc() - timedelta(hours=2),
+    )
+
+
+def test_backfill_over_max_creates_caps_and_reviews(tmp_path, monkeypatch):
+    settings = make_settings(
+        dry_run=True,
+        hubspot_token="tok",
+        google_api_key="k",
+        gmail_refresh_token="r",
+        max_creates=DEFAULT_MAX_CREATES,
+    )
+    events = [_sales_cube(i) for i in range(DEFAULT_MAX_CREATES + 5)]
+    report, _, _ = _cycle_with_cube(tmp_path, monkeypatch, settings, FakeHubSpot(), events)
+    creates = [p for p in report.proposed_writes if p.get("action") == "create"]
+    assert len(events) > DEFAULT_MAX_CREATES
+    assert len(creates) <= DEFAULT_MAX_CREATES
+    assert sum(1 for x in report.review_queue if "cap" in x) >= 5
+
+
+def test_paid_client_cube_campaign_leads_creates_no_deal(tmp_path):
+    contact = {
+        "id": "paid-1",
+        "properties": {
+            "email": "kyle@petersonroofs.com",
+            "firstname": "Kyle",
+            "lastname": "Peterson",
+            "phone": "+15551230000",
+            "company": "Roofs by Peterson",
+            "crm_source": "cube_acr",
+        },
+    }
+    deal = {
+        "id": "d-paid",
+        "contact_id": "paid-1",
+        "properties": {"dealstage": STAGE["paid"], "dealname": "Kyle Peterson"},
+    }
+    ev = Engagement(
+        source="cube_acr",
+        external_id="paid-call",
+        email="kyle@petersonroofs.com",
+        phone="+15551230000",
+        first_name="Kyle",
+        last_name="Peterson",
+        name="Kyle Peterson",
+        company="Roofs by Peterson",
+        transcript=("Talking about the campaign and leads in SalesGlider this week. " * 8),
+        raw_subject="Kyle Peterson campaign check-in",
+        extra={"transcript_kind": "docx_transcript"},
+    )
+    hs = FakeHubSpot([contact])
+    hs.deals = [deal]
+    report = CycleReport()
+    _handle_engagement(ev, make_settings(), hs, Memory(make_settings(), data_dir=tmp_path), None, report)
+    assert [d["id"] for d in hs.deals] == ["d-paid"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["paid"]
+    assert not any(w[0] == "upsert_deal" for w in hs.writes)
+    assert hs.notes
+
+
+def test_partner_vendor_call_creates_no_deal(tmp_path):
+    ev = Engagement(
+        source="cube_acr",
+        external_id="vendor-1",
+        email="seth@seopartner.com",
+        first_name="Seth",
+        last_name="Kingdon",
+        name="Seth Kingdon",
+        company="SEO Partner",
+        transcript=("SEO partner sync on vendor deliverables and the next report. " * 8),
+        raw_subject="Seth Kingdon partner sync",
+        extra={"transcript_kind": "docx_transcript"},
+    )
+    assert not cube_has_sales_intent(ev)
+    assert not is_cube_business_discovery(ev)
+    hs = FakeHubSpot()
+    report = CycleReport()
+    _handle_engagement(ev, make_settings(), hs, Memory(make_settings(), data_dir=tmp_path), None, report)
+    assert hs.deals == []
+    assert not any(w[0] == "upsert_deal" for w in hs.writes)
+
+
+def test_unlisted_client_crm_source_fireflies_routine_call_creates_no_deal(tmp_path):
+    contact = {
+        "id": "sam-1",
+        "properties": {
+            "email": "sam@acme.com",
+            "firstname": "Sam",
+            "lastname": "River",
+            "phone": "+15559870000",
+            "crm_source": "fireflies",
+        },
+    }
+    ev = Engagement(
+        source="cube_acr",
+        external_id="routine-1",
+        email="sam@acme.com",
+        phone="+15559870000",
+        first_name="Sam",
+        last_name="River",
+        name="Sam River",
+        transcript=("Quick catch-up on how things are going this week and next. " * 8),
+        raw_subject="Sam River 1:1",
+        extra={"transcript_kind": "docx_transcript"},
+    )
+    assert not contact_is_prospect(contact, [])
+    assert not is_cube_business_discovery(ev)
+    hs = FakeHubSpot([contact])
+    report = CycleReport()
+    _handle_engagement(ev, make_settings(), hs, Memory(make_settings(), data_dir=tmp_path), None, report)
+    assert hs.deals == []
+    assert not any(w[0] == "upsert_deal" for w in hs.writes)
+
+
+def test_supabase_freshness_fail_skips_cube_backfill(tmp_path, monkeypatch):
+    settings = make_settings(
+        dry_run=True,
+        hubspot_token="tok",
+        google_api_key="k",
+        gmail_refresh_token="r",
+        supabase_url="https://example.supabase.co",
+        supabase_key="service-role",
+    )
+    memory = Memory(settings, data_dir=tmp_path)
+    assert memory.use_supabase
+
+    def boom(*_a, **_k):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(memory, "_sb_schema", boom)
+    seen = {"backfill": None}
+
+    def fake_scan(*_a, **k):
+        seen["backfill"] = k.get("backfill")
+        return [_sales_cube(0)]
+
+    class Snap:
+        upcoming = set()
+        recent = set()
+        create_engagements = []
+        events = []
+        calendar_api_ok = True
+        calendar_api_error = ""
+
+        def protect_emails(self):
+            return set()
+
+    monkeypatch.setattr("crmbrain.cycle.HubSpot", lambda settings: FakeHubSpot())
+    monkeypatch.setattr("crmbrain.cycle.Memory", lambda settings: memory)
+    monkeypatch.setattr("crmbrain.cycle.Gmail", lambda settings: object())
+    monkeypatch.setattr("crmbrain.cycle.calendar_events.load_calendar", lambda *a, **k: Snap())
+    monkeypatch.setattr("crmbrain.cycle.has_drive_access", lambda *a, **k: True)
+    monkeypatch.setattr("crmbrain.cycle.cube_acr.scan", fake_scan)
+    monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.smartlead.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan_people", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan", lambda *a, **k: [])
+    report = cycle_run(settings)
+    assert seen["backfill"] is False
+    assert any("freshness" in w.lower() and "skip backfill" in w.lower() for w in report.warnings)
+
+
+def test_scan_falls_back_to_next_ranked_copy(monkeypatch):
+    items = [
+        cube_acr.DriveFile(
+            file_id="winner-docx",
+            name=TYLER_TITLE,
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            modified_time=datetime(2026, 9, 30, 19, 5, tzinfo=timezone.utc),
+            md5="md5-docx",
+            folder_date="2026-09-30",
+        ),
+        cube_acr.DriveFile(
+            file_id="fallback-gdoc",
+            name=TYLER_TITLE.replace(" - transcript.docx", ""),
+            mime_type="application/vnd.google-apps.document",
+            modified_time=datetime(2026, 9, 30, 19, tzinfo=timezone.utc),
+            md5="md5-gdoc",
+            folder_date="2026-09-30",
+        ),
+    ]
+
+    def load(_auth, item, kind):
+        if item.file_id == "winner-docx":
+            raise RuntimeError("download failed")
+        return "SalesGlider discovery call about pricing and the monthly retainer. " * 8
+
+    monkeypatch.setattr(cube_acr, "resolve_drive_auth", lambda settings: DriveAuth("api_key", {}, "k"))
+    monkeypatch.setattr(cube_acr, "list_transcript_candidates", lambda *a, **k: items)
+    monkeypatch.setattr(cube_acr, "_load_text", load)
+    evs = cube_acr.scan(make_settings(cube_folder=ROOT, google_api_key="k"))
+    assert [e.external_id for e in evs] == ["fallback-gdoc"]
+    assert evs[0].extra.get("transcript_kind") == "gdoc"

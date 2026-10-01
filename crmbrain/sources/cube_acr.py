@@ -491,23 +491,31 @@ def scan(
             seen_md5.add(item.md5)
         parsed.append((item, kind, meta, cube_call_key(meta)))
 
-    winners: dict[str, tuple[DriveFile, str, dict[str, str]]] = {}
+    copies_by_key: dict[str, list[tuple[DriveFile, str, dict[str, str]]]] = {}
     for item, kind, meta, key in parsed:
-        prev = winners.get(key)
-        if prev is None or _kind_rank(kind, item.name) < _kind_rank(prev[1], prev[0].name):
-            winners[key] = (item, kind, meta)
+        copies_by_key.setdefault(key, []).append((item, kind, meta))
+    for copies in copies_by_key.values():
+        copies.sort(key=lambda row: _kind_rank(row[1], row[0].name))
 
     engagements: list[Engagement] = []
-    for item, kind, meta in winners.values():
+    for copies in copies_by_key.values():
+        loaded: tuple[DriveFile, str, dict[str, str], str] | None = None
+        for item, kind, meta in copies:
+            try:
+                text = _load_text(auth, item, kind)
+            except Exception as exc:
+                logger.warning("cube download %s: %s; trying next-ranked copy", item.file_id, exc)
+                continue
+            if looks_like_html(text) or len(text.strip()) < 20:
+                logger.warning("cube download %s unusable; trying next-ranked copy", item.file_id)
+                continue
+            loaded = (item, kind, meta, text)
+            break
+        if loaded is None:
+            continue
+        item, kind, meta, text = loaded
         name = meta.get("name") or ""
         phone = meta.get("phone") or ""
-        try:
-            text = _load_text(auth, item, kind)
-        except Exception as exc:
-            logger.warning("cube download %s: %s", item.file_id, exc)
-            continue
-        if looks_like_html(text) or len(text.strip()) < 20:
-            continue
         first, _, last = name.partition(" ")
         engagements.append(
             Engagement(

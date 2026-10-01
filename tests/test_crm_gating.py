@@ -71,6 +71,9 @@ class FakeHubSpot:
         self.recent_attendee_emails = set()
         self._n = 10
 
+    def ensure_properties(self):
+        return None
+
     def find_contact(self, email="", phone="", name=""):
         email_l = (email or "").lower()
         digits = "".join(c for c in (phone or "") if c.isdigit())

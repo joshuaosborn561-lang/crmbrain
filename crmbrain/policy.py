@@ -55,6 +55,15 @@ DISCOVERY_HINTS = (
     "intro call",
     "salesglider",
 )
+# Cube/Fireflies deal-create: word-boundary only. No generic campaign/leads/roof.
+STRICT_DISCOVERY_HINTS = (
+    "intro",
+    "discovery",
+    "pricing",
+    "proposal",
+    "contract",
+    "retainer",
+)
 SALESGLIDER_INTRO_HINTS = ("salesglider intro", "sg intro")
 FAMILY_ONLY_HINTS = (
     "love you",
@@ -168,20 +177,56 @@ def cube_transcript_usable(ev: Engagement) -> bool:
     return True
 
 
-def cube_has_sales_intent(ev: Engagement) -> bool:
-    blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}".lower()
-    if is_discovery_meeting(ev):
+def cube_has_sales_intent(
+    ev: Engagement,
+    decision=None,
+    min_confidence: float = 0.75,
+) -> bool:
+    """Confident classifier yes, or strict discovery hints — not generic industry words."""
+    blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}"
+    if has_word_hint(blob, STRICT_DISCOVERY_HINTS):
         return True
-    return bool(has_word_hint(blob, DISCOVERY_HINTS) or has_word_hint(blob, BUSINESS_HINTS))
+    extra = ev.extra or {}
+    if extra.get("intent_yes"):
+        return True
+    if extra.get("intent_no") and decision is None:
+        return False
+    if decision is None:
+        from crmbrain.intent import heuristic_intent
+
+        decision = heuristic_intent(ev)
+    from crmbrain.intent import is_confident_sales
+
+    return is_confident_sales(decision, min_confidence)
 
 
-def contact_is_prospect(contact: dict | None) -> bool:
-    """True when HubSpot already treats this person as a sales prospect."""
+def contact_is_prospect(contact: dict | None, deals: list[dict] | None = None) -> bool:
+    """Open pre-sale deal and no Signed/Paid. crm_source alone does not count."""
     if not contact:
         return False
-    props = contact.get("properties") or {}
-    source = (props.get("crm_source") or "").lower()
-    return source in MEETING_CRM_SOURCES
+    if has_closed_won_deal(deals):
+        return False
+    allowed = PRE_SALE_STAGES | {STAGE["proposal_sent"]}
+    for deal in live_open_deals(deals or []):
+        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        if stage in allowed:
+            return True
+    return False
+
+
+def has_paperwork_evidence(ev: Engagement) -> bool:
+    """A real proposal/contract/invoice document — not the words in a call."""
+    extra = ev.extra or {}
+    if extra.get("document_id") or extra.get("document_name"):
+        return True
+    return False
+
+
+def closed_won_notes_only(ev: Engagement, deals: list[dict] | None) -> bool:
+    """Paid/Signed contacts: Cube/Fireflies notes only unless new paperwork."""
+    if ev.source not in {"cube_acr", "fireflies"}:
+        return False
+    return has_closed_won_deal(deals)
 
 
 def is_cube_business_discovery(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
@@ -191,9 +236,15 @@ def is_cube_business_discovery(ev: Engagement, *, already_prospect: bool | None 
     """
     if not cube_transcript_usable(ev):
         return False
-    if is_client_context_ev(ev) and not cube_has_sales_intent(ev):
+    return held_call_may_open_deal(ev, already_prospect=already_prospect)
+
+
+def held_call_may_open_deal(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
+    """Cube/Fireflies may open a deal only on sales intent or an existing prospect."""
+    sales = cube_has_sales_intent(ev)
+    if is_client_context_ev(ev) and not sales:
         return False
-    if cube_has_sales_intent(ev):
+    if sales:
         return True
     if already_prospect is None:
         already_prospect = bool((ev.extra or {}).get("already_prospect"))
@@ -390,7 +441,9 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     if ev.source == "calendly":
         return STAGE["discovery_scheduled"]
     if ev.source == "fireflies":
-        return STAGE["discovery_completed"]
+        if held_call_may_open_deal(ev):
+            return STAGE["discovery_completed"]
+        return ""
     if ev.source == "cube_acr" and is_cube_business_discovery(ev):
         return STAGE["discovery_completed"]
     if ev.source == "allo" and is_allo_discovery(ev):

@@ -454,9 +454,9 @@ class Memory:
             except Exception as exc:
                 self._record_error("record_freshness", exc)
 
-    def latest_freshness(self, source: str) -> datetime | None:
+    def latest_freshness(self, source: str, *, fallback_local: bool = True) -> datetime | None:
         local = (self._local.get("source_freshness") or {}).get(source) or {}
-        raw = local.get("last_item_at")
+        raw = local.get("last_item_at") if fallback_local else None
         if self.use_supabase:
             try:
                 rows = self._sb_schema(
@@ -464,10 +464,11 @@ class Memory:
                     "source_freshness",
                     params={"source": f"eq.{source}", "select": "last_item_at", "limit": "1"},
                 )
-                if rows:
-                    raw = rows[0].get("last_item_at") or raw
+                raw = (rows[0].get("last_item_at") if rows else None)
             except Exception as exc:
                 self._record_error("latest_freshness", exc)
+                if not fallback_local:
+                    raise
         if not raw:
             return None
         try:
