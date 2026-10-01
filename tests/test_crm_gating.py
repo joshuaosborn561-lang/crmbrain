@@ -71,6 +71,9 @@ class FakeHubSpot:
         self.recent_attendee_emails = set()
         self._n = 10
 
+    def ensure_properties(self):
+        return None
+
     def find_contact(self, email="", phone="", name=""):
         email_l = (email or "").lower()
         digits = "".join(c for c in (phone or "") if c.isdigit())
@@ -135,10 +138,10 @@ class FakeHubSpot:
             if needle in ((row.get("properties") or {}).get("email") or "").lower()
         ]
 
-    def patch_contact(self, contact_id, properties):
+    def patch_contact(self, contact_id, properties, ev=None, contact=None):
         self.patches.append((contact_id, properties))
 
-    def add_note(self, contact_id, body):
+    def add_note(self, contact_id, body, ev=None, contact=None):
         self.notes.append((contact_id, body))
 
     def _deal_contact_ids(self, deal):
@@ -214,7 +217,7 @@ class FakeHubSpot:
             if deal["id"] == deal_id:
                 deal.setdefault("properties", {}).update(properties)
 
-    def fill_deal_amount(self, deal, amount):
+    def fill_deal_amount(self, deal, amount, ev=None, contact=None):
         from crmbrain.intelligence import amount_to_write
 
         hint = amount_to_write((deal.get("properties") or {}).get("amount"), amount)

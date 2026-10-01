@@ -1,11 +1,7 @@
-"""Allo phone-call ingest.
+"""Allo phone-call ingest (dormant).
 
-Root cause of the Sep 18 stall: crmbrain never read `allo.calls`, and the API
-client hit a made-up `{ALLO_API_URL}/conversations` path with `Bearer` auth.
-Allo v2 is `https://api.withallo.com` and authenticates as `Authorization: Api-Key`.
-The table was filled by a one-shot dump on 2026-09-18 23:01 UTC and never
-incremented. This module incremental-syncs via
-`POST /v2/api/conversations/items/search` and upserts `allo.calls`.
+Calls now live in Cube ACR. The cycle no longer imports or scans Allo, and
+Allo is not on the staleness alarm. This module stays for one-off table reads.
 """
 
 from __future__ import annotations

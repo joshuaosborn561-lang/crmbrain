@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from crmbrain.config import Settings, now_utc
 from crmbrain.cycle import cycle_status, run
+from crmbrain.google_auth import report_scopes
 
 FULL_CYCLE_HOURS_UTC = {12, 22}
 
@@ -24,6 +25,9 @@ def main() -> int:
     settings = Settings.from_env()
     if dry_run:
         settings = replace(settings, dry_run=True)
+    if cmd == "google-scopes":
+        print(report_scopes(settings).as_text())
+        return 0
     if cmd == "auto":
         briefs_only = now_utc().hour not in FULL_CYCLE_HOURS_UTC
         report = run(settings=settings, briefs_only=briefs_only)
@@ -32,7 +36,7 @@ def main() -> int:
     elif cmd == "briefs":
         report = run(settings=settings, briefs_only=True)
     else:
-        print("usage: python -m crmbrain [auto|cycle|briefs] [--dry-run]")
+        print("usage: python -m crmbrain [auto|cycle|briefs|google-scopes] [--dry-run]")
         return 2
     print(report.summary_text())
     return 0 if cycle_status(report) == "ok" else 1

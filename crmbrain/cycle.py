@@ -17,22 +17,28 @@ from crmbrain import (
     staleness,
     ticker,
 )
+from crmbrain.budget import WriteBudget
 from crmbrain.config import (
     JOSH_EMAILS,
     STAGE,
     Settings,
     compute_lookback_start,
+    is_excluded_contact,
+    is_non_deal_person,
     is_personal,
+    is_personal_family_intent,
     now_utc,
     settings_lookback_start,
 )
 from crmbrain.gmail_client import Gmail
+from crmbrain.google_auth import drive_auth_detail, has_drive_access
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement, ProposedWrite
 from crmbrain.leadmagic import should_skip_email, usable_linkedin
-from crmbrain.sources import allo, cube_acr, fireflies, gmail_scan, rvm, smartlead
+from crmbrain.sources import cube_acr, fireflies, gmail_scan, rvm, smartlead
+from crmbrain.sources.cube_acr import CubeAuthError
 from crmbrain.sources.gmail_scan import is_junk_crm_email
 
 logger = logging.getLogger(__name__)
@@ -54,6 +60,139 @@ def _in_window(ev: Engagement, settings: Settings) -> bool:
     if ev.occurred_at and ev.occurred_at < start:
         return False
     return True
+
+
+def _queue_cap_review(memory: Memory, report: CycleReport, ev: Engagement) -> None:
+    label = ev.display_name() or ev.email or ev.phone or ev.external_id
+    line = f"{label} cap"
+    if line not in report.review_queue:
+        report.review_queue.append(line)
+    if hasattr(memory, "enqueue_review"):
+        memory.enqueue_review(
+            {
+                "person_key": ev.email or ev.phone or ev.display_name() or ev.external_id,
+                "email": ev.email,
+                "name": ev.display_name(),
+                "company": ev.company,
+                "reason": "cap",
+                "evidence": {"source": ev.source, "subject": ev.raw_subject},
+            }
+        )
+
+
+def _reserve_budget(
+    budget: WriteBudget | None,
+    kind: str | None,
+    memory: Memory,
+    report: CycleReport,
+    ev: Engagement,
+) -> bool:
+    """Reserve one create or stage_move. Overflow → review_queue reason cap."""
+    if not kind:
+        return True
+    if budget is None:
+        return True
+    if budget.aborted or not budget.allow(kind):
+        _queue_cap_review(memory, report, ev)
+        return False
+    return True
+
+
+def _contact_deals(hs: HubSpot, contact: dict | None) -> list[dict]:
+    if not contact or not contact.get("id"):
+        return []
+    try:
+        return hs.open_deals_for_contact(contact["id"]) or []
+    except Exception:
+        return []
+
+
+def _annotate_sales_context(ev: Engagement, settings: Settings, hs: HubSpot, already: dict | None = None) -> dict | None:
+    """Set intent flags / already_prospect from one cached classify + open pre-sale deals."""
+    if ev.source not in {"cube_acr", "fireflies"}:
+        return already
+    decision = intent.classify(settings, ev)
+    ev.extra["intent_yes"] = policy.cube_has_sales_intent(ev, decision, settings.intent_min_confidence)
+    if already is None:
+        try:
+            already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+        except Exception:
+            already = None
+    deals = _contact_deals(hs, already)
+    ev.extra["already_prospect"] = policy.contact_is_prospect(already, deals)
+    ev.extra["closed_won"] = policy.has_closed_won_deal(deals)
+    return already
+
+
+def _handle_budget_kind(ev: Engagement, already: dict | None, hs: HubSpot) -> str | None:
+    """One create slot per new contact/deal; stage_move for an existing live deal."""
+    deals = _contact_deals(hs, already)
+    if policy.closed_won_notes_only(ev, deals):
+        return None
+    stage = policy.resolve_stage(ev)
+    live = policy.live_open_deals(deals)
+    creating_contact = already is None and policy.may_create_hubspot_contact(ev)
+    creating_deal = bool(stage) and not live
+    if ev.source in {"cube_acr", "fireflies"} and creating_deal and not policy.held_call_may_open_deal(ev):
+        creating_deal = False
+        creating_contact = False
+    if creating_contact or creating_deal:
+        return "create"
+    if stage and live:
+        current = (max(live, key=policy.deal_richness).get("properties") or {}).get("dealstage") or ""
+        if policy.choose_deal_action(current, stage, ev):
+            return "stage_move"
+    return None
+
+
+def _person_key_for(ev: Engagement) -> str:
+    from crmbrain.evidence import person_key
+
+    return person_key(ev.email, ev.phone, ev.display_name() or ev.name)
+
+
+def _event_unprocessed(ev: Engagement, memory: Memory | None) -> bool:
+    if memory is None or not hasattr(memory, "already_processed"):
+        return True
+    return not memory.already_processed(ev.source, ev.external_id)
+
+
+def _handle_would_write(ev: Engagement, hs: HubSpot, memory: Memory | None) -> bool:
+    if not _event_unprocessed(ev, memory):
+        return False
+    if ev.source in policy.NEVER_OPEN_DEAL_SOURCES | {"gmail", "gmail_person"}:
+        return False
+    if ev.source == "cube_acr":
+        return policy.is_cube_business_discovery(ev)
+    if ev.source == "fireflies":
+        return policy.held_call_may_open_deal(ev)
+    return True
+
+
+def _planned_unique_people(
+    engagements: list[Engagement],
+    settings: Settings,
+    hs: HubSpot,
+    memory: Memory,
+    timelines,
+    upcoming: set[str],
+    held_events: list[Engagement],
+    calendar_api_ok: bool,
+) -> int:
+    """Unprocessed people who would be written, counted once across handle + reconcile."""
+    from crmbrain.reconcile import planned_change_person_keys
+
+    keys = set()
+    for ev in engagements:
+        if not _handle_would_write(ev, hs, memory):
+            continue
+        key = _person_key_for(ev)
+        if key:
+            keys.add(key)
+    keys |= planned_change_person_keys(
+        hs, settings, timelines, upcoming, held_events, calendar_api_ok, memory
+    )
+    return len(keys)
 
 
 def _propose_engagement(
@@ -84,10 +223,21 @@ def _handle_engagement(
     memory: Memory,
     hey: HeyReach | None,
     report: CycleReport,
+    budget: WriteBudget | None = None,
 ) -> None:
+    budget = budget or WriteBudget.from_settings(settings)
     if ev.email and is_junk_crm_email(ev.email):
         report.junk_blocked.append(f"{ev.source}:{ev.email} system address")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "system_email"})
+        return
+    if is_non_deal_person(
+        name=ev.display_name() or ev.name,
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+    ):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
         return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         if not policy.personal_allowed_for_sales_intro(ev):
@@ -103,9 +253,46 @@ def _handle_engagement(
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_transcript"})
         return
     decision = intent.classify(settings, ev)
+    if is_personal_family_intent(decision.intent):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {decision.intent}")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent or "personal"})
+        return
     already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
-    if settings.dry_run:
-        _propose_engagement(report, ev, decision, already)
+    already = _annotate_sales_context(ev, settings, hs, already)
+    deals = _contact_deals(hs, already)
+    notes_only = policy.closed_won_notes_only(ev, deals)
+    if ev.source in {"cube_acr", "fireflies"}:
+        salesish = policy.cube_has_sales_intent(ev, decision, settings.intent_min_confidence)
+    else:
+        salesish = intent.is_confident_sales(decision, settings.intent_min_confidence)
+    if notes_only and already:
+        if settings.dry_run:
+            return
+        if memory.already_processed(ev.source, ev.external_id):
+            _apply_transcript_intelligence(
+                ev,
+                settings,
+                hs,
+                memory,
+                report,
+                already,
+                add_timeline_note=False,
+                budget=budget,
+            )
+            report.skipped.append(f"{ev.source}:{ev.external_id} signed/paid notes only")
+            return
+        _apply_transcript_intelligence(
+            ev,
+            settings,
+            hs,
+            memory,
+            report,
+            already,
+            add_timeline_note=True,
+            budget=budget,
+        )
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "closed_won_notes"})
+        report.processed.append(f"{ev.source}:{ev.external_id}")
         return
     if ev.source in policy.HUBSPOT_CREATE_SOURCES and intent.is_confident_non_sales(
         decision, settings.intent_min_confidence
@@ -113,11 +300,7 @@ def _handle_engagement(
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} {decision.intent}")
         memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent})
         return
-    if (
-        ev.source in policy.HUBSPOT_CREATE_SOURCES
-        and not intent.is_confident_sales(decision, settings.intent_min_confidence)
-        and not already
-    ):
+    if ev.source in policy.HUBSPOT_CREATE_SOURCES and not salesish and not already:
         report.review_queue.append(
             f"{ev.display_name() or ev.email} {decision.verdict} {decision.reason}"
         )
@@ -135,6 +318,12 @@ def _handle_engagement(
                 }
             )
         memory.mark_processed(ev.source, ev.external_id, {"skip": "intent_review"})
+        return
+    if settings.dry_run:
+        kind = _handle_budget_kind(ev, already, hs)
+        if not _reserve_budget(budget, kind, memory, report, ev):
+            return
+        _propose_engagement(report, ev, decision, already)
         return
     meeting_evidence = None
     if already and not policy.may_create_hubspot_contact(ev):
@@ -160,11 +349,22 @@ def _handle_engagement(
     if memory.already_processed(ev.source, ev.external_id):
         if ev.source in {"fireflies", "cube_acr"} and already:
             _apply_transcript_intelligence(
-                ev, settings, hs, memory, report, already, add_timeline_note=False
+                ev,
+                settings,
+                hs,
+                memory,
+                report,
+                already,
+                add_timeline_note=False,
+                budget=budget,
             )
             report.skipped.append(f"{ev.source}:{ev.external_id} refreshed notes/amount")
         else:
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
+        return
+
+    kind = _handle_budget_kind(ev, already, hs)
+    if not _reserve_budget(budget, kind, memory, report, ev):
         return
 
     ev = enrichment.enrich(settings, ev)
@@ -173,7 +373,15 @@ def _handle_engagement(
     base = already or hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name()) or contact
     base["id"] = contact["id"]
     facts = _apply_transcript_intelligence(
-        ev, settings, hs, memory, report, base, add_timeline_note=True
+        ev,
+        settings,
+        hs,
+        memory,
+        report,
+        base,
+        add_timeline_note=True,
+        budget=budget,
+        reserved=kind,
     )
 
     reason = facts.get("ticker_reason") or ev.ticker_reason
@@ -200,13 +408,15 @@ def _apply_transcript_intelligence(
     contact: dict,
     *,
     add_timeline_note: bool,
+    budget: WriteBudget | None = None,
+    reserved: str | None = None,
 ) -> dict:
     """Always extract → merge_contact_props for meeting transcripts. Fill deal amount if empty."""
     facts = intelligence.extract(settings, ev)
     merged = intelligence.merge_contact_props(contact, facts)
     if merged:
         try:
-            hs.patch_contact(contact["id"], merged)
+            hs.patch_contact(contact["id"], merged, ev=ev, contact=contact)
             report.notes_updated.append(f"{ev.display_name() or ev.email} ({ev.source})")
             props = contact.setdefault("properties", {})
             props.update(merged)
@@ -218,7 +428,12 @@ def _apply_transcript_intelligence(
         note = ev.summary or ev.transcript[:1500] or ev.raw_subject
         if note:
             try:
-                hs.add_note(contact["id"], f"{ev.source} {ev.occurred_at or ''}\n\n{note}")
+                hs.add_note(
+                    contact["id"],
+                    f"{ev.source} {ev.occurred_at or ''}\n\n{note}",
+                    ev=ev,
+                    contact=contact,
+                )
             except Exception as exc:
                 report.errors.append(f"timeline note {ev.display_name() or ev.email}: {exc}")
     for fact_type in ("personal_details", "family_notes", "relationship_hooks"):
@@ -251,8 +466,40 @@ def _apply_transcript_intelligence(
             )
     if not stage and policy.is_client_context_ev(ev):
         report.skipped.append(f"{ev.display_name()} client conversation, notes only")
+    deals = _contact_deals(hs, contact)
+    if policy.closed_won_notes_only(ev, deals):
+        if policy.has_paperwork_evidence(ev):
+            line = f"{ev.display_name() or ev.email} paperwork"
+            if line not in report.review_queue:
+                report.review_queue.append(line)
+            if hasattr(memory, "enqueue_review"):
+                memory.enqueue_review(
+                    {
+                        "person_key": ev.email or ev.phone or ev.display_name(),
+                        "email": ev.email,
+                        "name": ev.display_name(),
+                        "company": ev.company,
+                        "reason": "paperwork",
+                        "evidence": {"source": ev.source, "subject": ev.raw_subject},
+                    }
+                )
+        report.skipped.append(f"{ev.display_name() or ev.email} signed/paid notes only")
+        return facts
     amount = facts.get("amount_hint") or facts.get("deal_amount") or ""
     if stage or amount:
+        live = policy.live_open_deals(deals)
+        if ev.source in {"cube_acr", "fireflies"} and not live and not policy.held_call_may_open_deal(ev):
+            return facts
+        if reserved is None:
+            extra_kind = None
+            if stage and not live:
+                extra_kind = "create"
+            elif stage and live:
+                current = (max(live, key=policy.deal_richness).get("properties") or {}).get("dealstage") or ""
+                if policy.choose_deal_action(current, stage, ev):
+                    extra_kind = "stage_move"
+            if extra_kind and not _reserve_budget(budget, extra_kind, memory, report, ev):
+                return facts
         try:
             deal = hs.upsert_deal(contact, ev, stage, amount=amount)
         except Exception as exc:
@@ -266,7 +513,7 @@ def _apply_transcript_intelligence(
         live_amount = (deal.get("properties") or {}).get("amount")
         wrote_amount = bool(deal.get("id") and amount and intelligence.amounts_equal(live_amount, amount))
         if deal.get("id") and amount and not wrote_amount:
-            wrote_amount = hs.fill_deal_amount(deal, amount)
+            wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
         if wrote_amount:
             report.amounts_set.append(f"{ev.display_name() or ev.email} {amount}")
             logger.info("amounts_set %s %s", ev.display_name() or ev.email, amount)
@@ -301,6 +548,8 @@ def _queue_linkedin(
     """Anyone Josh called, emailed, or talked to on LinkedIn gets a HeyReach invite."""
     if settings.dry_run or not hey or ev.source == "heyreach":
         return
+    if is_excluded_contact(ev, contact):
+        return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         return
     if ev.email and (ev.email.lower() in JOSH_EMAILS or should_skip_email(ev.email)):
@@ -330,7 +579,9 @@ def _queue_linkedin(
     memory.mark_processed("heyreach", hid, {"linkedin": ev.linkedin_url, "email": ev.email})
     if ev.linkedin_url and contact and contact.get("id"):
         try:
-            hs.patch_contact(contact["id"], {"hs_linkedin_url": ev.linkedin_url})
+            hs.patch_contact(
+                contact["id"], {"hs_linkedin_url": ev.linkedin_url}, ev=ev, contact=contact
+            )
         except Exception:
             pass
     report.linkedin_queued.append(ev.display_name() or ev.email)
@@ -367,6 +618,9 @@ def _backfill_hubspot_invites(
             title=props.get("jobtitle") or "",
             linkedin_url=props.get("hs_linkedin_url") or "",
         )
+        if is_excluded_contact(ev, row):
+            report.skipped.append(f"hubspot_backfill:{ev.display_name() or ev.email} excluded")
+            continue
         before = len(report.linkedin_queued)
         _queue_linkedin(settings, hey, ev, hs, memory, report, contact=row)
         if len(report.linkedin_queued) > before:
@@ -386,8 +640,7 @@ def integration_status(settings: Settings) -> list[str]:
         ("HeyReach key", bool(settings.heyreach_key)),
         ("Slack token", bool(settings.slack_token)),
         ("Supabase key", bool(settings.supabase_key)),
-        ("Cube folder", bool(settings.cube_folder)),
-        ("Allo key", bool(settings.allo_key)),
+        ("Cube ACR", bool(settings.cube_folder) and has_drive_access(settings)),
     )
     return [f"{name}: {'present' if ok else 'missing'}" for name, ok in checks]
 
@@ -515,10 +768,34 @@ def apply_gmail_stage_update(
     report: CycleReport,
     *,
     held_events: list[Engagement] | None = None,
+    budget: WriteBudget | None = None,
 ) -> None:
+    budget = budget or WriteBudget.from_settings(settings)
     """Apply a Gmail calendar/billing signal. Re-check held meetings before No Show."""
     already = memory.already_processed(ev.source, ev.external_id)
+    if is_non_deal_person(
+        name=ev.display_name() or ev.name,
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+    ):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        if not already:
+            memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
     contact = _mail_contact(hs, ev)
+    contact_props = (contact or {}).get("properties") or {}
+    if is_non_deal_person(
+        name=f"{contact_props.get('firstname') or ''} {contact_props.get('lastname') or ''}".strip()
+        or ev.display_name(),
+        email=contact_props.get("email") or ev.email,
+        company=contact_props.get("company") or ev.company,
+        phone=contact_props.get("phone") or ev.phone,
+    ):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        if not already:
+            memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
     contact_id = (contact or {}).get("id") or (ev.extra or {}).get("hubspot_contact_id") or ""
     if ev.stage_hint == STAGE["no_show"]:
         scheduled_at = policy.scheduled_at_from_engagement(ev)
@@ -540,7 +817,10 @@ def apply_gmail_stage_update(
             report.skipped.append(f"{ev.source}:{ev.external_id} stale no_show")
             return
         if already and write_stage == STAGE["discovery_completed"] and contact_id:
+            promote_kind = "create" if not policy.live_open_deals(_contact_deals(hs, contact)) else "stage_move"
             if settings.dry_run:
+                if not _reserve_budget(budget, promote_kind, memory, report, ev):
+                    return
                 report.proposed_writes.append(
                     ProposedWrite(
                         action="move",
@@ -550,6 +830,9 @@ def apply_gmail_stage_update(
                         reason="held_beats_noshow",
                     ).as_dict()
                 )
+                return
+            kind = "create" if not policy.live_open_deals(_contact_deals(hs, contact)) else "stage_move"
+            if not _reserve_budget(budget, kind, memory, report, ev):
                 return
             deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage)
             if deal.get("id"):
@@ -567,10 +850,13 @@ def apply_gmail_stage_update(
 
     if ev.extra.get("create_new"):
         ev.source = "calendly"
-        _handle_engagement(ev, settings, hs, memory, hey, report)
+        _handle_engagement(ev, settings, hs, memory, hey, report, budget=budget)
         return
     if ev.stage_hint and contact_id:
+        gmail_kind = "create" if not policy.live_open_deals(_contact_deals(hs, contact)) else "stage_move"
         if settings.dry_run:
+            if not _reserve_budget(budget, gmail_kind, memory, report, ev):
+                return
             report.proposed_writes.append(
                 ProposedWrite(
                     action="move",
@@ -581,6 +867,8 @@ def apply_gmail_stage_update(
                     reason="gmail",
                 ).as_dict()
             )
+            return
+        if not _reserve_budget(budget, gmail_kind, memory, report, ev):
             return
         amount = str((ev.extra or {}).get("amount") or "")
         deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, ev.stage_hint, amount=amount)
@@ -621,6 +909,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
 
     last_started = memory.last_finished_run_started_at()
     settings = replace(settings, lookback_start_at=compute_lookback_start(settings, last_started))
+    budget = WriteBudget.from_settings(settings)
     hs = HubSpot(settings)
     if not briefs_only and not settings.dry_run:
         hs.ensure_properties()
@@ -652,8 +941,8 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                 _stale_source_warning(report, "calendar", str(exc))
             else:
                 report.errors.append(f"calendar: {exc}")
-    if not settings.allo_key:
-        _stale_source_warning(report, "allo", "ALLO_API_KEY missing")
+    if not has_drive_access(settings):
+        _stale_source_warning(report, "cube_acr", drive_auth_detail(settings))
     hey = None if briefs_only else (HeyReach(settings) if settings.heyreach_key else None)
     if briefs_only:
         if gmail and not settings.dry_run:
@@ -668,14 +957,40 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         return report
 
     engagements: list[Engagement] = list(calendar_creates)
-    try:
-        cube_events = cube_acr.scan(settings)
-        engagements += cube_events
-        if hasattr(memory, "upsert_cube_call"):
-            for ev in cube_events:
-                memory.upsert_cube_call(ev)
-    except Exception as exc:
-        report.errors.append(f"cube_acr: {exc}")
+    cube_backfill = False
+    skip_cube_freshness = False
+    if hasattr(memory, "latest_freshness"):
+        try:
+            cube_backfill = (
+                memory.latest_freshness(
+                    "cube_acr",
+                    fallback_local=not getattr(memory, "use_supabase", False),
+                )
+                is None
+            )
+        except Exception as exc:
+            logger.warning("cube_acr freshness read failed; skip backfill: %s", exc)
+            report.warnings.append("cube_acr: freshness read failed, skip backfill")
+            cube_backfill = False
+            skip_cube_freshness = True
+    if has_drive_access(settings):
+        try:
+            cube_events = cube_acr.scan(settings, backfill=cube_backfill)
+            if cube_backfill:
+                report.warnings.append(
+                    f"cube_acr: one-time backfill ({getattr(settings, 'cube_lookback_days', 14)}d)"
+                )
+                for ev in cube_events:
+                    ev.extra["skip_lookback"] = True
+                    ev.extra["cube_backfill"] = True
+            engagements += cube_events
+            if hasattr(memory, "upsert_cube_call"):
+                for ev in cube_events:
+                    memory.upsert_cube_call(ev)
+        except CubeAuthError as exc:
+            _stale_source_warning(report, "cube_acr", str(exc))
+        except Exception as exc:
+            report.errors.append(f"cube_acr: {exc}")
     try:
         engagements += fireflies.scan(settings)
     except Exception as exc:
@@ -693,10 +1008,6 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         engagements += rvm.scan(settings)
     except Exception as exc:
         report.errors.append(f"rvm: {exc}")
-    try:
-        engagements += allo.scan(settings, gmail, memory=memory, errors=report.errors)
-    except Exception as exc:
-        report.errors.append(f"allo: {exc}")
     if gmail:
         try:
             engagements += gmail_scan.scan_people(settings, gmail)
@@ -704,52 +1015,113 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             report.errors.append(f"gmail_person: {exc}")
 
     held_this_cycle: list[Engagement] = []
+    windowed: list[Engagement] = []
     for ev in engagements:
         if not _in_window(ev, settings) and ev.source not in {"heyreach"}:
             report.skipped.append(f"{ev.source}:{ev.external_id} outside window")
             continue
+        _annotate_sales_context(ev, settings, hs)
         if policy.is_meeting_held(ev):
             held_this_cycle.append(ev)
-        try:
-            _handle_engagement(ev, settings, hs, memory, hey, report)
-        except Exception as exc:
-            report.errors.append(f"{ev.source}:{ev.external_id}: {exc}")
+        windowed.append(ev)
 
-    if gmail:
+    upcoming = set(getattr(hs, "scheduled_attendee_emails", set()) or set())
+    try:
+        from crmbrain.evidence import build_timelines
+        from crmbrain.reconcile import _attach_hubspot, _count_open_deals
+
+        timelines = build_timelines(windowed)
+        _attach_hubspot(hs, timelines)
+        planned = _planned_unique_people(
+            windowed,
+            settings,
+            hs,
+            memory,
+            timelines,
+            upcoming,
+            held_this_cycle,
+            report.calendar_api_ok,
+        )
+        if budget.maybe_abort(planned, _count_open_deals(hs, timelines)):
+            report.reconcile_aborted = True
+            report.would_abort = True
+            report.warnings.append(budget.abort_reason)
+            if not settings.dry_run:
+                report.skipped.append(budget.abort_reason)
+            else:
+                budget.aborted = False
+    except Exception as exc:
+        report.errors.append(f"budget abort: {exc}")
+
+    skip_writes = bool(budget.aborted and not settings.dry_run)
+    if skip_writes:
+        skip_cube_freshness = True
+    if not skip_writes:
+        for ev in windowed:
+            try:
+                _handle_engagement(ev, settings, hs, memory, hey, report, budget=budget)
+            except Exception as exc:
+                report.errors.append(f"{ev.source}:{ev.external_id}: {exc}")
+
+        if gmail:
+            try:
+                mail_events = gmail_scan.scan(settings, gmail, hs, report)
+                for ev in mail_events:
+                    apply_gmail_stage_update(
+                        ev,
+                        settings,
+                        hs,
+                        memory,
+                        hey,
+                        report,
+                        held_events=held_this_cycle,
+                        budget=budget,
+                    )
+                engagements.extend(mail_events)
+                windowed.extend(mail_events)
+            except Exception as exc:
+                report.errors.append(f"gmail: {exc}")
+
+        try:
+            reconcile.run(
+                settings,
+                hs,
+                memory,
+                report,
+                [ev for ev in windowed if _in_window(ev, settings) or ev.source == "heyreach"],
+                upcoming_emails=upcoming,
+                dry_run=settings.dry_run,
+                calendar_api_ok=report.calendar_api_ok,
+                held_events=held_this_cycle,
+                budget=budget,
+                skip_abort=True,
+            )
+        except Exception as exc:
+            report.errors.append(f"reconcile: {exc}")
+    elif gmail:
         try:
             mail_events = gmail_scan.scan(settings, gmail, hs, report)
-            for ev in mail_events:
-                apply_gmail_stage_update(
-                    ev,
-                    settings,
-                    hs,
-                    memory,
-                    hey,
-                    report,
-                    held_events=held_this_cycle,
-                )
-            if not settings.dry_run:
-                briefing.send_due(settings, gmail, hs, memory, report)
             engagements.extend(mail_events)
         except Exception as exc:
             report.errors.append(f"gmail: {exc}")
 
-    try:
-        reconcile.run(
-            settings,
-            hs,
-            memory,
-            report,
-            [ev for ev in engagements if _in_window(ev, settings) or ev.source == "heyreach"],
-            upcoming_emails=set(getattr(hs, "scheduled_attendee_emails", set()) or set()),
-            dry_run=settings.dry_run,
-            calendar_api_ok=report.calendar_api_ok,
-            held_events=held_this_cycle,
-        )
-    except Exception as exc:
-        report.errors.append(f"reconcile: {exc}")
+    if gmail and not briefs_only:
+        try:
+            if settings.dry_run:
+                report.skipped.append("briefing skipped (dry-run)")
+            else:
+                briefing.send_due(settings, gmail, hs, memory, report)
+        except Exception as exc:
+            report.errors.append(f"briefing: {exc}")
 
-    _record_staleness(memory, report, engagements, calendar_last=calendar_last, calendar_error=calendar_error)
+    _record_staleness(
+        memory,
+        report,
+        engagements,
+        calendar_last=calendar_last,
+        calendar_error=calendar_error,
+        skip_sources={"cube_acr"} if skip_cube_freshness else None,
+    )
 
     if hey and not settings.dry_run:
         try:
@@ -785,20 +1157,26 @@ def _record_staleness(
     *,
     calendar_last: datetime | None = None,
     calendar_error: str = "",
+    skip_sources: set[str] | None = None,
 ) -> None:
     observed = {
         "gmail": _latest_source_at(engagements, "gmail") or _latest_source_at(engagements, "gmail_person"),
         "fireflies": _latest_source_at(engagements, "fireflies"),
         "calendar": calendar_last,
-        "allo": _latest_source_at(engagements, "allo"),
+        "cube_acr": _latest_source_at(engagements, "cube_acr"),
         "smartlead": _latest_source_at(engagements, "smartlead"),
     }
     errors = {}
     if calendar_error:
         errors["calendar"] = calendar_error
+    for warn in report.warnings:
+        if warn.lower().startswith("cube_acr"):
+            errors["cube_acr"] = warn
     for err in report.errors:
         low = err.lower()
-        for source in ("gmail", "fireflies", "allo", "smartlead"):
+        for source in ("gmail", "fireflies", "cube_acr", "smartlead"):
             if low.startswith(source):
                 errors[source] = err
-    staleness.record_and_alarm(memory, report, observed, errors=errors)
+    staleness.record_and_alarm(
+        memory, report, observed, errors=errors, skip_sources=skip_sources
+    )

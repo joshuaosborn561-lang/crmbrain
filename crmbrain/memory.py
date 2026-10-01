@@ -454,9 +454,9 @@ class Memory:
             except Exception as exc:
                 self._record_error("record_freshness", exc)
 
-    def latest_freshness(self, source: str) -> datetime | None:
+    def latest_freshness(self, source: str, *, fallback_local: bool = True) -> datetime | None:
         local = (self._local.get("source_freshness") or {}).get(source) or {}
-        raw = local.get("last_item_at")
+        raw = local.get("last_item_at") if fallback_local else None
         if self.use_supabase:
             try:
                 rows = self._sb_schema(
@@ -464,10 +464,11 @@ class Memory:
                     "source_freshness",
                     params={"source": f"eq.{source}", "select": "last_item_at", "limit": "1"},
                 )
-                if rows:
-                    raw = rows[0].get("last_item_at") or raw
+                raw = (rows[0].get("last_item_at") if rows else None)
             except Exception as exc:
                 self._record_error("latest_freshness", exc)
+                if not fallback_local:
+                    raise
         if not raw:
             return None
         try:
@@ -535,6 +536,12 @@ class Memory:
     def upsert_cube_call(self, ev) -> None:
         if self._skip_side_write("cube_acr_calls"):
             return
+        fid = getattr(ev, "external_id", None) or ""
+        if not fid:
+            return
+        local = self._local.setdefault("cube_acr_calls", [])
+        if any(str(row.get("id") or "") == str(fid) for row in local):
+            return
         row = {
             "id": ev.external_id,
             "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
@@ -545,7 +552,7 @@ class Memory:
             "raw_subject": ev.raw_subject,
             "extra": ev.extra or {},
         }
-        self._local.setdefault("cube_acr_calls", []).append(row)
+        local.append(row)
         self.save_local()
         if self.use_supabase:
             try:

@@ -11,7 +11,7 @@ from datetime import datetime
 
 from crmbrain import evidence, intent, policy, prune
 from crmbrain.budget import WriteBudget
-from crmbrain.config import STAGE, Settings
+from crmbrain.config import STAGE, Settings, is_non_deal_person
 from crmbrain.evidence import (
     KIND_BOOKED,
     KIND_CANCELED,
@@ -181,6 +181,19 @@ def _commit(
     deal: dict | None,
     dry_run: bool,
 ) -> bool:
+    if is_non_deal_person(
+        name=timeline.display_name(),
+        email=timeline.email,
+        company=timeline.company,
+        phone=timeline.phone,
+    ) or is_non_deal_person(
+        name=ev.display_name() or ev.name,
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+    ):
+        report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} excluded")
+        return False
     if budget.aborted:
         _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
         return False
@@ -257,6 +270,16 @@ def apply_timeline(
         if target == STAGE["signed"]:
             target = STAGE["discovery_completed"] if KIND_HELD in kinds else current or ""
 
+    if not deal and policy.only_held_call_evidence(timeline.engagements):
+        if intent.is_confident_non_sales(decision, settings.intent_min_confidence):
+            report.skipped.append(f"{label} {decision.intent}, skip HubSpot")
+            return decision
+        if not policy.held_call_may_open_deal(ev) and not policy.contact_is_prospect(
+            timeline.contact, timeline.deals
+        ):
+            _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+            return decision
+
     if evidence.reply_only(timeline) and not has_upcoming:
         if deal and current == STAGE["discovery_scheduled"] and current not in PROTECTED_STAGES:
             if _may_archive_reply_only(hs, timeline.contact, deal):
@@ -296,6 +319,13 @@ def apply_timeline(
     if not intent.is_confident_sales(decision, settings.intent_min_confidence):
         _queue_review(memory, report, timeline, decision, dry_run=dry_run)
         return decision
+
+    if not deal and policy.only_held_call_evidence(timeline.engagements):
+        if not policy.held_call_may_open_deal(ev) and not policy.contact_is_prospect(
+            timeline.contact, timeline.deals
+        ):
+            _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+            return decision
 
     if policy.has_closed_won_deal(timeline.deals) and not deal:
         _queue_review(memory, report, timeline, decision, reason="closed_won_exists", dry_run=dry_run)
@@ -360,6 +390,13 @@ def restore_missing_deals(
     """If meeting evidence exists and there is no open deal, create or restore one."""
     budget = budget or WriteBudget.from_settings(settings)
     for timeline in timelines.values():
+        if is_non_deal_person(
+            name=timeline.display_name(),
+            email=timeline.email,
+            company=timeline.company,
+            phone=timeline.phone,
+        ):
+            continue
         if _open_deal(timeline):
             continue
         if policy.has_closed_won_deal(timeline.deals):
@@ -378,6 +415,12 @@ def restore_missing_deals(
         if not intent.is_confident_sales(decision, settings.intent_min_confidence):
             if decision.verdict != "no":
                 _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+            continue
+        if policy.only_held_call_evidence(timeline.engagements) and not (
+            policy.held_call_may_open_deal(ev)
+            or policy.contact_is_prospect(timeline.contact, timeline.deals)
+        ):
+            _queue_review(memory, report, timeline, decision, dry_run=dry_run)
             continue
         target = stage_from_timeline(timeline, decision) or STAGE["discovery_completed"]
         if target == STAGE["signed"] and KIND_SIGNED not in timeline.kinds() and KIND_PAYMENT not in timeline.kinds():
@@ -562,6 +605,13 @@ def reeval_discovery_scheduled(
             continue
         contact = contacts[0]
         props = contact.get("properties") or {}
+        if is_non_deal_person(
+            name=f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip(),
+            email=props.get("email") or "",
+            company=props.get("company") or "",
+            phone=props.get("phone") or "",
+        ):
+            continue
         email = (props.get("email") or "").strip().lower()
         key = evidence.person_key(
             email,
@@ -727,6 +777,63 @@ def _planned_change_count(
     return creates + len(changed)
 
 
+def _timeline_has_unprocessed(timeline: PersonTimeline, memory: Memory | None) -> bool:
+    if memory is None or not hasattr(memory, "already_processed"):
+        return bool(timeline.engagements)
+    return any(not memory.already_processed(ev.source, ev.external_id) for ev in timeline.engagements)
+
+
+def planned_change_person_keys(
+    hs: HubSpot,
+    settings: Settings,
+    timelines: dict[str, PersonTimeline],
+    upcoming_emails: set[str],
+    held_events: list[Engagement],
+    calendar_api_ok: bool,
+    memory: Memory | None = None,
+) -> set[str]:
+    """People reconcile would write, from unprocessed events only."""
+    del calendar_api_ok, held_events
+    keys: set[str] = set()
+    upcoming_emails = {e.lower() for e in (upcoming_emails or set())}
+    for timeline in timelines.values():
+        if not _timeline_has_unprocessed(timeline, memory):
+            continue
+        ev = representative_engagement(timeline)
+        decision = intent.classify(settings, ev)
+        current = _current_stage(timeline)
+        deal = _open_deal(timeline)
+        email = timeline.email
+        canceled = KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails)
+        if canceled and _calendar_blocks_back_move(hs, email, timeline.contact):
+            canceled = False
+        target = stage_from_timeline(
+            timeline,
+            decision,
+            has_upcoming=bool(email and email in upcoming_emails),
+            canceled_no_reschedule=canceled,
+            past_grace=not (email and email in upcoming_emails),
+        )
+        if evidence.reply_only(timeline) and deal and current == STAGE["discovery_scheduled"]:
+            keys.add(timeline.key)
+            continue
+        write = evidence_move(current, target, timeline, ev) if target else None
+        if write and deal:
+            keys.add(timeline.key)
+        elif (
+            not deal
+            and target
+            and intent.is_confident_sales(decision, settings.intent_min_confidence)
+        ):
+            if policy.only_held_call_evidence(timeline.engagements) and not (
+                policy.held_call_may_open_deal(ev)
+                or policy.contact_is_prospect(timeline.contact, timeline.deals)
+            ):
+                continue
+            keys.add(timeline.key)
+    return {k for k in keys if k}
+
+
 def run(
     settings: Settings,
     hs: HubSpot,
@@ -739,23 +846,33 @@ def run(
     calendar_api_ok: bool = True,
     held_events: list[Engagement] | None = None,
     budget: WriteBudget | None = None,
+    skip_abort: bool = False,
 ) -> dict[str, PersonTimeline]:
     upcoming_emails = {e.lower() for e in (upcoming_emails or set())}
     held_events = held_events or []
     budget = budget or WriteBudget.from_settings(settings)
     timelines = evidence.build_timelines(engagements)
     _attach_hubspot(hs, timelines)
-    would = _planned_change_count(hs, settings, timelines, upcoming_emails, held_events, calendar_api_ok)
-    open_n = _count_open_deals(hs, timelines)
-    if budget.maybe_abort(would, open_n):
-        report.reconcile_aborted = True
-        report.would_abort = True
-        report.warnings.append(budget.abort_reason)
-        if not dry_run:
-            report.skipped.append(budget.abort_reason)
-            return timelines
-        budget.aborted = False
+    if not skip_abort:
+        would = _planned_change_count(hs, settings, timelines, upcoming_emails, held_events, calendar_api_ok)
+        open_n = _count_open_deals(hs, timelines)
+        if budget.maybe_abort(would, open_n):
+            report.reconcile_aborted = True
+            report.would_abort = True
+            report.warnings.append(budget.abort_reason)
+            if not dry_run:
+                report.skipped.append(budget.abort_reason)
+                return timelines
+            budget.aborted = False
     for timeline in timelines.values():
+        if is_non_deal_person(
+            name=timeline.display_name(),
+            email=timeline.email,
+            company=timeline.company,
+            phone=timeline.phone,
+        ):
+            report.skipped.append(f"reconcile:{timeline.display_name() or timeline.email} excluded")
+            continue
         email = timeline.email
         canceled = KIND_CANCELED in timeline.kinds() and not (email and email in upcoming_emails)
         if canceled and _calendar_blocks_back_move(hs, email, timeline.contact):

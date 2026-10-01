@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings, digits_phone
+from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact
 from crmbrain.models import Engagement
 from crmbrain.names import prefer_contact_name
 from crmbrain import intelligence, policy
@@ -240,7 +240,13 @@ class HubSpot:
             if not after:
                 break
 
+    def _is_excluded(self, ev: Engagement | None = None, contact: dict | None = None) -> bool:
+        return is_excluded_contact(ev, contact)
+
     def upsert_contact(self, ev: Engagement) -> dict:
+        if self._is_excluded(ev):
+            logger.info("skip hubspot contact write for excluded person")
+            return {"id": "", "properties": {}, "skipped": "non_deal"}
         existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         existing_props = (existing or {}).get("properties") or {}
         first = prefer_contact_name(
@@ -285,7 +291,17 @@ class HubSpot:
         resp.raise_for_status()
         return resp.json()
 
-    def add_note(self, contact_id: str, body: str) -> None:
+    def add_note(
+        self,
+        contact_id: str,
+        body: str,
+        ev: Engagement | None = None,
+        contact: dict | None = None,
+    ) -> None:
+        if not contact_id or self._is_excluded(ev, contact):
+            if self._is_excluded(ev, contact):
+                logger.info("skip hubspot note for excluded person")
+            return
         payload = {
             "properties": {"hs_timestamp": str(int(__import__("time").time() * 1000)), "hs_note_body": body},
             "associations": [
@@ -299,7 +315,17 @@ class HubSpot:
         if resp.status_code >= 400:
             raise RuntimeError(f"note: {resp.text[:300]}")
 
-    def patch_contact(self, contact_id: str, properties: dict[str, Any]) -> None:
+    def patch_contact(
+        self,
+        contact_id: str,
+        properties: dict[str, Any],
+        ev: Engagement | None = None,
+        contact: dict | None = None,
+    ) -> None:
+        if not contact_id or self._is_excluded(ev, contact):
+            if self._is_excluded(ev, contact):
+                logger.info("skip hubspot contact patch for excluded person")
+            return
         properties = {k: v for k, v in properties.items() if v}
         if not properties:
             return
@@ -389,10 +415,13 @@ class HubSpot:
             self.patch_deal(str(deal["id"]), {"dealname": cleaned})
         if cleaned and cleaned != current_name:
             deal.setdefault("properties", {})["dealname"] = cleaned
-        self.fill_deal_amount(deal, amount)
+        self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
         return deal
 
     def upsert_deal(self, contact: dict, ev: Engagement, stage: str, amount: str = "") -> dict:
+        if self._is_excluded(ev, contact):
+            logger.info("skip hubspot deal write for excluded person")
+            return {}
         contact_id = contact["id"]
         existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
         live = policy.live_open_deals(existing)
@@ -436,8 +465,17 @@ class HubSpot:
             created.setdefault("properties", {})["amount"] = amount
         return created
 
-    def fill_deal_amount(self, deal: dict, amount: str) -> bool:
+    def fill_deal_amount(
+        self,
+        deal: dict,
+        amount: str,
+        ev: Engagement | None = None,
+        contact: dict | None = None,
+    ) -> bool:
         """PATCH amount only when the live deal amount is empty. Never invent."""
+        if self._is_excluded(ev, contact):
+            logger.info("skip hubspot amount write for excluded person")
+            return False
         hint = intelligence.amount_to_write((deal.get("properties") or {}).get("amount"), amount)
         if not hint or not deal.get("id"):
             return False

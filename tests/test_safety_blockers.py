@@ -26,7 +26,7 @@ from crmbrain.reconcile import (
     reeval_discovery_scheduled,
     run as reconcile_run,
 )
-from crmbrain.sources.allo import fetch_items_since
+from crmbrain.sources.cube_acr import CubeAuthError, resolve_drive_auth
 from crmbrain.sources.gmail_scan import mail_queries
 from tests.test_crm_gating import FakeHubSpot, make_settings
 from tests.test_qa_fixes import _gcal_event
@@ -332,21 +332,23 @@ def test_record_freshness_keeps_prior_last_item_at(tmp_path):
     assert kept == stamp
 
 
-def test_calendar_401_and_missing_allo_are_warnings_not_errors():
+def test_calendar_401_and_missing_cube_auth_are_warnings_not_errors():
     report = CycleReport()
     _stale_source_warning(
         report,
         "calendar",
         "calendar api 401 — grant Calendar readonly scope",
     )
-    _stale_source_warning(report, "allo", "ALLO_API_KEY missing")
+    _stale_source_warning(report, "cube_acr", "drive.readonly scope or GOOGLE_API_KEY missing")
     assert cycle_status(report) == "ok"
     assert report.errors == []
     assert any(w.startswith("calendar:") for w in report.warnings)
-    assert any(w.startswith("allo:") for w in report.warnings)
-    errors: list[str] = []
-    fetch_items_since(make_settings(allo_key=""), datetime.now(timezone.utc), errors=errors)
-    assert errors == []
+    assert any(w.startswith("cube_acr:") for w in report.warnings)
+    try:
+        resolve_drive_auth(make_settings())
+        raise AssertionError("expected CubeAuthError")
+    except CubeAuthError as exc:
+        assert "GOOGLE_API_KEY" in str(exc) or "drive.readonly" in str(exc)
 
 
 def test_hubspot_search_is_not_a_mutation():
@@ -399,7 +401,6 @@ def test_cycle_run_dry_run_zero_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda *a, **k: [])
     monkeypatch.setattr("crmbrain.cycle.smartlead.scan", lambda *a, **k: [])
     monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda *a, **k: [])
-    monkeypatch.setattr("crmbrain.cycle.allo.scan", lambda *a, **k: [])
     monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan_people", lambda *a, **k: [])
     monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan", lambda *a, **k: [])
     enrich = MagicMock(side_effect=AssertionError("enrichment called"))

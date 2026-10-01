@@ -98,7 +98,7 @@ One brief per call, about two hours before, emailed to `joshua@salesglidergrowth
 
 Full cycle:
 
-1. Reads today's Cube ACR folder — prefers `*-transcript.docx`
+1. Reads Cube ACR via Drive API v3 (day folders, `modifiedTime` lookback) — prefers `*-transcript.docx`, exports Google Docs as text. Missing `drive.readonly` / `GOOGLE_API_KEY` is a stale-source warning, not a silent present.
 2. Pulls that day's Fireflies
 3. Pulls positive SmartLead replies (SalesGlider key only) — ticker only unless already in HubSpot
 4. Pulls HeyReach conversations and RVM callbacks — ticker only unless already in HubSpot
@@ -111,7 +111,7 @@ Full cycle:
 11. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
 12. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 13. Reconciles HubSpot to the per-person evidence timeline (create / restore / advance / regress). Upcoming Calendar events are always scanned (next 30 days), not just the email lookback. Low-confidence meetings go to `crmbrain.review_queue`.
-14. Alarms in the cycle report when Gmail, Fireflies, Calendar, Allo, or Smartlead has not produced data in more than two business days.
+14. Alarms in the cycle report when Gmail, Fireflies, Calendar, Cube ACR, or Smartlead has not produced data in more than two business days. Allo is not in the cycle (calls live in Cube).
 
 ## Run locally
 
@@ -122,11 +122,14 @@ pip install -r requirements.txt
 cp .env.example .env   # fill values
 python -m crmbrain cycle
 python -m crmbrain cycle --dry-run
+python -m crmbrain google-scopes   # granted Google scopes, no secrets
 ```
 
 `CRMBRAIN_DRY_RUN=1` is the same as `--dry-run`: HubSpot `/search` reads are allowed; mutations are blocked. Supabase writes are skipped except the `cycle_runs` report JSON (full proposed creates/moves/archives/review items). HeyReach `add_lead`, email-waterfall/enrichment, and briefing sends are skipped.
 
-New env vars: `CRMBRAIN_DRY_RUN`, `INTENT_MIN_CONFIDENCE` (default 0.75), `CALENDAR_UPCOMING_DAYS` (default 30), `ALLO_API_URL` (default `https://api.withallo.com`), `MAX_ARCHIVES_REGRESSIONS` (default 10), `MAX_CREATES` (default 10), `MAX_STAGE_MOVES` (default 20), `MAX_CHANGE_FRACTION` (default 0.15). Allo auth is `Authorization: Api-Key`, not Bearer.
+New env vars: `CRMBRAIN_DRY_RUN`, `INTENT_MIN_CONFIDENCE` (default 0.75), `CALENDAR_UPCOMING_DAYS` (default 30), `GOOGLE_API_KEY` (Cube public-folder fallback), `CUBE_LOOKBACK_DAYS` (default 14), `PERSONAL_NUMBERS`, `NON_DEAL_EMAILS`, `NON_DEAL_NAMES`, `MAX_ARCHIVES_REGRESSIONS` (default 10), `MAX_CREATES` (default 10), `MAX_STAGE_MOVES` (default 20), `MAX_CHANGE_FRACTION` (default 0.15).
+
+Google scopes: Calendar already uses `calendar.readonly` on Calendar API v3. Cube prefers the existing Gmail refresh token once it also has `drive.readonly`; otherwise `GOOGLE_API_KEY`. `python -m crmbrain google-scopes` reports granted scopes via tokeninfo without printing tokens.
 
 Write budget: over a per-kind cap, remaining writes go to `review_queue` with reason `cap`. If more than 15% of open deals would change in one cycle, all reconcile writes abort and the report is flagged. POC/pilot hints go to review (`poc_hint`) and never write Signed. Signed requires a completed non-free PandaDoc/DocuSign document or a payment. Calendar create uses the intent classifier (not title keywords); low-confidence Josh 1:1s go to review.
 

@@ -55,6 +55,15 @@ DISCOVERY_HINTS = (
     "intro call",
     "salesglider",
 )
+# Cube/Fireflies deal-create: word-boundary only. No generic campaign/leads/roof.
+STRICT_DISCOVERY_HINTS = (
+    "intro",
+    "discovery",
+    "pricing",
+    "proposal",
+    "contract",
+    "retainer",
+)
 SALESGLIDER_INTRO_HINTS = ("salesglider intro", "sg intro")
 FAMILY_ONLY_HINTS = (
     "love you",
@@ -152,8 +161,8 @@ def is_discovery_meeting(ev: Engagement) -> bool:
     return any(h in _blob(ev) for h in DISCOVERY_HINTS)
 
 
-def is_cube_business_discovery(ev: Engagement) -> bool:
-    """Real Cube ACR disco: transcript.docx text, not HTML scrape, not family chat."""
+def cube_transcript_usable(ev: Engagement) -> bool:
+    """Real Cube transcript, not HTML scrape or family chat."""
     text = (ev.transcript or ev.summary or "").strip()
     if len(text) < 80:
         return False
@@ -163,11 +172,106 @@ def is_cube_business_discovery(ev: Engagement) -> bool:
     if extra.get("transcript_kind") == "html_txt":
         return False
     low = text.lower()
-    if is_discovery_meeting(ev):
-        return True
     if any(x in low for x in FAMILY_ONLY_HINTS) and not any(x in low for x in BUSINESS_HINTS):
         return False
     return True
+
+
+CONFIDENT_NO_INTENTS = frozenset(
+    {"day_job", "vendor", "mentor", "recruiter", "learning", "personal"}
+)
+HELD_CALL_SOURCES = frozenset({"cube_acr", "fireflies"})
+BOOKED_MEETING_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo", "gmail"})
+
+
+def cube_has_sales_intent(
+    ev: Engagement,
+    decision=None,
+    min_confidence: float = 0.75,
+) -> bool:
+    """Strict discovery hints or a confident Gemini yes. Confident 'no' always wins."""
+    from crmbrain.intent import is_confident_non_sales, is_confident_sales
+
+    if decision is None:
+        decision = getattr(ev, "_intent_decision", None)
+    if decision is None:
+        extra = ev.extra or {}
+        if extra.get("intent_no"):
+            return False
+        from crmbrain.intent import heuristic_intent
+
+        decision = heuristic_intent(ev)
+    if is_confident_non_sales(decision, min_confidence):
+        return False
+    if getattr(decision, "intent", "") in CONFIDENT_NO_INTENTS and decision.verdict == "no":
+        return False
+    blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}"
+    if has_word_hint(blob, STRICT_DISCOVERY_HINTS):
+        return True
+    extra = ev.extra or {}
+    if extra.get("intent_gemini_yes"):
+        return True
+    if getattr(decision, "via", "heuristic") == "gemini" and is_confident_sales(decision, min_confidence):
+        return True
+    return False
+
+
+def contact_is_prospect(contact: dict | None, deals: list[dict] | None = None) -> bool:
+    """Open pre-sale deal and no Signed/Paid. crm_source alone does not count."""
+    if not contact:
+        return False
+    if has_closed_won_deal(deals):
+        return False
+    allowed = PRE_SALE_STAGES | {STAGE["proposal_sent"]}
+    for deal in live_open_deals(deals or []):
+        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        if stage in allowed:
+            return True
+    return False
+
+
+def has_paperwork_evidence(ev: Engagement) -> bool:
+    """A real proposal/contract/invoice document — not the words in a call."""
+    extra = ev.extra or {}
+    if extra.get("document_id") or extra.get("document_name"):
+        return True
+    return False
+
+
+def closed_won_notes_only(ev: Engagement, deals: list[dict] | None) -> bool:
+    """Paid/Signed contacts: Cube/Fireflies notes only unless new paperwork."""
+    if ev.source not in {"cube_acr", "fireflies"}:
+        return False
+    return has_closed_won_deal(deals)
+
+
+def is_cube_business_discovery(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
+    """Held Discovery only for sales intent, or a 1:1 with an existing prospect.
+
+    Routine client/partner calls must not create deals.
+    """
+    if not cube_transcript_usable(ev):
+        return False
+    return held_call_may_open_deal(ev, already_prospect=already_prospect)
+
+
+def held_call_may_open_deal(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
+    """Cube/Fireflies may open a deal only on sales intent or an existing prospect."""
+    sales = cube_has_sales_intent(ev)
+    if is_client_context_ev(ev) and not sales:
+        return False
+    if sales:
+        return True
+    if already_prospect is None:
+        already_prospect = bool((ev.extra or {}).get("already_prospect"))
+    return bool(already_prospect)
+
+
+def only_held_call_evidence(engagements: list) -> bool:
+    """True when the person's meeting evidence is Cube/Fireflies only."""
+    sources = {getattr(ev, "source", "") for ev in engagements or []}
+    meeting = {s for s in sources if s in BOOKED_MEETING_SOURCES}
+    return bool(meeting) and meeting <= HELD_CALL_SOURCES
 
 
 POC_HINTS = (
