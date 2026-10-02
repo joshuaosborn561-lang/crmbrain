@@ -79,25 +79,21 @@ MENTOR_HINTS = (
     "recurring 1:1",
 )
 RECRUITER_HINTS = ("recruiter", "recruiting", "talent acquisition")
+# Josh is the employer/buyer only. Bare "hiring" / "cold caller" / "paid trial"
+# are ICP language (staffing firms, outbound prospects) and must not fire.
 HIRE_HINTS = (
     "contractor agreement",
     "contractor-agreement",
-    "paid trial",
-    "30-day trial",
-    "30 day trial",
+    "i'm hiring you",
+    "i am hiring you",
+    "josh is hiring you",
     "josh is hiring",
-    "i'm hiring",
-    "i am hiring",
-    "we're hiring",
-    "we are hiring",
-    "hiring",
-    "cold caller",
-    "hiring sdr",
-    "hiring caller",
-    "hiring callers",
-    "recruiting sdr",
-    "recruiting caller",
-    "recruiting callers",
+    "we'd pay you",
+    "we would pay you",
+    "i'd pay you",
+    "i would pay you",
+    "your trial with salesglider as a caller",
+    "trial with salesglider as a caller",
 )
 POC_HINTS = (
     "poc",
@@ -122,7 +118,8 @@ with a meeting booked/held OR an active proposal/contract/POC/invoice conversati
 
 NOT a sales opportunity:
 - Josh is the buyer, learner, or networker (example: Cynthia Hernandez / Chorbie "Marketing Masterclass")
-- Josh is hiring or contracting (example: Gabriel Lopez / rocketbox cold caller; SOWs, contractor agreements, paid trials, recruiting callers/SDRs). Intent = hire. Documents Josh pays are never client paperwork.
+- Josh is hiring or contracting ONLY when Josh is the employer/buyer (e.g. "I'm hiring you", "we'd pay you", contractor agreement, "your trial with SalesGlider as a caller"). Intent = hire.
+- A prospect saying they are hiring staff, or that their cold caller / SDR is not working, is still a sales opportunity. Never mark those hire.
 - Personal/friend meetings (example: Alex Branning, arranged by text)
 - Mentors (example: recurring "Mark/Josh" call)
 - Vendors/partners (example: Seth Kingdon, SEO partner)
@@ -146,7 +143,7 @@ Rules:
 - verdict=review when unsure. Never invent a deal.
 - amount is USD digits only when THIS deal's price is clearly stated. Empty if unsure.
 - No free-POC language in reason text.
-- hire/contractor when Josh is the employer or buyer, even if a Calendly intro is booked.
+- hire/contractor only when Josh is clearly the employer or buyer. Never from "we're hiring" or "cold caller" alone.
 """
 
 
@@ -249,7 +246,7 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             confidence=0.9,
             reason="Vendor or partner, not a prospect",
         )
-    hire_hit = has_word_hint(blob, HIRE_HINTS) or next((h for h in HIRE_HINTS if h in blob), "")
+    hire_hit = next((h for h in HIRE_HINTS if h in blob), "")
     if hire_hit:
         return IntentDecision(
             verdict="no",
@@ -421,10 +418,64 @@ def is_confident_no_intent(decision: IntentDecision, min_confidence: float = 0.7
     return is_confident_non_sales(decision, min_confidence) and (decision.intent or "") in CONFIDENT_NO_INTENTS
 
 
+def _cohort(ev: Engagement) -> list[Engagement]:
+    group = getattr(ev, "_person_events", None)
+    if group:
+        return list(group)
+    return [ev]
+
+
+def is_calendly_booking(ev: Engagement) -> bool:
+    extra = ev.extra or {}
+    if ev.source == "calendly":
+        return True
+    if extra.get("create_new") and extra.get("event_type"):
+        return True
+    return "calendly" in f"{ev.raw_subject} {extra.get('from') or ''}".lower()
+
+
+def has_client_commerce(ev: Engagement) -> bool:
+    """Completed non-free client paper or a payment — never swallowed by hire no."""
+    from crmbrain.documents import is_payment_mail, looks_free_document, looks_josh_pays_document
+
+    extra = ev.extra or {}
+    doc_name = str(extra.get("document_name") or "")
+    subject = ev.raw_subject or ""
+    body = ev.summary or ""
+    if looks_josh_pays_document(subject, body, doc_name):
+        return False
+    if ev.stage_hint in {STAGE["signed"], STAGE["paid"]}:
+        if looks_free_document(subject, body, doc_name):
+            return False
+        return True
+    if extra.get("document_id") or doc_name:
+        if looks_free_document(subject, body, doc_name):
+            return False
+        return True
+    sender = str(extra.get("from") or "")
+    if is_payment_mail(subject, sender, body):
+        return True
+    blob = f"{subject} {body}".lower()
+    return "you received a payment" in blob or "payment received" in blob
+
+
+def person_has_client_commerce(ev: Engagement) -> bool:
+    return any(has_client_commerce(item) for item in _cohort(ev))
+
+
+def person_has_booking_or_commerce(ev: Engagement) -> bool:
+    return any(is_calendly_booking(item) or has_client_commerce(item) for item in _cohort(ev))
+
+
 def person_blocks_deal(ev: Engagement, settings: Settings | None = None) -> bool:
+    """Confident listed no, unless a client document/payment must still apply."""
     min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
     decision = getattr(ev, "_person_intent", None)
-    return isinstance(decision, IntentDecision) and is_confident_no_intent(decision, min_c)
+    if not isinstance(decision, IntentDecision) or not is_confident_no_intent(decision, min_c):
+        return False
+    if person_has_client_commerce(ev):
+        return False
+    return True
 
 
 def _merged_engagement(events: list[Engagement]) -> Engagement:
@@ -483,4 +534,5 @@ def attach_person_intent(settings: Settings | None, events: list[Engagement]) ->
         out[key] = winner
         for ev in evs:
             ev._person_intent = winner
+            ev._person_events = evs
     return out

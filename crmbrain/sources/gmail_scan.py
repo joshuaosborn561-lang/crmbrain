@@ -57,7 +57,8 @@ def people_queries(settings: Settings) -> tuple[str, ...]:
     )
 
 
-MAX_GMAIL_PEOPLE = 40
+MAX_GMAIL_PEOPLE = 80
+GMAIL_PEOPLE_SEARCH_MAX = 80
 
 SYSTEM_EMAIL_HINTS = (
     "salesglider",
@@ -420,15 +421,115 @@ def counterpart_from_headers(sender: str, to: str, cc: str = "") -> tuple[str, s
     return "", "", ""
 
 
-def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
-    """Josh emailed someone, or a real person emailed Josh. That is engagement."""
+def _overflow_engagement(row: dict) -> Engagement:
+    occurred = None
+    raw = row.get("occurred_at")
+    if raw:
+        try:
+            occurred = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            occurred = None
+        if occurred and occurred.tzinfo is None:
+            occurred = occurred.replace(tzinfo=timezone.utc)
+    extra = dict(row.get("extra") or {})
+    extra["skip_lookback"] = True
+    extra["gmail_overflow"] = True
+    return Engagement(
+        source="gmail_person",
+        external_id=str(row.get("external_id") or ""),
+        occurred_at=occurred,
+        email=str(row.get("email") or ""),
+        first_name=str(row.get("first_name") or ""),
+        last_name=str(row.get("last_name") or ""),
+        name=str(row.get("name") or ""),
+        domain=str(row.get("domain") or ""),
+        company=str(row.get("company") or ""),
+        raw_subject=str(row.get("raw_subject") or ""),
+        summary=str(row.get("summary") or ""),
+        extra=extra,
+    )
+
+
+def _overflow_row(ev: Engagement) -> dict:
+    return {
+        "external_id": ev.external_id,
+        "email": ev.email,
+        "first_name": ev.first_name,
+        "last_name": ev.last_name,
+        "name": ev.name,
+        "domain": ev.domain,
+        "company": ev.company,
+        "raw_subject": ev.raw_subject,
+        "summary": ev.summary,
+        "occurred_at": ev.occurred_at.isoformat() if ev.occurred_at else None,
+        "extra": ev.extra or {},
+    }
+
+
+def _people_rank(ev: Engagement, hubspot, known_emails: set[str]) -> tuple:
+    email = (ev.email or "").strip().lower()
+    known = 1 if email and email in known_emails else 0
+    overflow = 1 if (ev.extra or {}).get("gmail_overflow") or (ev.extra or {}).get("skip_lookback") else 0
+    in_crm = 0
+    has_deal = 0
+    has_meeting = known
+    if hubspot and email and hasattr(hubspot, "find_contact"):
+        try:
+            contact = hubspot.find_contact(email=email)
+        except Exception:
+            contact = None
+        if contact:
+            in_crm = 1
+            cid = contact.get("id")
+            if cid and hasattr(hubspot, "open_deals_for_contact"):
+                try:
+                    has_deal = 1 if hubspot.open_deals_for_contact(cid) else 0
+                except Exception:
+                    has_deal = 0
+            if hasattr(hubspot, "contact_has_meetings") and cid:
+                try:
+                    if hubspot.contact_has_meetings(cid):
+                        has_meeting = 1
+                except Exception:
+                    pass
+    occurred = ev.occurred_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (has_deal, has_meeting, in_crm, overflow, occurred)
+
+
+def scan_people(
+    settings: Settings,
+    gmail: Gmail,
+    hubspot=None,
+    memory=None,
+    known_emails: set[str] | None = None,
+    report=None,
+) -> list[Engagement]:
+    """Josh emailed someone, or a real person emailed Josh. That is engagement.
+
+    Read Sent and Inbox fully, then keep HubSpot-known / meeting people first.
+    Overflow is persisted for the next run with skip_lookback so lookback cannot drop it.
+    """
     seen: set[str] = set()
     seen_emails: set[str] = set()
-    out: list[Engagement] = []
+    candidates: list[Engagement] = []
+    known = {e.strip().lower() for e in (known_emails or set()) if e}
+    if hubspot:
+        known |= {e.lower() for e in (getattr(hubspot, "scheduled_attendee_emails", None) or set())}
+        known |= {e.lower() for e in (getattr(hubspot, "recent_attendee_emails", None) or set())}
+
+    if memory and hasattr(memory, "get_gmail_people_overflow"):
+        for row in memory.get_gmail_people_overflow():
+            ev = _overflow_engagement(row)
+            email = (ev.email or "").strip().lower()
+            if not email or is_josh_address(email) or email in seen_emails:
+                continue
+            if ev.external_id:
+                seen.add(ev.external_id)
+            seen_emails.add(email)
+            candidates.append(ev)
+
     for query in people_queries(settings):
-        for stub in gmail.search(query, max_results=40):
-            if len(out) >= MAX_GMAIL_PEOPLE:
-                return out
+        for stub in gmail.search(query, max_results=GMAIL_PEOPLE_SEARCH_MAX):
             mid = stub["id"]
             if mid in seen:
                 continue
@@ -451,7 +552,7 @@ def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
                 continue
             seen_emails.add(email)
             domain = email.split("@")[1] if "@" in email else ""
-            out.append(
+            candidates.append(
                 Engagement(
                     source="gmail_person",
                     external_id=mid,
@@ -466,4 +567,14 @@ def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
                     summary=msg.get("snippet", "")[:400],
                 )
             )
-    return out
+
+    ranked = sorted(candidates, key=lambda ev: _people_rank(ev, hubspot, known), reverse=True)
+    selected = ranked[:MAX_GMAIL_PEOPLE]
+    overflow = ranked[MAX_GMAIL_PEOPLE:]
+    if memory and hasattr(memory, "set_gmail_people_overflow"):
+        memory.set_gmail_people_overflow([_overflow_row(ev) for ev in overflow])
+    if report is not None:
+        report.gmail_people_overflow = len(overflow)
+        if overflow:
+            report.warnings.append(f"gmail_person overflow: {len(overflow)}")
+    return selected

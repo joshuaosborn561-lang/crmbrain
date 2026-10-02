@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 import requests
 
 from crmbrain.config import STAGE, is_josh_address
-from crmbrain.cycle import _handle_engagement, apply_gmail_stage_update, run as cycle_run
+from crmbrain.cycle import (
+    _handle_engagement,
+    apply_gmail_stage_update,
+    cycle_status,
+    process_exit_code,
+    run as cycle_run,
+)
 from crmbrain.documents import looks_josh_pays_document, stage_from_signature_mail
 from crmbrain.hubspot import HubSpot, MAX_READ_RETRIES
 from crmbrain.intent import INTENT_PROMPT, attach_person_intent, heuristic_intent
@@ -49,8 +55,8 @@ def _gabriel_fireflies() -> Engagement:
         name="Gabriel Lopez",
         raw_subject="Gabriel Lopez and Joshua Osborn",
         transcript=(
-            "Josh is hiring Gabriel Lopez as a cold caller for a 30-day paid trial "
-            "SDR contractor role. Rocketbox. This is a recruiting interview, not a client."
+            "Josh is hiring you, Gabriel, as a caller. We'd pay you for a contractor "
+            "agreement / your trial with SalesGlider as a caller. Rocketbox. Not a client."
         ),
         extra={"skip_lookback": True},
         occurred_at=datetime(2026, 10, 2, 16, 0, tzinfo=timezone.utc),
@@ -68,7 +74,7 @@ def test_hire_intent_in_heuristic_and_gemini_prompt():
         email="sdr@example.com",
         first_name="Ada",
         last_name="Caller",
-        transcript="Josh is hiring a cold caller for a 30-day paid trial SDR seat.",
+        transcript="Josh is hiring you for a contractor agreement. We'd pay you as a caller.",
         raw_subject="Ada Caller and Joshua Osborn",
     )
     decision = heuristic_intent(ev)
@@ -84,11 +90,12 @@ def test_gabriel_lopez_calendly_plus_fireflies_hire_creates_no_deal(tmp_path):
     assert getattr(cal, "_person_intent").intent == "hire"
     hs = FakeHubSpot()
     report = CycleReport()
+    memory = Memory(settings, data_dir=tmp_path)
     apply_gmail_stage_update(
         cal,
         settings,
         hs,
-        Memory(settings, data_dir=tmp_path),
+        memory,
         None,
         report,
         held_events=[ff],
@@ -99,6 +106,7 @@ def test_gabriel_lopez_calendly_plus_fireflies_hire_creates_no_deal(tmp_path):
     assert not any(w[0] == "upsert_contact" for w in hs.writes)
     assert report.review_queue
     assert any("hire" in s for s in report.skipped)
+    assert not memory.already_processed("gmail", "cal-gabriel")
 
 
 def test_gabriel_lopez_cycle_creates_no_deal(tmp_path, monkeypatch):
@@ -330,3 +338,179 @@ def test_hubspot_search_429_exhausted_still_raises(monkeypatch):
     except requests.HTTPError:
         pass
     assert calls["n"] == MAX_READ_RETRIES + 1
+
+
+def test_staffing_hiring_nurses_stays_on_sales_path(tmp_path):
+    ev = Engagement(
+        source="calendly",
+        external_id="cal-staff",
+        email="nina@staffingpro.com",
+        first_name="Nina",
+        last_name="Reyes",
+        company="Staffing Pro",
+        raw_subject="New Event: Nina Reyes - SalesGlider Intro",
+        summary="We're hiring 20 nurses this quarter and need owner meetings.",
+        extra={"event_type": "SalesGlider Intro"},
+    )
+    decision = heuristic_intent(ev)
+    assert decision.intent != "hire"
+    assert decision.verdict == "yes"
+    hs, _, report = _handle_via(tmp_path, ev)
+    assert hs.deals
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
+    assert not any("hire" in s for s in report.skipped)
+
+
+def test_msp_cold_caller_not_working_stays_on_sales_path(tmp_path):
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-msp",
+        email="rob@cyberguard360.com",
+        first_name="Robert",
+        last_name="Lawson",
+        company="CyberGuard360",
+        raw_subject="Robert Lawson and Joshua Osborn",
+        transcript=(
+            "This is a discovery call. Our cold caller isn't working. "
+            "We want SalesGlider to book meetings with MSP owners."
+        ),
+    )
+    decision = heuristic_intent(ev)
+    assert decision.intent != "hire"
+    assert decision.verdict == "yes"
+    hs, _, report = _handle_via(tmp_path, ev)
+    assert hs.deals
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
+    assert not any("hire" in s for s in report.skipped)
+
+
+def _handle_via(tmp_path, ev, hs=None):
+    settings = make_settings()
+    memory = Memory(settings, data_dir=tmp_path)
+    report = CycleReport()
+    hs = hs or FakeHubSpot()
+    _handle_engagement(ev, settings, hs, memory, None, report)
+    return hs, memory, report
+
+
+def test_client_paid_trial_pandadoc_reaches_signed():
+    assert not looks_josh_pays_document(
+        "Document completed",
+        "Paid Trial / Pilot with SalesGlider has been signed. Investment $3000.",
+        "Paid Trial with SalesGlider",
+    )
+    stage, amount, _name = stage_from_signature_mail(
+        "Document completed",
+        "PandaDoc <noreply@pandadoc.com>",
+        "has been completed",
+        "Paid Trial / Pilot with SalesGlider has been signed. Investment $3000.",
+    )
+    assert stage == STAGE["signed"]
+    assert amount == "3000"
+
+
+def test_hire_no_does_not_override_client_document(tmp_path):
+    settings = make_settings()
+    ff = Engagement(
+        source="fireflies",
+        external_id="ff-hire-doc",
+        email="pat@clientco.com",
+        first_name="Pat",
+        last_name="Lee",
+        transcript="Josh is hiring you? Wait no — we also walked the Growth Partners agreement.",
+        raw_subject="Pat Lee and Joshua Osborn",
+    )
+    doc = Engagement(
+        source="gmail",
+        external_id="pd-client",
+        email="pat@clientco.com",
+        first_name="Pat",
+        last_name="Lee",
+        raw_subject="Document completed: Growth Partners Agreement",
+        summary="has been completed. Investment $21000.",
+        stage_hint=STAGE["signed"],
+        extra={"document_name": "Growth Partners Agreement", "document_id": "pd-gp-1"},
+    )
+    attach_person_intent(settings, [ff, doc])
+    contact = {
+        "id": "c-pat",
+        "properties": {"email": "pat@clientco.com", "firstname": "Pat", "lastname": "Lee"},
+    }
+    hs = FakeHubSpot([contact])
+    memory = Memory(settings, data_dir=tmp_path)
+    report = CycleReport()
+    apply_gmail_stage_update(doc, settings, hs, memory, None, report, held_events=[ff])
+    assert any(w[0] == "upsert_deal" and w[2] == STAGE["signed"] for w in hs.writes)
+    assert report.review_queue
+    assert not memory.already_processed("gmail", "pd-client")
+
+
+def test_gmail_people_reads_both_queries_prioritizes_crm_and_carries_overflow(tmp_path):
+    class FakeGmail:
+        def search(self, query, max_results=80):
+            prefix = "s" if "in:sent" in query else "i"
+            return [{"id": f"{prefix}{n}"} for n in range(50)]
+
+        def get(self, mid):
+            n = int(mid[1:])
+            email = "crm@known.com" if mid == "i0" else f"{mid}@example.com"
+            return {
+                "id": mid,
+                "internalDate": str(1_728_000_000_000 + n),
+                "snippet": "hello",
+                "_headers": {
+                    "from": f"Person <{email}>",
+                    "to": "Joshua <joshua@salesglidergrowth.com>",
+                    "subject": f"thread {mid}",
+                },
+            }
+
+        def headers_map(self, msg):
+            return msg["_headers"]
+
+    gmail = FakeGmail()
+    settings = make_settings()
+    memory = Memory(settings, data_dir=tmp_path)
+    hs = FakeHubSpot(
+        [{"id": "c-known", "properties": {"email": "crm@known.com", "firstname": "Known"}}]
+    )
+    hs.deals.append({"id": "d1", "contact_id": "c-known", "properties": {"dealstage": STAGE["discovery_scheduled"]}})
+    report = CycleReport()
+    first = gmail_scan.scan_people(settings, gmail, hubspot=hs, memory=memory, report=report)
+    emails = {ev.email for ev in first}
+    assert "crm@known.com" in emails
+    assert len(first) == gmail_scan.MAX_GMAIL_PEOPLE
+    assert report.gmail_people_overflow == 20
+    assert memory.get_gmail_people_overflow()
+    overflow_emails = {row["email"] for row in memory.get_gmail_people_overflow()}
+    assert overflow_emails.isdisjoint(emails)
+
+    class EmptyGmail:
+        def search(self, query, max_results=80):
+            return []
+
+        def get(self, mid):
+            raise AssertionError("should replay overflow, not refetch")
+
+        def headers_map(self, msg):
+            return {}
+
+    report2 = CycleReport()
+    replayed = gmail_scan.scan_people(settings, EmptyGmail(), hubspot=hs, memory=memory, report=report2)
+    assert replayed
+    assert all((ev.extra or {}).get("skip_lookback") for ev in replayed)
+    assert report2.gmail_people_overflow == 0
+
+
+def test_process_exit_code_dry_run_and_hubspot_429():
+    dry = CycleReport(dry_run=True, errors=["gmail: boom"])
+    assert process_exit_code(dry) == 0
+    hs429 = CycleReport()
+    hs429.errors.append("hubspot POST /crm/v3/objects/contacts/search: 429 Too Many Requests api.hubapi.com")
+    assert cycle_status(hs429) == "ok"
+    assert process_exit_code(hs429) == 0
+    sl = CycleReport()
+    sl.errors.append("smartlead campaign 3739758: 429 Client Error: Too Many Requests")
+    assert cycle_status(sl) == "partial"
+    assert process_exit_code(sl) == 1
+

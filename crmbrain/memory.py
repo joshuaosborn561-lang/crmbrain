@@ -572,3 +572,13 @@ class Memory:
                 self._sb_schema("POST", "relationship_facts", json_body=fact)
             except Exception as exc:
                 self._record_error("save_fact", exc)
+
+    def get_gmail_people_overflow(self) -> list[dict]:
+        return list(self._local.get("gmail_people_overflow") or [])
+
+    def set_gmail_people_overflow(self, rows: list[dict]) -> None:
+        if self._skip_side_write("gmail_people_overflow"):
+            self._local["gmail_people_overflow"] = list(rows or [])
+            return
+        self._local["gmail_people_overflow"] = list(rows or [])
+        self.save_local()
