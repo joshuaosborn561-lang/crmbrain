@@ -434,6 +434,10 @@ def is_calendly_booking(ev: Engagement) -> bool:
     return "calendly" in f"{ev.raw_subject} {extra.get('from') or ''}".lower()
 
 
+# Only Josh-as-employer nos may still apply a real client close.
+COMMERCE_OVERRIDE_INTENTS = frozenset({"hire", "recruiter"})
+
+
 def has_client_commerce(ev: Engagement) -> bool:
     """Completed non-free client paper or a payment — never swallowed by hire no."""
     from crmbrain.documents import is_payment_mail, looks_free_document, looks_josh_pays_document
@@ -459,8 +463,38 @@ def has_client_commerce(ev: Engagement) -> bool:
     return "you received a payment" in blob or "payment received" in blob
 
 
+def person_has_signed_or_payment(ev: Engagement) -> bool:
+    """Real close evidence only — not a document mention or mentor/vendor paper."""
+    from crmbrain.documents import looks_free_document, looks_josh_pays_document
+    from crmbrain.evidence import KIND_PAYMENT, KIND_SIGNED, kind_for
+
+    for item in _cohort(ev):
+        extra = item.extra or {}
+        doc_name = str(extra.get("document_name") or "")
+        subject = item.raw_subject or ""
+        body = item.summary or ""
+        if looks_josh_pays_document(subject, body, doc_name):
+            continue
+        if looks_free_document(subject, body, doc_name):
+            continue
+        if kind_for(item) in {KIND_SIGNED, KIND_PAYMENT}:
+            return True
+    return False
+
+
 def person_has_client_commerce(ev: Engagement) -> bool:
     return any(has_client_commerce(item) for item in _cohort(ev))
+
+
+def commerce_overrides_person_no(ev: Engagement, settings: Settings | None = None) -> bool:
+    """Hire/recruiter no yields only to KIND_SIGNED or KIND_PAYMENT."""
+    min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    decision = getattr(ev, "_person_intent", None)
+    if not isinstance(decision, IntentDecision) or not is_confident_no_intent(decision, min_c):
+        return False
+    if (decision.intent or "") not in COMMERCE_OVERRIDE_INTENTS:
+        return False
+    return person_has_signed_or_payment(ev)
 
 
 def person_has_booking_or_commerce(ev: Engagement) -> bool:
@@ -468,12 +502,12 @@ def person_has_booking_or_commerce(ev: Engagement) -> bool:
 
 
 def person_blocks_deal(ev: Engagement, settings: Settings | None = None) -> bool:
-    """Confident listed no, unless a client document/payment must still apply."""
+    """Confident listed no, unless hire/recruiter plus a real client close."""
     min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
     decision = getattr(ev, "_person_intent", None)
     if not isinstance(decision, IntentDecision) or not is_confident_no_intent(decision, min_c):
         return False
-    if person_has_client_commerce(ev):
+    if commerce_overrides_person_no(ev, settings):
         return False
     return True
 
@@ -529,7 +563,10 @@ def _merged_engagement(events: list[Engagement]) -> Engagement:
 
 
 def attach_person_intent(settings: Settings | None, events: list[Engagement]) -> dict[str, IntentDecision]:
-    """Classify each person from all cycle evidence. A confident listed 'no' wins."""
+    """Classify each person from all cycle evidence. A confident listed 'no' wins.
+
+    Reuses a decision already attached on the cohort so Gemini is not called again.
+    """
     groups: dict[str, list[Engagement]] = {}
     for ev in events or []:
         key = _person_key(ev)
@@ -539,7 +576,15 @@ def attach_person_intent(settings: Settings | None, events: list[Engagement]) ->
     min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
     out: dict[str, IntentDecision] = {}
     for key, evs in groups.items():
-        winner: IntentDecision | None = None
+        cached = [getattr(ev, "_person_intent", None) for ev in evs]
+        if cached and all(isinstance(item, IntentDecision) for item in cached):
+            winner = cached[0]
+            out[key] = winner
+            for ev in evs:
+                ev._person_intent = winner
+                ev._person_events = evs
+            continue
+        winner = None
         for ev in evs:
             decision = classify(settings, ev)
             if is_confident_no_intent(decision, min_c):

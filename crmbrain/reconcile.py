@@ -35,6 +35,19 @@ COLD_CREATE_SOURCES = NEVER_OPEN_DEAL_SOURCES | {"gmail", "gmail_person"}
 MEETING_CRM_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo"})
 
 
+def _decision_for(
+    settings: Settings | None, timeline: PersonTimeline, ev: Engagement | None = None
+) -> IntentDecision:
+    """Reuse a person-level decision already attached on this timeline."""
+    ev = ev or representative_engagement(timeline)
+    cached = getattr(ev, "_person_intent", None)
+    if isinstance(cached, IntentDecision):
+        return cached
+    if timeline.engagements:
+        intent.attach_person_intent(settings, list(timeline.engagements))
+    return getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
+
+
 def representative_engagement(timeline: PersonTimeline) -> Engagement:
     if timeline.engagements:
         ranked = sorted(
@@ -194,8 +207,7 @@ def _commit(
     ):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} excluded")
         return False
-    if not getattr(ev, "_person_intent", None) and timeline.engagements:
-        intent.attach_person_intent(None, list(timeline.engagements))
+    _decision_for(None, timeline, ev)
     if intent.person_blocks_deal(ev):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} person_intent_no")
         return False
@@ -256,9 +268,7 @@ def apply_timeline(
     del held_events
     budget = budget or WriteBudget.from_settings(settings)
     ev = representative_engagement(timeline)
-    if timeline.engagements:
-        intent.attach_person_intent(settings, list(timeline.engagements))
-    decision = getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
+    decision = _decision_for(settings, timeline, ev)
     if intent.person_blocks_deal(ev, settings):
         report.skipped.append(f"{timeline.display_name()} {decision.intent}, skip HubSpot")
         _queue_review(
@@ -329,7 +339,7 @@ def apply_timeline(
 
     if intent.is_confident_non_sales(
         decision, settings.intent_min_confidence
-    ) and not intent.person_has_client_commerce(ev):
+    ) and not intent.commerce_overrides_person_no(ev, settings):
         if deal and current not in PROTECTED_STAGES and current not in {STAGE["proposal_sent"]}:
             report.skipped.append(f"{label} non-opportunity ({decision.intent})")
         if not deal:
@@ -338,7 +348,7 @@ def apply_timeline(
 
     if not intent.is_confident_sales(decision, settings.intent_min_confidence):
         _queue_review(memory, report, timeline, decision, dry_run=dry_run)
-        if not intent.person_has_client_commerce(ev):
+        if not intent.commerce_overrides_person_no(ev, settings):
             return decision
 
     if not deal and policy.only_held_call_evidence(timeline.engagements):
@@ -430,11 +440,9 @@ def restore_missing_deals(
             if not policy.contact_has_meeting_evidence(contact, timeline.deals):
                 continue
         ev = representative_engagement(timeline)
-        if timeline.engagements:
-            intent.attach_person_intent(settings, list(timeline.engagements))
+        decision = _decision_for(settings, timeline, ev)
         if ev.source in COLD_CREATE_SOURCES and not evidence.has_meeting_evidence(timeline):
             continue
-        decision = getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
         if intent.person_blocks_deal(ev, settings):
             _queue_review(
                 memory,
@@ -446,7 +454,7 @@ def restore_missing_deals(
             )
             continue
         if not intent.is_confident_sales(decision, settings.intent_min_confidence):
-            if intent.person_has_client_commerce(ev):
+            if intent.commerce_overrides_person_no(ev, settings):
                 pass
             elif decision.verdict != "no":
                 _queue_review(memory, report, timeline, decision, dry_run=dry_run)
@@ -672,16 +680,14 @@ def reeval_discovery_scheduled(
             if deal not in timeline.deals:
                 timeline.deals.append(deal)
         ev = representative_engagement(timeline)
-        if timeline.engagements:
-            intent.attach_person_intent(settings, list(timeline.engagements))
+        decision = _decision_for(settings, timeline, ev)
         if intent.person_blocks_deal(ev, settings):
-            decision = getattr(ev, "_person_intent", None)
             _queue_review(
                 memory,
                 report,
                 timeline,
                 decision,
-                reason=(decision.intent if decision else "person_intent_no"),
+                reason=decision.intent or "person_intent_no",
                 dry_run=dry_run,
             )
             continue
@@ -769,11 +775,9 @@ def _planned_change_count(
     creates = 0
     for timeline in timelines.values():
         ev = representative_engagement(timeline)
-        if timeline.engagements:
-            intent.attach_person_intent(settings, list(timeline.engagements))
+        decision = _decision_for(settings, timeline, ev)
         if intent.person_blocks_deal(ev, settings):
             continue
-        decision = getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
         current = _current_stage(timeline)
         deal = _open_deal(timeline)
         email = timeline.email
@@ -797,7 +801,7 @@ def _planned_change_count(
             changed.add(deal_id)
         elif not deal and target and (
             intent.is_confident_sales(decision, settings.intent_min_confidence)
-            or intent.person_has_client_commerce(ev)
+            or intent.commerce_overrides_person_no(ev, settings)
         ):
             creates += 1
     if calendar_api_ok and hasattr(hs, "iter_deals"):
@@ -858,11 +862,9 @@ def planned_change_person_keys(
         if not _timeline_has_unprocessed(timeline, memory):
             continue
         ev = representative_engagement(timeline)
-        if timeline.engagements:
-            intent.attach_person_intent(settings, list(timeline.engagements))
+        decision = _decision_for(settings, timeline, ev)
         if intent.person_blocks_deal(ev, settings):
             continue
-        decision = getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
         current = _current_stage(timeline)
         deal = _open_deal(timeline)
         email = timeline.email
@@ -884,7 +886,7 @@ def planned_change_person_keys(
             keys.add(timeline.key)
         elif not deal and target and (
             intent.is_confident_sales(decision, settings.intent_min_confidence)
-            or intent.person_has_client_commerce(ev)
+            or intent.commerce_overrides_person_no(ev, settings)
         ):
             if policy.only_held_call_evidence(timeline.engagements) and not (
                 policy.held_call_may_open_deal(ev)

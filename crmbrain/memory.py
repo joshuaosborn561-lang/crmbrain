@@ -28,6 +28,10 @@ def _run_started_stamp(row: dict | None) -> datetime | None:
     return stamp
 
 
+def _overflow_email(row: dict | None) -> str:
+    return str((row or {}).get("email") or "").strip().lower()
+
+
 def _overflow_extra(raw: dict | None) -> dict:
     extra = (raw or {}).get("extra")
     if isinstance(extra, str):
@@ -42,7 +46,7 @@ def _overflow_from_row(row: dict | None) -> dict:
     raw = dict(row or {})
     extra = _overflow_extra(raw)
     return {
-        "email": str(raw.get("email") or ""),
+        "email": _overflow_email(raw),
         "external_id": str(raw.get("external_id") or ""),
         "first_name": str(raw.get("first_name") or ""),
         "last_name": str(raw.get("last_name") or ""),
@@ -625,9 +629,42 @@ class Memory:
                 return local
         return local
 
+    def upsert_gmail_people_overflow(self, rows: list[dict]) -> None:
+        """Merge overflow by email. Never wipe the table before a write succeeds."""
+        payload = [_overflow_from_row(row) for row in (rows or []) if _overflow_email(row)]
+        current = {
+            _overflow_email(row): _overflow_from_row(row)
+            for row in self._local.get("gmail_people_overflow") or []
+            if _overflow_email(row)
+        }
+        for row in payload:
+            current[row["email"]] = row
+        self._local["gmail_people_overflow"] = list(current.values())
+        if self._skip_side_write("gmail_people_overflow"):
+            return
+        self.save_local()
+        if self.use_supabase and payload:
+            try:
+                self._sb_schema(
+                    "POST",
+                    "gmail_people_overflow",
+                    json_body=[_overflow_to_row(row) for row in payload],
+                )
+            except Exception as exc:
+                self._record_error("upsert_gmail_people_overflow", exc)
+
     def set_gmail_people_overflow(self, rows: list[dict]) -> None:
-        payload = [_overflow_from_row(row) for row in (rows or [])]
-        self._local["gmail_people_overflow"] = payload
+        self.upsert_gmail_people_overflow(rows)
+
+    def drop_gmail_people_overflow(self, email: str) -> None:
+        key = (email or "").strip().lower()
+        if not key:
+            return
+        self._local["gmail_people_overflow"] = [
+            row
+            for row in self._local.get("gmail_people_overflow") or []
+            if _overflow_email(row) != key
+        ]
         if self._skip_side_write("gmail_people_overflow"):
             return
         self.save_local()
@@ -636,13 +673,7 @@ class Memory:
                 self._sb_schema(
                     "DELETE",
                     "gmail_people_overflow",
-                    params={"email": "not.is.null"},
+                    params={"email": f"eq.{key}"},
                 )
-                if payload:
-                    self._sb_schema(
-                        "POST",
-                        "gmail_people_overflow",
-                        json_body=[_overflow_to_row(row) for row in payload],
-                    )
             except Exception as exc:
-                self._record_error("set_gmail_people_overflow", exc)
+                self._record_error("drop_gmail_people_overflow", exc)
