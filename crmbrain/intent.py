@@ -42,12 +42,11 @@ SALES_HINTS = (
     "onboarding",
     "growth partners",
 )
+# Josh-is-the-student only. "how do you" / "learn about" are discovery talk.
 LEARNING_HINTS = (
     "marketing masterclass",
     "masterclass",
     "chorbie",
-    "how do you",
-    "learn about",
     "asking about marketing",
 )
 DAY_JOB_HINTS = (
@@ -65,9 +64,9 @@ PERSONAL_HINTS = (
     "birthday",
     "family",
 )
+# Josh's supplier. Bare "vendor" in a Cube transcript is prospect language.
 VENDOR_HINTS = (
     "seo partner",
-    "vendor",
     "partner sync",
     "seth kingdon",
 )
@@ -127,6 +126,9 @@ NOT a sales opportunity:
 - Josh's Insight/Cisco day job (insight.com, DotsTech, "Meraki Discussion")
 - Existing clients' internal ops calls (no new commercial paper)
 
+Do NOT mark learning because someone said "how do you" or "learn about" — those are normal discovery questions. learning = Josh is the student (Chorbie / Marketing Masterclass only).
+Do NOT mark vendor because the word "vendor" appears in a sales call (prospects talk about their vendors). vendor = Josh's supplier (Seth Kingdon / SEO partner) only.
+
 Return ONLY JSON:
 {
   "verdict": "yes"|"no"|"review",
@@ -165,6 +167,48 @@ def _blob(ev: Engagement) -> str:
         )
         if x
     ).lower()
+
+
+def has_sales_context(ev: Engagement) -> bool:
+    """True when the thread is a SalesGlider opportunity, not Josh learning/buying."""
+    blob = _blob(ev)
+    if has_word_hint(blob, SALES_HINTS) or has_word_hint(blob, STRICT_DISCOVERY_HINTS):
+        return True
+    extra = ev.extra or {}
+    if extra.get("document_id") or extra.get("document_name") or extra.get("create_new"):
+        return True
+    if ev.stage_hint in {
+        STAGE["signed"],
+        STAGE["paid"],
+        STAGE["proposal_sent"],
+        STAGE["discovery_scheduled"],
+        STAGE["discovery_completed"],
+    }:
+        return True
+    if ev.source == "calendly":
+        return True
+    return False
+
+
+def _veto_learning_vendor_in_sales_context(ev: Engagement, decision: IntentDecision) -> IntentDecision:
+    if decision.verdict != "no" or (decision.intent or "") not in {"learning", "vendor"}:
+        return decision
+    if not has_sales_context(ev):
+        return decision
+    name = (ev.display_name() or ev.name or "").strip().lower()
+    blob = _blob(ev)
+    for person, _intent in KNOWN_NON_SALES_PEOPLE.items():
+        if person in name or person in blob:
+            return decision
+    return IntentDecision(
+        verdict="review",
+        intent="",
+        confidence=min(decision.confidence, 0.4),
+        reason="Sales context — not learning/vendor",
+        stage=decision.stage,
+        amount=decision.amount,
+        via=decision.via,
+    )
 
 
 def _email_domain(email: str) -> str:
@@ -225,7 +269,7 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             confidence=0.92,
             reason="Insight/Cisco/Meraki day-job context",
         )
-    if any(h in blob for h in LEARNING_HINTS):
+    if any(h in blob for h in LEARNING_HINTS) and not has_sales_context(ev):
         return IntentDecision(
             verdict="no",
             intent="learning",
@@ -239,7 +283,7 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             confidence=0.9,
             reason="Mentor / recurring Mark-Josh style call",
         )
-    if any(h in blob for h in VENDOR_HINTS):
+    if any(h in blob for h in VENDOR_HINTS) and not has_sales_context(ev):
         return IntentDecision(
             verdict="no",
             intent="vendor",
@@ -328,6 +372,7 @@ def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
     if isinstance(cached, IntentDecision):
         return cached
     decision = heuristic_intent(ev)
+    decision = _veto_learning_vendor_in_sales_context(ev, decision)
     if decision.verdict == "review" and settings and settings.gemini_key:
         text = _blob(ev)[:8000]
         if text.strip():
@@ -335,6 +380,7 @@ def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
                 model = _gemini_intent(settings, text)
                 decision = _merge_model(decision, model, settings.intent_min_confidence)
                 decision.via = "gemini"
+                decision = _veto_learning_vendor_in_sales_context(ev, decision)
             except Exception:
                 pass
     ev._intent_decision = decision

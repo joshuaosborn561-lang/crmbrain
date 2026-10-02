@@ -9,12 +9,19 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact
+from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact, is_zoom_room_address
 from crmbrain.models import Engagement
 from crmbrain.names import prefer_contact_name
 from crmbrain import intelligence, policy
 
 logger = logging.getLogger(__name__)
+
+
+def _amount_key(raw: object) -> str:
+    try:
+        return f"{float(str(raw or '').replace(',', '').strip()):.2f}"
+    except ValueError:
+        return ""
 
 # Listing contacts for HeyReach backfill can exceed 30s; retry transient reads.
 READ_TIMEOUT = 45
@@ -197,6 +204,8 @@ class HubSpot:
         return resp.json().get("results", [])
 
     def find_contact(self, email: str = "", phone: str = "", name: str = "") -> dict | None:
+        if email and is_zoom_room_address(email):
+            return None
         if email:
             rows = self._search(
                 "contacts",
@@ -410,6 +419,61 @@ class HubSpot:
             [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": token}],
             ["email", "firstname", "lastname", "phone", "company", "crm_source"],
         )
+
+    def find_contact_by_company(self, company: str) -> dict | None:
+        raw = (company or "").strip()
+        if len(raw) < 3:
+            return None
+        rows = self._search(
+            "contacts",
+            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw}],
+            CONTACT_SEARCH_PROPS,
+        )
+        if len(rows) == 1:
+            return rows[0]
+        return None
+
+    def find_deal_by_amount(self, amount: str) -> dict | None:
+        key = _amount_key(amount)
+        if not key:
+            return None
+        rows = self._search(
+            "deals",
+            [{"propertyName": "amount", "operator": "EQ", "value": amount.strip()}],
+            ["dealname", "dealstage", "amount"],
+        )
+        hits = [row for row in rows if _amount_key((row.get("properties") or {}).get("amount")) == key]
+        if len(hits) == 1:
+            return hits[0]
+        if not hits:
+            # HubSpot may store 2875.5 vs 2875.50 — scan open deals when EQ misses.
+            try:
+                for deal in self.iter_deals(["dealname", "dealstage", "amount"]):
+                    if _amount_key((deal.get("properties") or {}).get("amount")) == key:
+                        hits.append(deal)
+            except Exception:
+                hits = []
+            if len(hits) == 1:
+                return hits[0]
+        return None
+
+    def find_contact_for_commerce(self, name: str = "", company: str = "", amount: str = "") -> dict | None:
+        """Match a payment or agreement mail to one CRM contact."""
+        if name:
+            found = self._find_contact_by_name(name)
+            if found:
+                return found
+        if company:
+            found = self.find_contact_by_company(company)
+            if found:
+                return found
+        if amount:
+            deal = self.find_deal_by_amount(amount)
+            if deal and hasattr(self, "contacts_for_deal"):
+                contacts = self.contacts_for_deal(str(deal.get("id") or ""))
+                if len(contacts) == 1:
+                    return contacts[0]
+        return None
 
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
         current = (deal.get("properties") or {}).get("dealstage") or ""

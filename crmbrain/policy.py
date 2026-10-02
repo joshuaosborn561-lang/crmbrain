@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
 
-from crmbrain.config import JOSH_DOMAINS, JOSH_EMAILS, STAGE, is_client_context, now_utc
+from crmbrain.config import JOSH_DOMAINS, JOSH_EMAILS, STAGE, is_client_context, is_zoom_room_address, now_utc
 from crmbrain.intelligence import stage_id
 from crmbrain.models import Engagement
 from crmbrain.names import (
@@ -445,9 +445,15 @@ def choose_deal_action(
         return None
     if current == STAGE["paid"] and target != STAGE["paid"]:
         return None
-    if current == STAGE["signed"] and target == STAGE["proposal_sent"]:
-        if document_matches_deal(deal, ev):
-            return target
+    if current == STAGE["signed"] and target not in {STAGE["signed"], STAGE["paid"]}:
+        return None
+    if (
+        current == STAGE["proposal_sent"]
+        and target == STAGE["discovery_scheduled"]
+        and ev.source == "gmail"
+        and not (ev.extra or {}).get("document_id")
+        and ev.stage_hint not in {STAGE["signed"], STAGE["paid"], STAGE["proposal_sent"]}
+    ):
         return None
     back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
     if not should_move_stage(current, target, back_signal=back):
@@ -600,6 +606,8 @@ def is_system_address_local(email: str) -> bool:
         return True
     domain = _domain_of(low)
     if domain in {"calendar.google.com", "googlemail.com"}:
+        return True
+    if is_zoom_room_address(low):
         return True
     local = low.split("@", 1)[0]
     if local.startswith("noreply") or local.startswith("no-reply") or local.startswith("donotreply"):

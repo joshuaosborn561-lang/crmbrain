@@ -245,7 +245,7 @@ def test_signed_not_moved_to_proposal_without_matching_document():
     )
     assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev) is None
     deal = {"properties": {"document_name": "Growth Partners Agreement"}}
-    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev, deal=deal) == STAGE["proposal_sent"]
+    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev, deal=deal) is None
 
 
 def test_never_create_deal_when_contact_already_paid_or_signed(tmp_path):

@@ -128,10 +128,7 @@ def evidence_move(current: str, target: str, timeline: PersonTimeline, ev: Engag
         return None
     if current == STAGE["paid"]:
         return None
-    if current == STAGE["signed"] and target == STAGE["proposal_sent"]:
-        deal = _open_deal(timeline)
-        if ev and policy.document_matches_deal(deal, ev):
-            return target
+    if current == STAGE["signed"] and target not in {STAGE["paid"], STAGE["signed"]}:
         return None
     if current in PROTECTED_STAGES and target not in {STAGE["paid"], STAGE["signed"]}:
         return None

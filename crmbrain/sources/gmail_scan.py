@@ -12,6 +12,7 @@ from crmbrain.config import (
     is_josh_address,
     is_non_deal_person,
     is_personal,
+    is_zoom_room_address,
     settings_lookback_start,
 )
 from crmbrain.gmail_client import Gmail
@@ -285,8 +286,16 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 report.junk_blocked.append(f"gmail {subject[:80]} (system address)")
                 continue
             if not contact and not create_new:
-                report.junk_blocked.append(f"gmail {subject[:80]} (not in CRM)")
-                continue
+                from crmbrain.documents import commerce_match_fields, is_payment_mail
+
+                payer, company, amount = commerce_match_fields(subject, snippet, body)
+                amount = sig_amount or amount
+                finder = getattr(hubspot, "find_contact_for_commerce", None)
+                if callable(finder) and (is_payment_mail(subject, sender, snippet) or sig_stage or payer or company):
+                    contact = finder(name=payer, company=company, amount=amount)
+                if not contact:
+                    report.junk_blocked.append(f"gmail {subject[:80]} (not in CRM)")
+                    continue
             props = (contact or {}).get("properties") or {}
             if gcal_create and classified is not None:
                 from crmbrain.names import person_name_from_attendee
@@ -334,6 +343,8 @@ def is_system_address(email: str) -> bool:
     if not low or low in JOSH_EMAILS:
         return True
     if any(h in low for h in SYSTEM_EMAIL_HINTS) or any(h in low for h in NOREPLY_HINTS):
+        return True
+    if is_zoom_room_address(low):
         return True
     local, _, domain = low.partition("@")
     if domain in {"calendar.google.com", "googlemail.com"}:
@@ -521,7 +532,7 @@ def scan_people(
         for row in memory.get_gmail_people_overflow():
             ev = _overflow_engagement(row)
             email = (ev.email or "").strip().lower()
-            if not email or is_josh_address(email) or email in seen_emails:
+            if not email or is_josh_address(email) or is_system_address(email) or email in seen_emails:
                 continue
             if ev.external_id:
                 seen.add(ev.external_id)
@@ -534,7 +545,13 @@ def scan_people(
             if mid in seen:
                 continue
             seen.add(mid)
-            msg = gmail.get(mid)
+            try:
+                msg = gmail.get(mid)
+            except Exception as exc:
+                if report is not None:
+                    report.skipped.append(f"gmail_person:{mid} {exc}")
+                    report.warnings.append(f"gmail_person skipped {mid}")
+                continue
             headers = gmail.headers_map(msg)
             first, last, email = counterpart_from_headers(
                 headers.get("from", ""),
@@ -542,7 +559,7 @@ def scan_people(
                 headers.get("cc", ""),
             )
             email = (email or "").strip().lower()
-            if not email or is_josh_address(email):
+            if not email or is_josh_address(email) or is_system_address(email):
                 continue
             if email in seen_emails:
                 continue

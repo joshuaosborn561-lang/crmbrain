@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -156,6 +156,7 @@ class Settings:
     allo_key: str
     lookback_hours: int
     lookback_start_at: datetime | None = None
+    lookback_override: bool = False
     dry_run: bool = False
     intent_min_confidence: float = 0.75
     calendar_upcoming_days: int = 30
@@ -196,6 +197,8 @@ class Settings:
             allo_url=os.getenv("ALLO_API_URL", "https://api.withallo.com"),
             allo_key=os.getenv("ALLO_API_KEY", ""),
             lookback_hours=int(os.getenv("CYCLE_LOOKBACK_HOURS", "36")),
+            lookback_start_at=_parse_lookback_start(os.getenv("CRMBRAIN_LOOKBACK_START", "")),
+            lookback_override=bool(os.getenv("CRMBRAIN_LOOKBACK_START", "").strip()),
             dry_run=os.getenv("CRMBRAIN_DRY_RUN", "").strip().lower() in {"1", "true", "yes"},
             intent_min_confidence=float(os.getenv("INTENT_MIN_CONFIDENCE", "0.75")),
             calendar_upcoming_days=int(os.getenv("CALENDAR_UPCOMING_DAYS", "30")),
@@ -230,6 +233,23 @@ def settings_lookback_start(settings: Settings) -> datetime:
     return lookback_start(settings.lookback_hours, settings.lookback_start_at)
 
 
+def _parse_lookback_start(raw: str) -> datetime | None:
+    """CRMBRAIN_LOOKBACK_START: ISO date (Chicago midnight) or ISO datetime."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            day = date.fromisoformat(text)
+            return datetime(day.year, day.month, day.day, tzinfo=CDT)
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
 def compute_lookback_start(
     settings: Settings,
     last_started_at: datetime | None,
@@ -241,7 +261,12 @@ def compute_lookback_start(
 
     Monday 7am after a Friday 5pm run must include Friday evening. Cap at 7 days
     so a long outage does not replay the whole history.
+
+    CRMBRAIN_LOOKBACK_START (lookback_override) wins and is not capped.
     """
+    if getattr(settings, "lookback_override", False) and settings.lookback_start_at:
+        start = settings.lookback_start_at
+        return start if start.tzinfo else start.replace(tzinfo=timezone.utc)
     now = now or now_utc()
     fallback = now - timedelta(hours=settings.lookback_hours)
     if last_started_at is None:
@@ -307,6 +332,22 @@ def non_deal_names() -> set[str]:
     names = {n.strip().lower() for n in SEEDED_NON_DEAL_NAMES if n.strip()}
     names.update(n.lower() for n in _csv_env("NON_DEAL_NAMES"))
     return names
+
+
+ZOOM_ROOM_DOMAINS = frozenset({"zoomcrc.com", "zoom.com", "zoomgov.com"})
+
+
+def is_zoom_room_address(email: str | None) -> bool:
+    """Zoom room / CRC addresses are rooms, not people."""
+    low = (email or "").strip().lower()
+    if not low or "@" not in low:
+        return False
+    local, domain = low.rsplit("@", 1)
+    if domain in ZOOM_ROOM_DOMAINS or domain.endswith(".zoomcrc.com"):
+        return True
+    if "zoom" in domain and (local.isdigit() or local.startswith("room")):
+        return True
+    return False
 
 
 def is_josh_address(email: str | None) -> bool:

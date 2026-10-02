@@ -188,7 +188,7 @@ def test_goliath_free_sow_is_not_signed_viewed_agreement_is_proposal():
         "id": "g1",
         "properties": {"dealstage": STAGE["signed"], "document_name": "Growth Partners Agreement"},
     }
-    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev, deal=matched) == STAGE["proposal_sent"]
+    assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev, deal=matched) is None
 
 
 def test_allo_uses_api_key_scheme_and_skips_voicemail_blasts():

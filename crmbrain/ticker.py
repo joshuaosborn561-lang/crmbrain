@@ -140,6 +140,10 @@ def plan_enrollments(
             c.skip_reason = "already_on_ticker"
             skipped.append(c)
             continue
+        if not (c.name or "").strip():
+            c.skip_reason = "no_name"
+            skipped.append(c)
+            continue
         if not (c.email or c.phone or c.hs_contact_id or c.name):
             c.skip_reason = "no_identity"
             skipped.append(c)
@@ -228,6 +232,8 @@ def apply_plan(
 
 
 def enroll(memory: Memory, ev: Engagement, reason: str, hs_contact_id: str = "", hs_deal_id: str = "") -> dict:
+    if not (ev.display_name() or "").strip():
+        return {}
     if already_enrolled(
         memory.list_ticker(),
         email=ev.email,

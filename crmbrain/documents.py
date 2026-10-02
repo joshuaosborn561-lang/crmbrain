@@ -69,6 +69,34 @@ def is_payment_mail(subject: str, sender: str, snippet: str = "") -> bool:
     return "you received a payment" in blob or "payment received" in blob
 
 
+AGREEMENT_PARTY_RE = re.compile(
+    r"(?:updated\s+)?agreement:\s*(.+?)\s+x\s+salesglider",
+    re.I,
+)
+PAYMENT_FROM_RE = re.compile(
+    r"(?:you received a payment|payment received).{0,80}?\bfrom\s+([^.\n]{3,80})",
+    re.I,
+)
+_COMPANY_TOKENS = (" group", " llc", " inc", " ltd", " energy", " partners", " company", " co.")
+
+
+def commerce_match_fields(subject: str, snippet: str = "", body: str = "") -> tuple[str, str, str]:
+    """Payer name, company, amount from a payment or agreement mail."""
+    text = f"{subject}\n{snippet}\n{body}"
+    amount = parse_deal_amount(text)
+    company = ""
+    party = AGREEMENT_PARTY_RE.search(text)
+    if party:
+        company = re.sub(r"\s+", " ", party.group(1)).strip(" -:|")
+    payer = ""
+    from_who = PAYMENT_FROM_RE.search(text)
+    if from_who:
+        payer = re.sub(r"\s+", " ", from_who.group(1)).strip(" -:|")
+        if not company and any(tok in payer.lower() for tok in _COMPANY_TOKENS):
+            company = payer
+    return payer, company, amount
+
+
 def looks_josh_pays_document(subject: str, body: str, document_name: str = "") -> bool:
     """True when the paper is a contractor agreement or Josh is the payer."""
     blob = f"{subject} {body} {document_name}".lower()

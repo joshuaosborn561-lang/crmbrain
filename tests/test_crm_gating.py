@@ -75,6 +75,10 @@ class FakeHubSpot:
         return None
 
     def find_contact(self, email="", phone="", name=""):
+        from crmbrain.config import is_zoom_room_address
+
+        if email and is_zoom_room_address(email):
+            return None
         email_l = (email or "").lower()
         digits = "".join(c for c in (phone or "") if c.isdigit())
         for row in self.contacts:
@@ -127,6 +131,50 @@ class FakeHubSpot:
         }
         self.contacts.append(row)
         return row
+
+    def find_contact_by_company(self, company=""):
+        raw = (company or "").strip().lower()
+        if len(raw) < 3:
+            return None
+        hits = []
+        for row in self.contacts:
+            other = ((row.get("properties") or {}).get("company") or "").strip().lower()
+            if other and (raw in other or other in raw):
+                hits.append(row)
+        return hits[0] if len(hits) == 1 else None
+
+    def find_deal_by_amount(self, amount=""):
+        try:
+            wanted = f"{float(str(amount).replace(',', '').strip()):.2f}"
+        except ValueError:
+            return None
+        hits = []
+        for deal in self.deals:
+            raw = (deal.get("properties") or {}).get("amount") or ""
+            try:
+                key = f"{float(str(raw).replace(',', '').strip()):.2f}"
+            except ValueError:
+                continue
+            if key == wanted:
+                hits.append(deal)
+        return hits[0] if len(hits) == 1 else None
+
+    def find_contact_for_commerce(self, name="", company="", amount=""):
+        if name:
+            found = self.find_contact(name=name)
+            if found:
+                return found
+        if company:
+            found = self.find_contact_by_company(company)
+            if found:
+                return found
+        if amount:
+            deal = self.find_deal_by_amount(amount)
+            if deal:
+                contacts = self.contacts_for_deal(deal["id"])
+                if len(contacts) == 1:
+                    return contacts[0]
+        return None
 
     def search_contacts_by_email_token(self, token):
         needle = (token or "").lower()

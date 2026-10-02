@@ -598,6 +598,39 @@ def facts_reason_for_ticker(ev: Engagement) -> str:
     return ev.ticker_reason or ""
 
 
+def _has_meeting_or_open_deal(hs: HubSpot, ev: Engagement, contact: dict | None) -> bool:
+    """Booked/held meetings and open deals never go to HeyReach outreach."""
+    extra = ev.extra or {}
+    if extra.get("create_new") or extra.get("gcal_create"):
+        return True
+    if ev.source in {"calendly", "fireflies", "cube_acr"}:
+        return True
+    if policy.is_meeting_held(ev) or policy.is_meeting_scheduled(ev):
+        return True
+    email = (ev.email or "").strip().lower()
+    upcoming = {e.lower() for e in (getattr(hs, "scheduled_attendee_emails", None) or set())}
+    recent = {e.lower() for e in (getattr(hs, "recent_attendee_emails", None) or set())}
+    if email and (email in upcoming or email in recent):
+        return True
+    if contact and contact.get("id"):
+        if policy.live_open_deals(_contact_deals(hs, contact)):
+            return True
+        cid = str(contact["id"])
+        if hasattr(hs, "contact_has_meetings"):
+            try:
+                if hs.contact_has_meetings(cid):
+                    return True
+            except Exception:
+                pass
+        if hasattr(hs, "contact_has_future_meetings"):
+            try:
+                if hs.contact_has_future_meetings(cid):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def _heyreach_id(ev: Engagement) -> str:
     if ev.email:
         return ev.email.lower()
@@ -623,6 +656,11 @@ def _queue_linkedin(
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         return
     if ev.email and (is_josh_address(ev.email) or should_skip_email(ev.email)):
+        return
+    if _has_meeting_or_open_deal(hs, ev, contact):
+        report.skipped.append(
+            f"heyreach {ev.display_name() or ev.email} meeting_or_deal"
+        )
         return
     hid = _heyreach_id(ev)
     if not hid or memory.already_processed("heyreach", hid):
@@ -961,7 +999,24 @@ def apply_gmail_stage_update(
         _handle_engagement(ev, settings, hs, memory, hey, report, budget=budget)
         return
     if ev.stage_hint and contact_id:
-        gmail_kind = "create" if not policy.live_open_deals(_contact_deals(hs, contact)) else "stage_move"
+        deals = _contact_deals(hs, contact)
+        live = policy.live_open_deals(deals)
+        current = ""
+        deal_row = None
+        if live:
+            deal_row = max(live, key=policy.deal_richness)
+            current = (deal_row.get("properties") or {}).get("dealstage") or ""
+        write_stage = policy.choose_deal_action(current or None, ev.stage_hint, ev, deal=deal_row)
+        if not write_stage:
+            report.skipped.append(
+                f"{ev.email or ev.display_name() or ev.external_id} gmail stage blocked"
+            )
+            if not already:
+                memory.mark_processed(ev.source, ev.external_id, {"skip": "gmail_stage_blocked"})
+                report.processed.append(f"gmail:{ev.raw_subject[:60]}")
+            return
+        ev.stage_hint = write_stage
+        gmail_kind = "create" if not live else "stage_move"
         if settings.dry_run:
             if not _reserve_budget(budget, gmail_kind, memory, report, ev):
                 return
@@ -969,7 +1024,7 @@ def apply_gmail_stage_update(
                 ProposedWrite(
                     action="move",
                     label=ev.email or ev.display_name(),
-                    stage=ev.stage_hint,
+                    stage=write_stage,
                     amount=str((ev.extra or {}).get("amount") or ""),
                     contact_id=str(contact_id),
                     reason="gmail",
@@ -979,7 +1034,7 @@ def apply_gmail_stage_update(
         if not _reserve_budget(budget, gmail_kind, memory, report, ev):
             return
         amount = str((ev.extra or {}).get("amount") or "")
-        deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, ev.stage_hint, amount=amount)
+        deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage, amount=amount)
         report.deals_moved.append(f"{ev.email} gmail -> {ev.stage_hint} ({deal.get('id')})")
         if amount and deal.get("id"):
             report.amounts_set.append(f"{ev.email} {amount}")
