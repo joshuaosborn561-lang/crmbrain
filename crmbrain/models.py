@@ -67,6 +67,7 @@ class CycleReport:
     calendar_api_ok: bool = True
     reconcile_aborted: bool = False
     would_abort: bool = False
+    gmail_people_overflow: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +95,7 @@ class CycleReport:
             "calendar_api_ok": self.calendar_api_ok,
             "reconcile_aborted": self.reconcile_aborted,
             "would_abort": self.would_abort,
+            "gmail_people_overflow": self.gmail_people_overflow,
         }
 
     def summary_text(self) -> str:
@@ -103,6 +105,8 @@ class CycleReport:
             lines.append("reconcile_aborted: true")
             if self.would_abort:
                 lines.append("would_abort: true")
+        if self.gmail_people_overflow:
+            lines.append(f"gmail_people_overflow: {self.gmail_people_overflow}")
         for key, values in self.as_dict().items():
             if not isinstance(values, list):
                 continue

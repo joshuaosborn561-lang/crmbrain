@@ -5,7 +5,7 @@ import sys
 from dataclasses import replace
 
 from crmbrain.config import Settings, now_utc
-from crmbrain.cycle import cycle_status, run
+from crmbrain.cycle import process_exit_code, run
 from crmbrain.google_auth import report_scopes
 
 FULL_CYCLE_HOURS_UTC = {12, 22}
@@ -39,7 +39,7 @@ def main() -> int:
         print("usage: python -m crmbrain [auto|cycle|briefs|google-scopes] [--dry-run]")
         return 2
     print(report.summary_text())
-    return 0 if cycle_status(report) == "ok" else 1
+    return process_exit_code(report)
 
 
 if __name__ == "__main__":

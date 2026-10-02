@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
@@ -19,6 +22,7 @@ WRITE_TIMEOUT = 30
 MAX_READ_RETRIES = 3
 BACKOFF_BASE = 1.0
 BACKOFF_CAP = 16.0
+RETRYABLE_STATUS = frozenset({429, 503})
 
 # HubSpot meeting engagements only. Associated emails are NOT meetings.
 MEETING_ASSOCIATION_OBJECTS = ("meetings",)
@@ -132,7 +136,7 @@ class HubSpot:
         last_exc: BaseException | None = None
         for attempt in range(attempts):
             try:
-                return self.session.request(method, url, timeout=timeout, **kwargs)
+                resp = self.session.request(method, url, timeout=timeout, **kwargs)
             except requests.Timeout as exc:
                 last_exc = exc
                 if attempt + 1 >= attempts:
@@ -147,6 +151,21 @@ class HubSpot:
                     delay,
                 )
                 _sleep(delay)
+                continue
+            if retry and resp.status_code in RETRYABLE_STATUS and attempt + 1 < attempts:
+                delay = min(BACKOFF_CAP, _retry_after_seconds(resp, _backoff_with_jitter(attempt)))
+                logger.warning(
+                    "hubspot %s %s HTTP %s, retry %s/%s in %.2fs",
+                    method,
+                    path,
+                    resp.status_code,
+                    attempt + 1,
+                    MAX_READ_RETRIES,
+                    delay,
+                )
+                _sleep(delay)
+                continue
+            return resp
         raise last_exc or RuntimeError("hubspot request failed")
 
     def ensure_properties(self) -> None:
@@ -675,6 +694,31 @@ class HubSpot:
 def _sleep(seconds: float) -> None:
     if seconds > 0:
         time.sleep(seconds)
+
+
+def _retry_after_seconds(resp: requests.Response, fallback: float) -> float:
+    raw = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    if raw is None:
+        return fallback
+    raw = str(raw).strip()
+    if not raw:
+        return fallback
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
+def _backoff_with_jitter(attempt: int) -> float:
+    base = min(BACKOFF_CAP, BACKOFF_BASE * (2**attempt))
+    return min(BACKOFF_CAP, base * (0.5 + random.random()))
 
 
 def _is_hubspot_mutation(method: str, path: str) -> bool:

@@ -52,6 +52,7 @@ JOSH_EMAILS = {
     "joshua@salesglidergrowth.com",
     "joshuaosborn561@gmail.com",
     "joshua@salescloudedgroup.com",
+    "joshua.osborn@insight.com",
 }
 JOSH_DOMAINS = {
     "salesglidergrowth.com",
@@ -308,8 +309,20 @@ def non_deal_names() -> set[str]:
     return names
 
 
+def is_josh_address(email: str | None) -> bool:
+    """Josh's own mailboxes — JOSH_EMAILS plus every address on JOSH_DOMAINS."""
+    low = (email or "").strip().lower()
+    if not low:
+        return False
+    if low in JOSH_EMAILS:
+        return True
+    if "@" not in low:
+        return False
+    return low.rsplit("@", 1)[-1] in JOSH_DOMAINS
+
+
 def is_personal(name: str | None = None, phone: str | None = None, email: str | None = None) -> bool:
-    if email and email.lower() in JOSH_EMAILS:
+    if email and is_josh_address(email):
         return False
     if phone:
         raw = digits_phone(phone)

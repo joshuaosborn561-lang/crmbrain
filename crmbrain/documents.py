@@ -22,6 +22,21 @@ FREE_DOC_HINTS = (
 )
 # $0 / $0.00 as a whole amount only — "$21,000.00" is not free.
 FREE_AMOUNT_RE = re.compile(r"\$0(?:\.00)?(?![\d,])")
+# Josh is the payer. A client's paid trial/pilot is NOT this.
+JOSH_PAYS_HINTS = (
+    "contractor agreement",
+    "contractor-agreement",
+)
+JOSH_PAYER_HINTS = (
+    "josh pays",
+    "paid by josh",
+    "paid by salesglider",
+    "salesglider will pay",
+    "salesglider pays",
+    "we'd pay you",
+    "we would pay you",
+    "josh is the payer",
+)
 PAID_DOC_HINTS = (
     "growth partners",
     "retainer",
@@ -52,6 +67,14 @@ def is_signature_mail(subject: str, sender: str) -> bool:
 def is_payment_mail(subject: str, sender: str, snippet: str = "") -> bool:
     blob = f"{subject} {sender} {snippet}".lower()
     return "you received a payment" in blob or "payment received" in blob
+
+
+def looks_josh_pays_document(subject: str, body: str, document_name: str = "") -> bool:
+    """True when the paper is a contractor agreement or Josh is the payer."""
+    blob = f"{subject} {body} {document_name}".lower()
+    if any(h in blob for h in JOSH_PAYS_HINTS):
+        return True
+    return any(h in blob for h in JOSH_PAYER_HINTS)
 
 
 def looks_free_document(subject: str, body: str, document_name: str = "") -> bool:
@@ -86,6 +109,8 @@ def stage_from_signature_mail(subject: str, sender: str, snippet: str, body: str
     blob = f"{subject} {sender} {snippet} {body}".lower()
     name = document_name(subject, body or snippet)
     amount = parse_deal_amount(f"{subject}\n{body or snippet}")
+    if looks_josh_pays_document(subject, body or snippet, name):
+        return "", amount, name
     free = looks_free_document(subject, body or snippet, name)
     if is_payment_mail(subject, sender, snippet):
         return STAGE["paid"], amount, name

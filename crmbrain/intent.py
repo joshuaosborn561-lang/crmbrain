@@ -15,7 +15,12 @@ import requests
 
 from crmbrain.config import JOSH_DOMAINS, NON_SALES_TITLE_HINTS, STAGE, Settings, is_client_context
 from crmbrain.models import Engagement, IntentDecision
-from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES, STRICT_DISCOVERY_HINTS, has_word_hint
+from crmbrain.policy import (
+    CONFIDENT_NO_INTENTS,
+    NEVER_OPEN_DEAL_SOURCES,
+    STRICT_DISCOVERY_HINTS,
+    has_word_hint,
+)
 
 SALES_HINTS = (
     "salesglider",
@@ -74,6 +79,22 @@ MENTOR_HINTS = (
     "recurring 1:1",
 )
 RECRUITER_HINTS = ("recruiter", "recruiting", "talent acquisition")
+# Josh is the employer/buyer only. Bare "hiring" / "cold caller" / "paid trial"
+# are ICP language (staffing firms, outbound prospects) and must not fire.
+HIRE_HINTS = (
+    "contractor agreement",
+    "contractor-agreement",
+    "i'm hiring you",
+    "i am hiring you",
+    "josh is hiring you",
+    "josh is hiring",
+    "we'd pay you",
+    "we would pay you",
+    "i'd pay you",
+    "i would pay you",
+    "your trial with salesglider as a caller",
+    "trial with salesglider as a caller",
+)
 POC_HINTS = (
     "poc",
     "proof of concept",
@@ -97,6 +118,8 @@ with a meeting booked/held OR an active proposal/contract/POC/invoice conversati
 
 NOT a sales opportunity:
 - Josh is the buyer, learner, or networker (example: Cynthia Hernandez / Chorbie "Marketing Masterclass")
+- Josh is hiring or contracting ONLY when Josh is the employer/buyer (e.g. "I'm hiring you", "we'd pay you", contractor agreement, "your trial with SalesGlider as a caller"). Intent = hire.
+- A prospect saying they are hiring staff, or that their cold caller / SDR is not working, is still a sales opportunity. Never mark those hire.
 - Personal/friend meetings (example: Alex Branning, arranged by text)
 - Mentors (example: recurring "Mark/Josh" call)
 - Vendors/partners (example: Seth Kingdon, SEO partner)
@@ -107,7 +130,7 @@ NOT a sales opportunity:
 Return ONLY JSON:
 {
   "verdict": "yes"|"no"|"review",
-  "intent": "sales|buyer|learning|networking|personal|mentor|vendor|recruiter|day_job|client_ops",
+  "intent": "sales|buyer|learning|networking|personal|mentor|vendor|recruiter|day_job|client_ops|hire|contractor",
   "confidence": 0.0,
   "reason": "one short sentence",
   "stage": "discovery_scheduled|discovery_completed|proposal_sent|signed|paid|no_show|nurture|closed_lost|",
@@ -120,6 +143,7 @@ Rules:
 - verdict=review when unsure. Never invent a deal.
 - amount is USD digits only when THIS deal's price is clearly stated. Empty if unsure.
 - No free-POC language in reason text.
+- hire/contractor only when Josh is clearly the employer or buyer. Never from "we're hiring" or "cold caller" alone.
 """
 
 
@@ -221,6 +245,14 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             intent="vendor",
             confidence=0.9,
             reason="Vendor or partner, not a prospect",
+        )
+    hire_hit = next((h for h in HIRE_HINTS if h in blob), "")
+    if hire_hit:
+        return IntentDecision(
+            verdict="no",
+            intent="hire",
+            confidence=0.93,
+            reason="Josh is hiring or contracting, not selling",
         )
     if any(h in blob for h in RECRUITER_HINTS):
         return IntentDecision(
@@ -365,3 +397,142 @@ def _gemini_intent(settings: Settings, text: str) -> dict[str, Any]:
     body = resp.json()
     raw = body["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw)
+
+
+_SOURCE_RANK = {
+    "fireflies": 5,
+    "cube_acr": 5,
+    "calendly": 4,
+    "gmail": 3,
+    "allo": 2,
+}
+
+
+def _person_key(ev: Engagement) -> str:
+    from crmbrain.evidence import person_key
+
+    return person_key(ev.email, ev.phone, ev.display_name() or ev.name)
+
+
+def is_confident_no_intent(decision: IntentDecision, min_confidence: float = 0.75) -> bool:
+    return is_confident_non_sales(decision, min_confidence) and (decision.intent or "") in CONFIDENT_NO_INTENTS
+
+
+def _cohort(ev: Engagement) -> list[Engagement]:
+    group = getattr(ev, "_person_events", None)
+    if group:
+        return list(group)
+    return [ev]
+
+
+def is_calendly_booking(ev: Engagement) -> bool:
+    extra = ev.extra or {}
+    if ev.source == "calendly":
+        return True
+    if extra.get("create_new") and extra.get("event_type"):
+        return True
+    return "calendly" in f"{ev.raw_subject} {extra.get('from') or ''}".lower()
+
+
+def has_client_commerce(ev: Engagement) -> bool:
+    """Completed non-free client paper or a payment — never swallowed by hire no."""
+    from crmbrain.documents import is_payment_mail, looks_free_document, looks_josh_pays_document
+
+    extra = ev.extra or {}
+    doc_name = str(extra.get("document_name") or "")
+    subject = ev.raw_subject or ""
+    body = ev.summary or ""
+    if looks_josh_pays_document(subject, body, doc_name):
+        return False
+    if ev.stage_hint in {STAGE["signed"], STAGE["paid"]}:
+        if looks_free_document(subject, body, doc_name):
+            return False
+        return True
+    if extra.get("document_id") or doc_name:
+        if looks_free_document(subject, body, doc_name):
+            return False
+        return True
+    sender = str(extra.get("from") or "")
+    if is_payment_mail(subject, sender, body):
+        return True
+    blob = f"{subject} {body}".lower()
+    return "you received a payment" in blob or "payment received" in blob
+
+
+def person_has_client_commerce(ev: Engagement) -> bool:
+    return any(has_client_commerce(item) for item in _cohort(ev))
+
+
+def person_has_booking_or_commerce(ev: Engagement) -> bool:
+    return any(is_calendly_booking(item) or has_client_commerce(item) for item in _cohort(ev))
+
+
+def person_blocks_deal(ev: Engagement, settings: Settings | None = None) -> bool:
+    """Confident listed no, unless a client document/payment must still apply."""
+    min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    decision = getattr(ev, "_person_intent", None)
+    if not isinstance(decision, IntentDecision) or not is_confident_no_intent(decision, min_c):
+        return False
+    if person_has_client_commerce(ev):
+        return False
+    return True
+
+
+def _merged_engagement(events: list[Engagement]) -> Engagement:
+    ranked = sorted(events, key=lambda e: _SOURCE_RANK.get(e.source, 0), reverse=True)
+    primary = ranked[0]
+    subjects = [e.raw_subject for e in events if e.raw_subject]
+    transcripts = [e.transcript for e in events if e.transcript]
+    summaries = [e.summary for e in events if e.summary]
+    extra: dict[str, Any] = {}
+    for ev in events:
+        extra.update(ev.extra or {})
+    email = next((e.email for e in events if e.email), "")
+    phone = next((e.phone for e in events if e.phone), "")
+    first = next((e.first_name for e in events if e.first_name), "")
+    last = next((e.last_name for e in events if e.last_name), "")
+    name = next((e.name for e in events if e.name), "")
+    company = next((e.company for e in events if e.company), "")
+    return Engagement(
+        source=primary.source,
+        external_id=f"merged:{primary.external_id}",
+        occurred_at=primary.occurred_at,
+        first_name=first,
+        last_name=last,
+        name=name,
+        email=email,
+        phone=phone,
+        company=company,
+        raw_subject=" ".join(subjects),
+        summary=" ".join(summaries),
+        transcript="\n".join(transcripts),
+        extra=extra,
+    )
+
+
+def attach_person_intent(settings: Settings | None, events: list[Engagement]) -> dict[str, IntentDecision]:
+    """Classify each person from all cycle evidence. A confident listed 'no' wins."""
+    groups: dict[str, list[Engagement]] = {}
+    for ev in events or []:
+        key = _person_key(ev)
+        if not key:
+            continue
+        groups.setdefault(key, []).append(ev)
+    min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    out: dict[str, IntentDecision] = {}
+    for key, evs in groups.items():
+        winner: IntentDecision | None = None
+        for ev in evs:
+            decision = classify(settings, ev)
+            if is_confident_no_intent(decision, min_c):
+                winner = decision
+                break
+        if winner is None and len(evs) > 1:
+            winner = classify(settings, _merged_engagement(evs))
+        if winner is None:
+            winner = classify(settings, evs[0])
+        out[key] = winner
+        for ev in evs:
+            ev._person_intent = winner
+            ev._person_events = evs
+    return out

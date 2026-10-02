@@ -870,7 +870,7 @@ def test_day_job_cube_pricing_contract_is_skipped(tmp_path):
     _handle_engagement(ev, make_settings(), hs, Memory(make_settings(), data_dir=tmp_path), None, report)
     assert hs.contacts == []
     assert hs.deals == []
-    assert any("day_job" in s for s in report.skipped)
+    assert any("day_job" in s or "josh address" in s for s in report.skipped)
 
 
 def test_seth_kingdon_intro_is_skipped(tmp_path):
