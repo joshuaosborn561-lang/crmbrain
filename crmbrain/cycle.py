@@ -62,6 +62,15 @@ def _in_window(ev: Engagement, settings: Settings) -> bool:
     return True
 
 
+def _release_gmail_people_overflow(memory: Memory, ev: Engagement) -> None:
+    extra = ev.extra or {}
+    if ev.source != "gmail_person" and not extra.get("gmail_overflow"):
+        return
+    email = (ev.email or "").strip().lower()
+    if email and hasattr(memory, "drop_gmail_people_overflow"):
+        memory.drop_gmail_people_overflow(email)
+
+
 def _queue_cap_review(memory: Memory, report: CycleReport, ev: Engagement) -> None:
     label = ev.display_name() or ev.email or ev.phone or ev.external_id
     line = f"{label} cap"
@@ -301,9 +310,7 @@ def _handle_engagement(
             mark_processed=not intent.person_has_booking_or_commerce(ev),
         )
         return
-    if getattr(ev, "_person_intent", None) and intent.is_confident_no_intent(
-        ev._person_intent, settings.intent_min_confidence
-    ) and intent.person_has_client_commerce(ev):
+    if getattr(ev, "_person_intent", None) and intent.commerce_overrides_person_no(ev, settings):
         _record_person_intent_no(
             report, memory, ev, ev._person_intent, mark_processed=False
         )
@@ -880,9 +887,7 @@ def apply_gmail_stage_update(
             mark_processed=not intent.person_has_booking_or_commerce(ev),
         )
         return
-    if getattr(ev, "_person_intent", None) and intent.is_confident_no_intent(
-        ev._person_intent, settings.intent_min_confidence
-    ) and intent.person_has_client_commerce(ev):
+    if getattr(ev, "_person_intent", None) and intent.commerce_overrides_person_no(ev, settings):
         _record_person_intent_no(
             report, memory, ev, ev._person_intent, already_processed=already, mark_processed=False
         )
@@ -1193,6 +1198,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                 continue
             try:
                 _handle_engagement(ev, settings, hs, memory, hey, report, budget=budget)
+                _release_gmail_people_overflow(memory, ev)
             except Exception as exc:
                 report.errors.append(f"{ev.source}:{ev.external_id}: {exc}")
 

@@ -35,6 +35,19 @@ COLD_CREATE_SOURCES = NEVER_OPEN_DEAL_SOURCES | {"gmail", "gmail_person"}
 MEETING_CRM_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo"})
 
 
+def _decision_for(
+    settings: Settings | None, timeline: PersonTimeline, ev: Engagement | None = None
+) -> IntentDecision:
+    """Reuse a person-level decision already attached on this timeline."""
+    ev = ev or representative_engagement(timeline)
+    cached = getattr(ev, "_person_intent", None)
+    if isinstance(cached, IntentDecision):
+        return cached
+    if timeline.engagements:
+        intent.attach_person_intent(settings, list(timeline.engagements))
+    return getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
+
+
 def representative_engagement(timeline: PersonTimeline) -> Engagement:
     if timeline.engagements:
         ranked = sorted(
@@ -194,6 +207,10 @@ def _commit(
     ):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} excluded")
         return False
+    _decision_for(None, timeline, ev)
+    if intent.person_blocks_deal(ev):
+        report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} person_intent_no")
+        return False
     if budget.aborted:
         _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
         return False
@@ -251,7 +268,18 @@ def apply_timeline(
     del held_events
     budget = budget or WriteBudget.from_settings(settings)
     ev = representative_engagement(timeline)
-    decision = intent.classify(settings, ev)
+    decision = _decision_for(settings, timeline, ev)
+    if intent.person_blocks_deal(ev, settings):
+        report.skipped.append(f"{timeline.display_name()} {decision.intent}, skip HubSpot")
+        _queue_review(
+            memory,
+            report,
+            timeline,
+            decision,
+            reason=decision.intent or "person_intent_no",
+            dry_run=dry_run,
+        )
+        return decision
     target = stage_from_timeline(
         timeline,
         decision,
@@ -309,7 +337,9 @@ def apply_timeline(
             report.skipped.append(f"{label} reply-only, no deal")
         return decision
 
-    if intent.is_confident_non_sales(decision, settings.intent_min_confidence):
+    if intent.is_confident_non_sales(
+        decision, settings.intent_min_confidence
+    ) and not intent.commerce_overrides_person_no(ev, settings):
         if deal and current not in PROTECTED_STAGES and current not in {STAGE["proposal_sent"]}:
             report.skipped.append(f"{label} non-opportunity ({decision.intent})")
         if not deal:
@@ -318,7 +348,8 @@ def apply_timeline(
 
     if not intent.is_confident_sales(decision, settings.intent_min_confidence):
         _queue_review(memory, report, timeline, decision, dry_run=dry_run)
-        return decision
+        if not intent.commerce_overrides_person_no(ev, settings):
+            return decision
 
     if not deal and policy.only_held_call_evidence(timeline.engagements):
         if not policy.held_call_may_open_deal(ev) and not policy.contact_is_prospect(
@@ -409,13 +440,27 @@ def restore_missing_deals(
             if not policy.contact_has_meeting_evidence(contact, timeline.deals):
                 continue
         ev = representative_engagement(timeline)
+        decision = _decision_for(settings, timeline, ev)
         if ev.source in COLD_CREATE_SOURCES and not evidence.has_meeting_evidence(timeline):
             continue
-        decision = intent.classify(settings, ev)
-        if not intent.is_confident_sales(decision, settings.intent_min_confidence):
-            if decision.verdict != "no":
-                _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+        if intent.person_blocks_deal(ev, settings):
+            _queue_review(
+                memory,
+                report,
+                timeline,
+                decision,
+                reason=decision.intent or "person_intent_no",
+                dry_run=dry_run,
+            )
             continue
+        if not intent.is_confident_sales(decision, settings.intent_min_confidence):
+            if intent.commerce_overrides_person_no(ev, settings):
+                pass
+            elif decision.verdict != "no":
+                _queue_review(memory, report, timeline, decision, dry_run=dry_run)
+                continue
+            else:
+                continue
         if policy.only_held_call_evidence(timeline.engagements) and not (
             policy.held_call_may_open_deal(ev)
             or policy.contact_is_prospect(timeline.contact, timeline.deals)
@@ -634,6 +679,18 @@ def reeval_discovery_scheduled(
             timeline.contact = timeline.contact or contact
             if deal not in timeline.deals:
                 timeline.deals.append(deal)
+        ev = representative_engagement(timeline)
+        decision = _decision_for(settings, timeline, ev)
+        if intent.person_blocks_deal(ev, settings):
+            _queue_review(
+                memory,
+                report,
+                timeline,
+                decision,
+                reason=decision.intent or "person_intent_no",
+                dry_run=dry_run,
+            )
+            continue
         target, reason = _reeval_decision(
             hs, timeline, deal, contact, upcoming, held_events
         )
@@ -718,7 +775,9 @@ def _planned_change_count(
     creates = 0
     for timeline in timelines.values():
         ev = representative_engagement(timeline)
-        decision = intent.classify(settings, ev)
+        decision = _decision_for(settings, timeline, ev)
+        if intent.person_blocks_deal(ev, settings):
+            continue
         current = _current_stage(timeline)
         deal = _open_deal(timeline)
         email = timeline.email
@@ -740,7 +799,10 @@ def _planned_change_count(
         write = evidence_move(current, target, timeline, ev) if target else None
         if write and deal_id:
             changed.add(deal_id)
-        elif not deal and target and intent.is_confident_sales(decision, settings.intent_min_confidence):
+        elif not deal and target and (
+            intent.is_confident_sales(decision, settings.intent_min_confidence)
+            or intent.commerce_overrides_person_no(ev, settings)
+        ):
             creates += 1
     if calendar_api_ok and hasattr(hs, "iter_deals"):
         try:
@@ -800,7 +862,9 @@ def planned_change_person_keys(
         if not _timeline_has_unprocessed(timeline, memory):
             continue
         ev = representative_engagement(timeline)
-        decision = intent.classify(settings, ev)
+        decision = _decision_for(settings, timeline, ev)
+        if intent.person_blocks_deal(ev, settings):
+            continue
         current = _current_stage(timeline)
         deal = _open_deal(timeline)
         email = timeline.email
@@ -820,10 +884,9 @@ def planned_change_person_keys(
         write = evidence_move(current, target, timeline, ev) if target else None
         if write and deal:
             keys.add(timeline.key)
-        elif (
-            not deal
-            and target
-            and intent.is_confident_sales(decision, settings.intent_min_confidence)
+        elif not deal and target and (
+            intent.is_confident_sales(decision, settings.intent_min_confidence)
+            or intent.commerce_overrides_person_no(ev, settings)
         ):
             if policy.only_held_call_evidence(timeline.engagements) and not (
                 policy.held_call_may_open_deal(ev)
@@ -853,6 +916,7 @@ def run(
     budget = budget or WriteBudget.from_settings(settings)
     timelines = evidence.build_timelines(engagements)
     _attach_hubspot(hs, timelines)
+    intent.attach_person_intent(settings, engagements)
     if not skip_abort:
         would = _planned_change_count(hs, settings, timelines, upcoming_emails, held_events, calendar_api_ok)
         open_n = _count_open_deals(hs, timelines)

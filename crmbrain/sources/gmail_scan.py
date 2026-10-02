@@ -571,7 +571,9 @@ def scan_people(
     ranked = sorted(candidates, key=lambda ev: _people_rank(ev, hubspot, known), reverse=True)
     selected = ranked[:MAX_GMAIL_PEOPLE]
     overflow = ranked[MAX_GMAIL_PEOPLE:]
-    if memory and hasattr(memory, "set_gmail_people_overflow"):
+    if memory and hasattr(memory, "upsert_gmail_people_overflow"):
+        memory.upsert_gmail_people_overflow([_overflow_row(ev) for ev in overflow])
+    elif memory and hasattr(memory, "set_gmail_people_overflow"):
         memory.set_gmail_people_overflow([_overflow_row(ev) for ev in overflow])
     if report is not None:
         report.gmail_people_overflow = len(overflow)
