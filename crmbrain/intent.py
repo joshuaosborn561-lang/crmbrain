@@ -478,6 +478,24 @@ def person_blocks_deal(ev: Engagement, settings: Settings | None = None) -> bool
     return True
 
 
+def attach_timeline_intent(settings: Settings | None, engagements: list[Engagement] | None) -> Engagement | None:
+    """Classify the person from every engagement on a reconcile timeline."""
+    evs = [ev for ev in (engagements or []) if ev]
+    if not evs:
+        return None
+    attach_person_intent(settings, evs)
+    return evs[0]
+
+
+def person_blocks_engagements(
+    settings: Settings | None, engagements: list[Engagement] | None
+) -> bool:
+    ev = attach_timeline_intent(settings, engagements)
+    if ev is None:
+        return False
+    return person_blocks_deal(ev, settings)
+
+
 def _merged_engagement(events: list[Engagement]) -> Engagement:
     ranked = sorted(events, key=lambda e: _SOURCE_RANK.get(e.source, 0), reverse=True)
     primary = ranked[0]

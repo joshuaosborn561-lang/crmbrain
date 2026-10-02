@@ -28,6 +28,40 @@ def _run_started_stamp(row: dict | None) -> datetime | None:
     return stamp
 
 
+def _overflow_extra(raw: dict | None) -> dict:
+    extra = (raw or {}).get("extra")
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except (TypeError, ValueError):
+            extra = {}
+    return extra if isinstance(extra, dict) else {}
+
+
+def _overflow_from_row(row: dict | None) -> dict:
+    raw = dict(row or {})
+    extra = _overflow_extra(raw)
+    return {
+        "email": str(raw.get("email") or ""),
+        "external_id": str(raw.get("external_id") or ""),
+        "first_name": str(raw.get("first_name") or ""),
+        "last_name": str(raw.get("last_name") or ""),
+        "name": str(raw.get("name") or ""),
+        "domain": str(raw.get("domain") or ""),
+        "company": str(raw.get("company") or ""),
+        "raw_subject": str(raw.get("raw_subject") or ""),
+        "summary": str(raw.get("summary") or ""),
+        "occurred_at": raw.get("occurred_at"),
+        "extra": extra,
+    }
+
+
+def _overflow_to_row(row: dict | None) -> dict:
+    out = _overflow_from_row(row)
+    out["extra"] = _overflow_extra(out)
+    return out
+
+
 def _is_duplicate_key(exc: BaseException) -> bool:
     """PostgREST unique violation (409) — row already exists."""
     msg = str(exc).lower()
@@ -574,11 +608,41 @@ class Memory:
                 self._record_error("save_fact", exc)
 
     def get_gmail_people_overflow(self) -> list[dict]:
-        return list(self._local.get("gmail_people_overflow") or [])
+        local = list(self._local.get("gmail_people_overflow") or [])
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema(
+                    "GET",
+                    "gmail_people_overflow",
+                    params={"select": "*", "order": "occurred_at.desc.nullslast"},
+                )
+                if rows is not None:
+                    cleaned = [_overflow_from_row(row) for row in rows]
+                    self._local["gmail_people_overflow"] = cleaned
+                    return cleaned
+            except Exception as exc:
+                self._record_error("get_gmail_people_overflow", exc)
+                return local
+        return local
 
     def set_gmail_people_overflow(self, rows: list[dict]) -> None:
+        payload = [_overflow_from_row(row) for row in (rows or [])]
+        self._local["gmail_people_overflow"] = payload
         if self._skip_side_write("gmail_people_overflow"):
-            self._local["gmail_people_overflow"] = list(rows or [])
             return
-        self._local["gmail_people_overflow"] = list(rows or [])
         self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema(
+                    "DELETE",
+                    "gmail_people_overflow",
+                    params={"email": "not.is.null"},
+                )
+                if payload:
+                    self._sb_schema(
+                        "POST",
+                        "gmail_people_overflow",
+                        json_body=[_overflow_to_row(row) for row in payload],
+                    )
+            except Exception as exc:
+                self._record_error("set_gmail_people_overflow", exc)
