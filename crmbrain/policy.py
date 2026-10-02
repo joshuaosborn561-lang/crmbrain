@@ -178,7 +178,16 @@ def cube_transcript_usable(ev: Engagement) -> bool:
 
 
 CONFIDENT_NO_INTENTS = frozenset(
-    {"day_job", "vendor", "mentor", "recruiter", "learning", "personal"}
+    {
+        "day_job",
+        "vendor",
+        "mentor",
+        "recruiter",
+        "learning",
+        "personal",
+        "hire",
+        "contractor",
+    }
 )
 HELD_CALL_SOURCES = frozenset({"cube_acr", "fireflies"})
 BOOKED_MEETING_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo", "gmail"})

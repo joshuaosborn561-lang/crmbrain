@@ -9,6 +9,7 @@ from crmbrain.config import (
     STAGE,
     Settings,
     gmail_after_clause,
+    is_josh_address,
     is_non_deal_person,
     is_personal,
     settings_lookback_start,
@@ -54,6 +55,9 @@ def people_queries(settings: Settings) -> tuple[str, ...]:
         f"{after} in:sent -from:calendly.com -from:pandadoc.com -from:docusign.net",
         f"{after} in:inbox -category:promotions -from:calendly.com -from:noreply",
     )
+
+
+MAX_GMAIL_PEOPLE = 40
 
 SYSTEM_EMAIL_HINTS = (
     "salesglider",
@@ -407,11 +411,11 @@ def parse_person_header(header: str) -> tuple[str, str, str]:
 def counterpart_from_headers(sender: str, to: str, cc: str = "") -> tuple[str, str, str]:
     """The other person on a Josh email. Sent → To. Inbox → From."""
     from_first, from_last, from_email = parse_person_header(sender)
-    if from_email and from_email.lower() not in JOSH_EMAILS and not is_system_address(from_email):
+    if from_email and not is_josh_address(from_email) and not is_system_address(from_email):
         return from_first, from_last, from_email
     for header in (to, cc):
         first, last, email = parse_person_header(header)
-        if email and not is_system_address(email):
+        if email and not is_josh_address(email) and not is_system_address(email):
             return first, last, email
     return "", "", ""
 
@@ -419,9 +423,12 @@ def counterpart_from_headers(sender: str, to: str, cc: str = "") -> tuple[str, s
 def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
     """Josh emailed someone, or a real person emailed Josh. That is engagement."""
     seen: set[str] = set()
+    seen_emails: set[str] = set()
     out: list[Engagement] = []
     for query in people_queries(settings):
         for stub in gmail.search(query, max_results=40):
+            if len(out) >= MAX_GMAIL_PEOPLE:
+                return out
             mid = stub["id"]
             if mid in seen:
                 continue
@@ -433,10 +440,16 @@ def scan_people(settings: Settings, gmail: Gmail) -> list[Engagement]:
                 headers.get("to", ""),
                 headers.get("cc", ""),
             )
-            if not email or is_personal(name=f"{first} {last}", email=email):
+            email = (email or "").strip().lower()
+            if not email or is_josh_address(email):
+                continue
+            if email in seen_emails:
+                continue
+            if is_personal(name=f"{first} {last}", email=email):
                 continue
             if is_non_deal_person(name=f"{first} {last}", email=email):
                 continue
+            seen_emails.add(email)
             domain = email.split("@")[1] if "@" in email else ""
             out.append(
                 Engagement(

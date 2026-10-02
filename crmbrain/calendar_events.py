@@ -17,10 +17,10 @@ from typing import Iterable
 
 from crmbrain.config import (
     JOSH_DOMAINS,
-    JOSH_EMAILS,
     NON_SALES_TITLE_HINTS,
     Settings,
     is_internal_meeting,
+    is_josh_address as email_is_josh,
     now_utc,
 )
 from crmbrain.gmail_client import Gmail
@@ -101,7 +101,7 @@ def is_josh_address(email: str) -> bool:
     low = (email or "").strip().lower()
     if not low:
         return False
-    if low in JOSH_EMAILS or is_system_address(low):
+    if email_is_josh(low) or is_system_address(low):
         return True
     domain = low.rsplit("@", 1)[-1] if "@" in low else ""
     return domain in JOSH_DOMAINS

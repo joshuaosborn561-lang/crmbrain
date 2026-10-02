@@ -19,11 +19,11 @@ from crmbrain import (
 )
 from crmbrain.budget import WriteBudget
 from crmbrain.config import (
-    JOSH_EMAILS,
     STAGE,
     Settings,
     compute_lookback_start,
     is_excluded_contact,
+    is_josh_address,
     is_non_deal_person,
     is_personal,
     is_personal_family_intent,
@@ -195,6 +195,36 @@ def _planned_unique_people(
     return len(keys)
 
 
+def _record_person_intent_no(
+    report: CycleReport,
+    memory: Memory,
+    ev: Engagement,
+    decision,
+    *,
+    already_processed: bool = False,
+) -> None:
+    label = ev.display_name() or ev.email or ev.phone or ev.external_id
+    line = f"{label} {decision.intent} {decision.reason}".strip()
+    if line not in report.review_queue:
+        report.review_queue.append(line)
+    report.skipped.append(f"{ev.source}:{label} {decision.intent or 'no'}")
+    if hasattr(memory, "enqueue_review"):
+        memory.enqueue_review(
+            {
+                "person_key": ev.email or ev.phone or ev.display_name(),
+                "email": ev.email,
+                "name": ev.display_name(),
+                "company": ev.company,
+                "intent": decision.intent,
+                "confidence": decision.confidence,
+                "reason": decision.reason,
+                "evidence": {"source": ev.source, "subject": ev.raw_subject},
+            }
+        )
+    if not already_processed:
+        memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent or "person_intent_no"})
+
+
 def _propose_engagement(
     report: CycleReport,
     ev: Engagement,
@@ -226,6 +256,10 @@ def _handle_engagement(
     budget: WriteBudget | None = None,
 ) -> None:
     budget = budget or WriteBudget.from_settings(settings)
+    if ev.email and is_josh_address(ev.email):
+        report.skipped.append(f"{ev.source}:{ev.email} josh address")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "josh_address"})
+        return
     if ev.email and is_junk_crm_email(ev.email):
         report.junk_blocked.append(f"{ev.source}:{ev.email} system address")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "system_email"})
@@ -256,6 +290,9 @@ def _handle_engagement(
     if is_personal_family_intent(decision.intent):
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {decision.intent}")
         memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent or "personal"})
+        return
+    if intent.person_blocks_deal(ev, settings):
+        _record_person_intent_no(report, memory, ev, ev._person_intent)
         return
     already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
     already = _annotate_sales_context(ev, settings, hs, already)
@@ -319,34 +356,35 @@ def _handle_engagement(
             )
         memory.mark_processed(ev.source, ev.external_id, {"skip": "intent_review"})
         return
-    if settings.dry_run:
-        kind = _handle_budget_kind(ev, already, hs)
-        if not _reserve_budget(budget, kind, memory, report, ev):
-            return
-        _propose_engagement(report, ev, decision, already)
-        return
     meeting_evidence = None
     if already and not policy.may_create_hubspot_contact(ev):
         meeting_evidence = prune.has_live_meeting_evidence(hs, already)
     if not policy.may_write_hubspot(ev, already is not None, meeting_evidence=meeting_evidence):
-        if already and meeting_evidence is False:
+        if already and meeting_evidence is False and not settings.dry_run:
             prune.archive_unengaged_contact(hs, already, report, "no meeting")
         if memory.already_processed(ev.source, ev.external_id):
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
+            return
+        skip_line = (
+            f"{ev.source}:{ev.display_name() or ev.email or ev.phone} no meeting, skip HubSpot"
+        )
+        if settings.dry_run:
+            report.skipped.append(skip_line)
             return
         reason = ev.ticker_reason or facts_reason_for_ticker(ev)
         if policy.should_enroll_ticker_without_hubspot(ev) and reason:
             ticker.enroll(memory, ev, reason)
             report.ticker_enrolled.append(f"{ev.display_name() or ev.email} {reason}")
         _queue_linkedin(settings, hey, ev, hs, memory, report, contact=None)
-        report.skipped.append(
-            f"{ev.source}:{ev.display_name() or ev.email or ev.phone} no meeting, skip HubSpot"
-        )
+        report.skipped.append(skip_line)
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_meeting_hubspot"})
         report.processed.append(f"{ev.source}:{ev.external_id}")
         return
 
     if memory.already_processed(ev.source, ev.external_id):
+        if settings.dry_run:
+            report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
+            return
         if ev.source in {"fireflies", "cube_acr"} and already:
             _apply_transcript_intelligence(
                 ev,
@@ -361,6 +399,13 @@ def _handle_engagement(
             report.skipped.append(f"{ev.source}:{ev.external_id} refreshed notes/amount")
         else:
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
+        return
+
+    if settings.dry_run:
+        kind = _handle_budget_kind(ev, already, hs)
+        if not _reserve_budget(budget, kind, memory, report, ev):
+            return
+        _propose_engagement(report, ev, decision, already)
         return
 
     kind = _handle_budget_kind(ev, already, hs)
@@ -552,7 +597,7 @@ def _queue_linkedin(
         return
     if is_personal(name=ev.display_name(), phone=ev.phone, email=ev.email):
         return
-    if ev.email and (ev.email.lower() in JOSH_EMAILS or should_skip_email(ev.email)):
+    if ev.email and (is_josh_address(ev.email) or should_skip_email(ev.email)):
         return
     hid = _heyreach_id(ev)
     if not hid or memory.already_processed("heyreach", hid):
@@ -773,6 +818,11 @@ def apply_gmail_stage_update(
     budget = budget or WriteBudget.from_settings(settings)
     """Apply a Gmail calendar/billing signal. Re-check held meetings before No Show."""
     already = memory.already_processed(ev.source, ev.external_id)
+    if ev.email and is_josh_address(ev.email):
+        report.skipped.append(f"{ev.source}:{ev.email} josh address")
+        if not already:
+            memory.mark_processed(ev.source, ev.external_id, {"skip": "josh_address"})
+        return
     if is_non_deal_person(
         name=ev.display_name() or ev.name,
         email=ev.email,
@@ -782,6 +832,13 @@ def apply_gmail_stage_update(
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
         if not already:
             memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
+    if not getattr(ev, "_person_intent", None):
+        intent.attach_person_intent(settings, [ev] + list(held_events or []))
+    if intent.person_blocks_deal(ev, settings):
+        _record_person_intent_no(
+            report, memory, ev, ev._person_intent, already_processed=already
+        )
         return
     contact = _mail_contact(hs, ev)
     contact_props = (contact or {}).get("properties") or {}
@@ -1057,6 +1114,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
     if skip_writes:
         skip_cube_freshness = True
     if not skip_writes:
+        intent.attach_person_intent(settings, windowed)
         for ev in windowed:
             try:
                 _handle_engagement(ev, settings, hs, memory, hey, report, budget=budget)
@@ -1066,6 +1124,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         if gmail:
             try:
                 mail_events = gmail_scan.scan(settings, gmail, hs, report)
+                intent.attach_person_intent(settings, list(windowed) + mail_events)
                 for ev in mail_events:
                     apply_gmail_stage_update(
                         ev,
