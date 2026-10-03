@@ -124,7 +124,8 @@ class FakeGmail:
                 }
         return {"id": message_id, "payload": {"headers": []}}
 
-    def find_contact_thread(self, email):
+    def find_contact_thread(self, email, name=""):
+        del name
         for key, hit in self.threads.items():
             if email and email in key and isinstance(hit, dict):
                 return hit
@@ -679,6 +680,8 @@ def test_sample_cards_file_has_ten_mixed():
         assert card["subject"]
         assert card["body"].endswith("Josh Osborn")
         assert "—" not in card["body"]
+        assert "AirPods" not in card["body"]
+        assert "thread_id" in card
         assert card["blocks"]
 
 
@@ -851,3 +854,146 @@ def test_thread_reply_uses_original_subject_and_new_thread_is_specific():
     assert fresh.subject != "MSP update"
     assert fresh.subject != "Lee?"
     assert "SDR" in fresh.subject or "Bytewise" in fresh.subject
+
+
+def test_nurture_stage_never_keeps_stale_never_booked():
+    """Item 1: Nurture without an explicit met flag derives met/booked from evidence."""
+    nurture = STAGE["nurture"]
+    assert infer_nurture_reason(reason="never_booked", deal_stage=nurture) == "met"
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"fireflies": True},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"cube_acr": True},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"original_subject": "Your meeting recap - Pat Reyes and Joshua Osborn"},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"calendar_event": True, "meeting_at": "2026-06-01T15:00:00Z"},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"hs_meeting": True},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"no_show_count": "2"},
+        )
+        == "booked"
+    )
+    reply_only = infer_nurture_reason(reason="never_booked", extra={"source": "smartlead"})
+    assert reply_only == "never_booked"
+    assert has_meeting_qualification(reason="never_booked", extra={"source": "smartlead"}) is False
+    assert may_enroll_from_engagement(
+        Engagement(source="smartlead", external_id="sl-1", email="pat@x.test", ticker_reason="never_booked"),
+        reason="never_booked",
+    ) == (False, "reply_only")
+
+
+def test_opener_never_quotes_own_name_company_or_stage():
+    """Item 2: no self-name / company / stage in 'you mentioned', and met people get a call opener."""
+    scott = compose_nurture_draft(
+        {
+            "name": "Scott Hagan",
+            "email": "scott@finishline.test",
+            "company": "Finish Line",
+            "reason": "met",
+            "deal_stage": STAGE["nurture"],
+            "last_touch_snippet": "scott Hagan",
+        }
+    )
+    opener = scott.body.split("\n", 1)[0]
+    assert "you mentioned" not in opener.lower()
+    assert "scott hagan" not in opener.lower()
+    assert "finish line" not in opener.lower()
+    assert "nurture" not in opener.lower()
+    assert "following up on our call" in opener.lower()
+    assert scott.subject != "Finish Line: Scott Hagan"
+    assert scott.subject != "Scott Hagan"
+    assert "Scott Hagan" not in scott.subject
+
+    stage_copy = compose_nurture_draft(
+        {
+            "name": "Mike Dolan",
+            "company": "Dolan Roofing",
+            "campaign": "Nurture",
+            "last_touch_snippet": "mike Dolan",
+            "reason": "met",
+        }
+    )
+    blob = f"{stage_copy.subject}\n{stage_copy.body}".lower()
+    assert "reached out about nurture" not in blob
+    assert "you mentioned mike" not in blob
+    assert "you replied a while back" not in blob
+
+    met_neutral = compose_nurture_draft(
+        {
+            "name": "Lionel Francis",
+            "reason": "met",
+            "meeting_at": "2026-06-12T16:00:00+00:00",
+            "last_touch_snippet": "lionel Francis",
+        }
+    )
+    assert "you replied a while back" not in met_neutral.body
+    assert "jun" in met_neutral.body.lower()
+    assert "call" in met_neutral.body.split("\n", 1)[0].lower()
+
+
+def test_nurture_body_has_no_airpods_and_is_personalized():
+    """Item 4: no AirPods/gift; proof matches vertical; guarantee stays."""
+    roof = compose_nurture_draft(
+        {
+            "name": "Jackie Darkazalli",
+            "company": "Kelly Roofing",
+            "industry": "roofing",
+            "reason": "met",
+            "last_touch_snippet": "Check back after our busy season. Roofing crews are slammed until fall.",
+        }
+    )
+    hvac = compose_nurture_draft(
+        {
+            "name": "Joel Stewart",
+            "company": "The Chill Brothers",
+            "industry": "hvac",
+            "reason": "met",
+            "last_touch_snippet": "We are slammed through summer, check back in the fall about filling shoulder season.",
+        }
+    )
+    assert "AirPods" not in roof.body
+    assert "AirPods" not in hvac.body
+    assert "ticket" not in roof.body.lower()
+    assert MEETING_GUARANTEE in roof.body
+    assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
+    assert "trades" in hvac.body or CASE_STUDIES["hvac"][:10] in hvac.body
+    assert roof.body != hvac.body
+    assert "busy season" in roof.body.lower() or "slammed" in roof.body.lower()
+    assert "shoulder" in hvac.body.lower() or "summer" in hvac.body.lower()
+    default = compose_nurture_draft({"name": "Pat Reyes", "industry": "roofing"})
+    assert "AirPods" not in default.body

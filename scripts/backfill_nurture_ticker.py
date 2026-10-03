@@ -20,6 +20,7 @@ from crmbrain.memory import Memory  # noqa: E402
 from crmbrain.nurture import (  # noqa: E402
     compose_nurture_draft,
     dry_run_report,
+    infer_nurture_reason,
     merge_candidates,
     nurture_row_from_candidate,
     qualify_candidate,
@@ -170,7 +171,6 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
             settings,
             [
                 STAGE["nurture"],
-                STAGE["no_show"],
                 STAGE["discovery_completed"],
                 STAGE["proposal_sent"],
             ],
@@ -229,22 +229,31 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
             )
             first = (cp.get("firstname") or "").strip()
             last = (cp.get("lastname") or "").strip()
+            extra = {
+                "deal_stage": stage,
+                "booked": True,
+                "last_touch_snippet": text[:280],
+                "no_show_count": props.get("no_show_count"),
+                "hs_meeting": bool(props.get("hs_last_meeting_id") or props.get("engagements_last_meeting_booked")),
+                "meeting_at": props.get("engagements_last_meeting_booked") or "",
+            }
             out.append(
                 TickerCandidate(
                     name=f"{first} {last}".strip() or (props.get("dealname") or ""),
                     email=(cp.get("email") or "").strip(),
                     phone=(cp.get("phone") or "").strip(),
                     company=(cp.get("company") or "").strip(),
-                    reason=classify_reason(stage=stage, text=text),
+                    reason=infer_nurture_reason(
+                        reason=classify_reason(stage=stage, text=text),
+                        deal_stage=stage,
+                        extra=extra,
+                        booked=True,
+                    ),
                     last_signal=last_signal,
                     hs_contact_id=str(contact.get("id") or ""),
                     hs_deal_id=str(deal["id"]),
                     source="hubspot",
-                    extra={
-                        "deal_stage": stage,
-                        "booked": True,
-                        "last_touch_snippet": text[:280],
-                    },
+                    extra=extra,
                 )
             )
     return out, errors
@@ -287,7 +296,7 @@ def drop_active_pipeline(
             c.skip_reason = "live_pipeline"
             skipped.append(c)
             continue
-        if STAGE["no_show"] in stages:
+        if any(str((d.get("properties") or {}).get("no_show_count") or "0") not in {"", "0"} for d in deals):
             c.reason = "no_show"
         kept.append(c)
     return kept, skipped
@@ -405,7 +414,36 @@ def main() -> int:
         default=True,
         help="Default. Print counts and write nothing.",
     )
+    parser.add_argument(
+        "--sample-cards",
+        type=int,
+        metavar="N",
+        help="Read HubSpot Nurture-stage deals and write N sample cards as JSON.",
+    )
+    parser.add_argument(
+        "--out",
+        default="",
+        help="JSON path for --sample-cards (default artifacts/nurture_hubspot_sample_cards.json).",
+    )
     args = parser.parse_args()
+    if args.sample_cards:
+        import json
+
+        from crmbrain.nurture import sample_hubspot_nurture_cards
+
+        settings = Settings.from_env()
+        if not settings.hubspot_token:
+            print(
+                "HubSpot token missing. On the Railway crmbrain service run:\n"
+                "  python -m crmbrain --sample-cards 10"
+            )
+            return 2
+        payload = sample_hubspot_nurture_cards(
+            settings, args.sample_cards, out_path=args.out or None
+        )
+        print(json.dumps(payload.get("cards") or [], indent=2))
+        print(f"\nwrote {payload.get('count', 0)} cards to {payload.get('out_path')}")
+        return 0
     result = run(apply=args.apply)
     print(result["report"])
     if result.get("collect_errors") or result.get("errors"):

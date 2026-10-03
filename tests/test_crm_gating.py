@@ -5,7 +5,7 @@ import zipfile
 
 import requests
 
-from crmbrain.config import STAGE, Settings, is_personal
+from crmbrain.config import NO_SHOW_HINT, STAGE, Settings, is_personal
 from crmbrain.cycle import _backfill_hubspot_invites, _handle_engagement, cycle_status
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
@@ -335,6 +335,22 @@ class FakeHubSpot:
             self.add_note(contact["id"], amount_citation_note(ev, hint), ev=ev, contact=contact)
         return True
 
+    def increment_no_show_count(self, deal):
+        from crmbrain.hubspot import increment_no_show_count
+
+        return increment_no_show_count(self, deal)
+
+    def create_pipeline_deal(self, contact_id, properties):
+        props = dict(properties)
+        deal = {
+            "id": f"d{len(self.deals) + 1}",
+            "contact_id": contact_id,
+            "properties": props,
+        }
+        self.deals.append(deal)
+        self.writes.append(("create_pipeline_deal", contact_id, props.get("dealstage"), props.get("pipeline")))
+        return deal
+
     def upsert_deal(self, contact, ev, stage, amount=""):
         from crmbrain import policy
 
@@ -433,7 +449,7 @@ def _handle(tmp_path: Path, ev: Engagement, hs: FakeHubSpot | None = None, setti
     return hs, memory, report
 
 
-def test_smartlead_without_meeting_skips_hubspot(tmp_path):
+def test_smartlead_without_meeting_opens_initial_interest(tmp_path):
     ev = Engagement(
         source="smartlead",
         external_id="sl-1",
@@ -443,26 +459,22 @@ def test_smartlead_without_meeting_skips_hubspot(tmp_path):
         company="Acme",
         summary="Positive SmartLead reply (Interested) in SG HVAC",
     )
-    assert not may_create_hubspot_contact(ev)
-    assert not may_write_hubspot(ev, already_in_crm=False)
-    assert not may_write_hubspot(ev, already_in_crm=True, meeting_evidence=False)
-    assert may_write_hubspot(ev, already_in_crm=True, meeting_evidence=True)
-    assert resolve_stage(ev) == ""
+    assert may_create_hubspot_contact(ev)
+    assert may_write_hubspot(ev, already_in_crm=False)
+    assert resolve_stage(ev) == STAGE["initial_interest"]
     hs, memory, report = _handle(tmp_path, ev)
-    assert hs.writes == []
-    assert hs.contacts == []
-    assert hs.deals == []
-    assert any("no meeting, skip HubSpot" in s for s in report.skipped)
-    assert not any("never_booked" in t for t in report.ticker_enrolled)
+    assert any(w[0] == "upsert_contact" for w in hs.writes)
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["initial_interest"]
     assert "smartlead:sl-1" in memory._local["processed"]
+    assert report.deals_moved or hs.deals
 
 
-def test_heyreach_and_rvm_never_open_replied_deals():
+def test_heyreach_opens_initial_interest_rvm_never_does():
     hey = Engagement(source="heyreach", external_id="hr-1", first_name="Sam", last_name="Reed", linkedin_url="https://www.linkedin.com/in/samreed")
     rvm = Engagement(source="rvm", external_id="rvm-1", phone="+15551234567", summary="RVM callback")
-    assert resolve_stage(hey) == ""
+    assert resolve_stage(hey) == STAGE["initial_interest"]
     assert resolve_stage(rvm) == ""
-    assert choose_deal_action(None, STAGE["replied"], hey) is None
+    assert choose_deal_action(None, STAGE["replied"], hey) == STAGE["initial_interest"]
     assert choose_deal_action(None, STAGE["replied"], rvm) is None
     assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["replied"], hey) is None
 
@@ -560,10 +572,7 @@ def test_heyreach_and_rvm_cold_handle_skips_hubspot(tmp_path):
         summary="RVM callback",
     )
     hs_h, _, report_h = _handle(tmp_path, hey)
-    assert hs_h.writes == []
-    assert hs_h.contacts == []
-    assert hs_h.deals == []
-    assert any("no meeting, skip HubSpot" in s for s in report_h.skipped)
+    assert hs_h.deals[0]["properties"]["dealstage"] == STAGE["initial_interest"]
     hs_r, _, report_r = _handle(tmp_path, rvm)
     assert hs_r.writes == []
     assert hs_r.contacts == []
@@ -591,15 +600,15 @@ def test_cube_html_or_family_is_not_hubspot():
     assert resolve_stage(family) == ""
 
 
-def test_allo_non_disco_no_default_stage():
+def test_allo_non_disco_is_initial_interest():
     ev = Engagement(source="allo", external_id="al-1", email="a@b.com", summary="Quick Allo ping", raw_subject="Allo call")
-    assert not may_create_hubspot_contact(ev)
-    assert resolve_stage(ev) == ""
+    assert may_create_hubspot_contact(ev)
+    assert resolve_stage(ev) == STAGE["initial_interest"]
 
 
 def test_smartlead_never_defaults_nurture_deal():
     ev = Engagement(source="smartlead", external_id="sl-2", email="pat@acme.com", first_name="Pat")
-    assert resolve_stage(ev) == ""
+    assert resolve_stage(ev) == STAGE["initial_interest"]
     assert resolve_stage(ev, {"stage_hint": "nurture"}) == ""
 
 
@@ -609,7 +618,7 @@ def test_no_stage_regression_to_replied_or_nurture():
     assert not should_move_stage(STAGE["discovery_completed"], STAGE["nurture"])
     assert should_move_stage(STAGE["discovery_scheduled"], STAGE["nurture"], back_signal=True)
     assert not should_move_stage(STAGE["discovery_completed"], STAGE["nurture"], back_signal=True)
-    assert not should_move_stage(STAGE["discovery_completed"], STAGE["no_show"], back_signal=True)
+    assert not should_move_stage(STAGE["discovery_completed"], NO_SHOW_HINT, back_signal=True)
     assert should_move_stage(STAGE["replied"], STAGE["discovery_completed"])
     assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["replied"], ev) is None
     assert choose_deal_action(STAGE["proposal_sent"], STAGE["discovery_completed"], ev) is None
@@ -711,7 +720,7 @@ def test_jeremy_personal_except_salesglider_intro():
         raw_subject="New Event: Jeremy Ciotola - SalesGlider Intro",
         extra={"event_type": "SalesGlider Intro"},
     )
-    assert personal_allowed_for_sales_intro(intro)
+    assert not personal_allowed_for_sales_intro(intro)
     assert may_create_hubspot_contact(intro)
 
 
@@ -722,15 +731,15 @@ def test_jeremy_intro_writes_hubspot(tmp_path):
         name="Jeremy Ciotola",
         first_name="Jeremy",
         last_name="Ciotola",
-        email="jeremy@example.com",
+        email="jeremy.ciotola@gmail.com",
         phone="+19733030001",
         raw_subject="New Event: Jeremy Ciotola - SalesGlider Intro",
         extra={"event_type": "SalesGlider Intro"},
     )
     hs, _, report = _handle(tmp_path, ev)
-    assert hs.contacts
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
-    assert not any("personal" == s.split()[-1] and "skip HubSpot" not in s for s in report.skipped if "personal" in s)
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert any("excluded" in s or "personal" in s for s in report.skipped)
 
 
 def test_gcal_and_calendly_stage_from_mail():
@@ -738,7 +747,7 @@ def test_gcal_and_calendly_stage_from_mail():
     assert _stage_from_mail("Invitation: SalesGlider Intro", "calendar-notification@google.com", "scheduled") == (
         STAGE["discovery_scheduled"]
     )
-    assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == STAGE["no_show"]
+    assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == NO_SHOW_HINT
 
 
 def test_meeting_evidence_and_blank_contact():
@@ -1111,11 +1120,9 @@ def test_smartlead_interested_leftover_does_not_leave_hubspot_contact(tmp_path):
         }
     )
     hs, memory, report = _handle(tmp_path, ev, hs=hs)
-    assert not any(w[0] == "upsert_contact" for w in hs.writes)
-    assert any(w[0] == "archive_contact" and w[1] == "mary-1" for w in hs.writes)
-    assert not any(c["id"] == "mary-1" for c in hs.contacts)
-    assert not any("never_booked" in t for t in report.ticker_enrolled)
-    assert any("no meeting, skip HubSpot" in s for s in report.skipped)
+    assert any(c["id"] == "mary-1" for c in hs.contacts)
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["initial_interest"]
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
     assert "smartlead:sl-mary" in memory._local["processed"]
 
 

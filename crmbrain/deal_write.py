@@ -10,10 +10,11 @@ move_deal directly.
 
 from __future__ import annotations
 
-from crmbrain.config import is_excluded_contact
+from crmbrain.config import is_archived_hs_row, is_deleted_stage, is_excluded_contact, NO_SHOW_HINT
 from crmbrain.intelligence import deal_amount_to_write
 from crmbrain.models import CycleReport, Engagement, ProposedWrite
 from crmbrain.policy import (
+    INCREMENT_NO_SHOW,
     choose_deal_action,
     closed_won_notes_only,
     deal_is_locked,
@@ -105,6 +106,9 @@ def commit_deal_move(
     deal_id = str((deal or {}).get("id") or "")
     if not deal_id or not stage:
         return False
+    if is_deleted_stage(stage) or stage in {NO_SHOW_HINT, "no_show", INCREMENT_NO_SHOW}:
+        logger.warning("refuse dealstage write %s", stage)
+        return False
     hs.move_deal(deal_id, stage, evidence=evidence, dealname=dealname)
     return True
 
@@ -126,8 +130,15 @@ def authorize_deal_write(
     the existing deal may be touched for name cleanup only. Any other reason is a block.
     """
     deals = deals if deals is not None else ([deal] if deal else [])
+    if (
+        is_deleted_stage(requested_stage)
+        or requested_stage in {NO_SHOW_HINT, "no_show", INCREMENT_NO_SHOW}
+    ):
+        return "", "", "deleted_stage"
     if is_excluded_contact(ev, contact) or row_has_not_deal_note(contact) or row_has_not_deal_note(deal):
         return "", "", "not_deal"
+    if is_archived_hs_row(contact) or is_archived_hs_row(deal):
+        return "", "", "archived"
     if closed_won_notes_only(ev, deals, contact=contact, company_deals=company_deals):
         return "", "", "closed_won"
     creating = deal is None

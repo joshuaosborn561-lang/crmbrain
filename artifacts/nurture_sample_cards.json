@@ -15,9 +15,10 @@
       "source": "hubspot",
       "industry": "roofing",
       "reason": "kicked_can",
+      "thread_id": "thread-jackie",
       "thread_kind": "reply",
       "subject": "Re: Kelly Roofing intro",
-      "body": "Hey Jackie, you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Jackie, on our call you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -39,7 +40,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Re: Kelly Roofing intro\n\n```Hey Jackie, you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Re: Kelly Roofing intro\n\n```Hey Jackie, on our call you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -81,7 +82,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: jackie@kellyroofing.com\nWhy: kicked_can\nThread: thread reply\nSource: hubspot / \nSignal: Jul 1, 2026\nThey said: \"Check back after our busy season. Roofing crews are slammed until fall.\"\nSubject: Re: Kelly Roofing intro\n\nHey Jackie, you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: jackie@kellyroofing.com\nWhy: kicked_can\nThread: thread reply\nSource: hubspot / \nSignal: Jul 1, 2026\nThey said: \"Check back after our busy season. Roofing crews are slammed until fall.\"\nSubject: Re: Kelly Roofing intro\n\nHey Jackie, on our call you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Joel Stewart",
@@ -89,9 +90,10 @@
       "source": "hubspot",
       "industry": "hvac",
       "reason": "kicked_can",
+      "thread_id": "thread-joel",
       "thread_kind": "reply",
       "subject": "Re: HVAC shoulder season",
-      "body": "Hey Joel, you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Joel, on our call you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -113,7 +115,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Re: HVAC shoulder season\n\n```Hey Joel, you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Re: HVAC shoulder season\n\n```Hey Joel, on our call you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -155,7 +157,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: joel@thechillbrothers.com\nWhy: kicked_can\nThread: thread reply\nSource: hubspot / \nSignal: Jul 10, 2026\nThey said: \"We are slammed through summer, check back in the fall about filling shoulder season.\"\nSubject: Re: HVAC shoulder season\n\nHey Joel, you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: joel@thechillbrothers.com\nWhy: kicked_can\nThread: thread reply\nSource: hubspot / \nSignal: Jul 10, 2026\nThey said: \"We are slammed through summer, check back in the fall about filling shoulder season.\"\nSubject: Re: HVAC shoulder season\n\nHey Joel, on our call you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Dana Ortiz",
@@ -163,9 +165,10 @@
       "source": "hubspot",
       "industry": "hvac",
       "reason": "kicked_can",
+      "thread_id": "",
       "thread_kind": "new_thread",
-      "subject": "BrightCool Heating & Air",
-      "body": "Hey Dana, you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "subject": "BrightCool Heating & Air follow up",
+      "body": "Hey Dana, on our call you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -187,7 +190,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* BrightCool Heating & Air\n\n```Hey Dana, you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* BrightCool Heating & Air follow up\n\n```Hey Dana, on our call you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -229,7 +232,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: dana@brightcool.test\nWhy: kicked_can\nThread: new thread\nSource: hubspot / SalesGlider HVAC Sports Offer\nSignal: Jul 10, 2026\nThey said: \"Dana said they are slammed through summer, check back in the fall.\"\nSubject: BrightCool Heating & Air\n\nHey Dana, you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: dana@brightcool.test\nWhy: kicked_can\nThread: new thread\nSource: hubspot / SalesGlider HVAC Sports Offer\nSignal: Jul 10, 2026\nThey said: \"Dana said they are slammed through summer, check back in the fall.\"\nSubject: BrightCool Heating & Air follow up\n\nHey Dana, on our call you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Pat Reyes",
@@ -237,9 +240,10 @@
       "source": "smartlead",
       "industry": "roofing",
       "reason": "booked",
+      "thread_id": "",
       "thread_kind": "new_thread",
       "subject": "Summit Roofs: send me info",
-      "body": "Hey Pat, you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Pat, on our call you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -261,7 +265,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Summit Roofs: send me info\n\n```Hey Pat, you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Summit Roofs: send me info\n\n```Hey Pat, on our call you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -303,7 +307,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: pat@summitroofs.test\nWhy: booked\nThread: new thread\nSource: smartlead / SalesGlider Roofers\nSignal: Jun 3, 2026\nThey said: \"Yes, send me info. Spring is our slow season.\"\nSubject: Summit Roofs: send me info\n\nHey Pat, you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: pat@summitroofs.test\nWhy: booked\nThread: new thread\nSource: smartlead / SalesGlider Roofers\nSignal: Jun 3, 2026\nThey said: \"Yes, send me info. Spring is our slow season.\"\nSubject: Summit Roofs: send me info\n\nHey Pat, on our call you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Casey Lin",
@@ -311,9 +315,10 @@
       "source": "hubspot",
       "industry": null,
       "reason": "kicked_can",
+      "thread_id": "",
       "thread_kind": "new_thread",
       "subject": "Lin Holdings: Maybe later this year",
-      "body": "Hey Casey, you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Casey, on our call you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -335,7 +340,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Lin Holdings: Maybe later this year\n\n```Hey Casey, you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Lin Holdings: Maybe later this year\n\n```Hey Casey, on our call you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -377,7 +382,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: casey@linholdings.test\nWhy: kicked_can\nThread: new thread\nSource: hubspot / \nSignal: Aug 1, 2026\nThey said: \"Maybe later this year.\"\nSubject: Lin Holdings: Maybe later this year\n\nHey Casey, you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: casey@linholdings.test\nWhy: kicked_can\nThread: new thread\nSource: hubspot / \nSignal: Aug 1, 2026\nThey said: \"Maybe later this year.\"\nSubject: Lin Holdings: Maybe later this year\n\nHey Casey, on our call you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Morgan Pike",
@@ -385,9 +390,10 @@
       "source": "gmail",
       "industry": null,
       "reason": "kicked_can",
+      "thread_id": "t-777",
       "thread_kind": "reply",
       "subject": "Re: Q4 follow up",
-      "body": "Hey Morgan, you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Morgan, on our call you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -409,7 +415,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Re: Q4 follow up\n\n```Hey Morgan, you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Re: Q4 follow up\n\n```Hey Morgan, on our call you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -451,7 +457,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: morgan@peakplumb.test\nWhy: kicked_can\nThread: thread reply\nSource: gmail / \nSignal: Jun 21, 2026\nThey said: \"Interested but timing is bad until Q4. Ping me then.\"\nSubject: Re: Q4 follow up\n\nHey Morgan, you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: morgan@peakplumb.test\nWhy: kicked_can\nThread: thread reply\nSource: gmail / \nSignal: Jun 21, 2026\nThey said: \"Interested but timing is bad until Q4. Ping me then.\"\nSubject: Re: Q4 follow up\n\nHey Morgan, on our call you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Lee Ng",
@@ -459,9 +465,10 @@
       "source": "smartlead",
       "industry": "msp",
       "reason": "booked",
+      "thread_id": "",
       "thread_kind": "new_thread",
       "subject": "Bytewise: just lost our SDR, maybe now",
-      "body": "Hey Lee, you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Lee, on our call you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -483,7 +490,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Bytewise: just lost our SDR, maybe now\n\n```Hey Lee, you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Bytewise: just lost our SDR, maybe now\n\n```Hey Lee, on our call you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -525,17 +532,18 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: lee@bytewise.test\nWhy: booked\nThread: new thread\nSource: smartlead / SalesGlider MSPs\nSignal: Jun 15, 2026\nThey said: \"We just lost our SDR, maybe now.\"\nSubject: Bytewise: just lost our SDR, maybe now\n\nHey Lee, you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: lee@bytewise.test\nWhy: booked\nThread: new thread\nSource: smartlead / SalesGlider MSPs\nSignal: Jun 15, 2026\nThey said: \"We just lost our SDR, maybe now.\"\nSubject: Bytewise: just lost our SDR, maybe now\n\nHey Lee, on our call you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Ari Stone",
       "email": "stalled@fastpipe.test",
       "source": "hubspot",
       "industry": null,
-      "reason": "met",
+      "reason": "kicked_can",
+      "thread_id": "",
       "thread_kind": "new_thread",
       "subject": "FastPipe: Proposal is sitting",
-      "body": "Hey Ari, you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Ari, on our call you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -550,14 +558,14 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*To:* stalled@fastpipe.test\n*Why:* met\n*Thread:* new thread\n*Source:* hubspot / -\n*Signal:* Aug 18, 2026\n*They said:* \"Proposal is sitting. No activity since mid-August.\""
+            "text": "*To:* stalled@fastpipe.test\n*Why:* kicked_can\n*Thread:* new thread\n*Source:* hubspot / -\n*Signal:* Aug 18, 2026\n*They said:* \"Proposal is sitting. No activity since mid-August.\""
           }
         },
         {
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* FastPipe: Proposal is sitting\n\n```Hey Ari, you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* FastPipe: Proposal is sitting\n\n```Hey Ari, on our call you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -599,7 +607,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: stalled@fastpipe.test\nWhy: met\nThread: new thread\nSource: hubspot / \nSignal: Aug 18, 2026\nThey said: \"Proposal is sitting. No activity since mid-August.\"\nSubject: FastPipe: Proposal is sitting\n\nHey Ari, you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: stalled@fastpipe.test\nWhy: kicked_can\nThread: new thread\nSource: hubspot / \nSignal: Aug 18, 2026\nThey said: \"Proposal is sitting. No activity since mid-August.\"\nSubject: FastPipe: Proposal is sitting\n\nHey Ari, on our call you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Earl Jackson",
@@ -607,9 +615,10 @@
       "source": "hubspot",
       "industry": "construction",
       "reason": "kicked_can",
+      "thread_id": "",
       "thread_kind": "new_thread",
       "subject": "Accg Inc - Concrete Contractor Orlando: Concrete season is busy",
-      "body": "Hey Earl, you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Earl, on our call you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -631,7 +640,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* Accg Inc - Concrete Contractor Orlando: Concrete season is busy\n\n```Hey Earl, you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* Accg Inc - Concrete Contractor Orlando: Concrete season is busy\n\n```Hey Earl, on our call you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -673,7 +682,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: ej@accg-inc.com\nWhy: kicked_can\nThread: new thread\nSource: hubspot / \nSignal: Jul 20, 2026\nThey said: \"Concrete season is busy. Let's talk after this pour.\"\nSubject: Accg Inc - Concrete Contractor Orlando: Concrete season is busy\n\nHey Earl, you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: ej@accg-inc.com\nWhy: kicked_can\nThread: new thread\nSource: hubspot / \nSignal: Jul 20, 2026\nThey said: \"Concrete season is busy. Let's talk after this pour.\"\nSubject: Accg Inc - Concrete Contractor Orlando: Concrete season is busy\n\nHey Earl, on our call you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     },
     {
       "name": "Sam Cole",
@@ -681,9 +690,10 @@
       "source": "hubspot",
       "industry": "staffing",
       "reason": "met",
+      "thread_id": "",
       "thread_kind": "new_thread",
       "subject": "HireRight: Need to fill two AE seats before Q4",
-      "body": "Hey Sam, you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "body": "Hey Sam, on our call you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn",
       "valid": true,
       "blocks": [
         {
@@ -705,7 +715,7 @@
           "type": "section",
           "text": {
             "type": "mrkdwn",
-            "text": "*Subject:* HireRight: Need to fill two AE seats before Q4\n\n```Hey Sam, you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+            "text": "*Subject:* HireRight: Need to fill two AE seats before Q4\n\n```Hey Sam, on our call you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn```"
           }
         },
         {
@@ -747,7 +757,7 @@
           ]
         }
       ],
-      "fallback_text": "90-day ticker (approve before send)\nTo: sam@hireright.test\nWhy: met\nThread: new thread\nSource: hubspot / SalesGlider Staffing\nSignal: Jun 10, 2026\nThey said: \"Need to fill two AE seats before Q4.\"\nSubject: HireRight: Need to fill two AE seats before Q4\n\nHey Sam, you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+      "fallback_text": "90-day ticker (approve before send)\nTo: sam@hireright.test\nWhy: met\nThread: new thread\nSource: hubspot / SalesGlider Staffing\nSignal: Jun 10, 2026\nThey said: \"Need to fill two AE seats before Q4.\"\nSubject: HireRight: Need to fill two AE seats before Q4\n\nHey Sam, on our call you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them.\n\nWorth a look?\n\nJosh Osborn"
     }
   ]
 }

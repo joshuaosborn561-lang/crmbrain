@@ -19,6 +19,7 @@ from crmbrain import (
 )
 from crmbrain.budget import WriteBudget
 from crmbrain.config import (
+    NO_SHOW_HINT,
     STAGE,
     Settings,
     compute_lookback_start,
@@ -36,6 +37,7 @@ from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.deal_write import authorize_deal_write, commit_amount_write, commit_deal_write, propose_deal_write
+from crmbrain.policy import INCREMENT_NO_SHOW
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.leadmagic import should_skip_email, usable_linkedin
 from crmbrain.sources import cube_acr, fireflies, gmail_scan, rvm, smartlead
@@ -391,6 +393,8 @@ def _handle_engagement(
     notes_only = policy.closed_won_notes_only(ev, deals, contact=already, company_deals=_company_deals(hs, ev, already))
     if ev.source in {"cube_acr", "fireflies"}:
         salesish = policy.cube_has_sales_intent(ev, decision, settings.intent_min_confidence)
+    elif ev.source in policy.INITIAL_INTEREST_SOURCES:
+        salesish = True
     else:
         salesish = intent.is_confident_sales(decision, settings.intent_min_confidence)
     if notes_only and already:
@@ -688,6 +692,16 @@ def _apply_transcript_intelligence(
             )
 
     stage = policy.resolve_stage(ev, facts)
+    if policy.unclear_nurture(ev, facts):
+        deals_flag = _contact_deals(hs, contact)
+        live_flag = policy.live_open_deals(deals_flag)
+        if live_flag and not settings.dry_run:
+            from crmbrain.hubspot import set_josh_review_flag
+
+            set_josh_review_flag(
+                hs, max(live_flag, key=policy.deal_richness), "unclear_nurture"
+            )
+        report.review_queue.append(f"{ev.display_name() or ev.email} unclear_nurture")
     if policy.has_poc_evidence(ev) and stage not in {STAGE["signed"], STAGE["paid"]}:
         line = f"{ev.display_name() or ev.email} poc_hint"
         if line not in report.review_queue:
@@ -1128,7 +1142,20 @@ def apply_gmail_stage_update(
             memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
         return
     contact_id = (contact or {}).get("id") or (ev.extra or {}).get("hubspot_contact_id") or ""
-    if ev.stage_hint == STAGE["no_show"]:
+    if contact_id:
+        from crmbrain import renewals
+
+        deals_ren = _contact_deals(hs, contact)
+        moved = renewals.maybe_schedule_renewal_call(hs, deals_ren, ev)
+        if moved:
+            report.deals_moved.append(
+                f"{ev.email or ev.display_name()} renewal -> call_scheduled ({moved.get('id')})"
+            )
+            if not already:
+                memory.mark_processed(ev.source, ev.external_id, {"skip": "renewal_call"})
+                report.processed.append(f"gmail:{ev.raw_subject[:60]}")
+            return
+    if ev.stage_hint in {NO_SHOW_HINT, "no_show"}:
         scheduled_at = policy.scheduled_at_from_engagement(ev)
         if scheduled_at is None:
             scheduled_at = gmail_scan.parse_meeting_at(ev.raw_subject, ev.summary)
@@ -1144,6 +1171,29 @@ def apply_gmail_stage_update(
             has_closed_won=has_closed_won,
         )
         ev.stage_hint = write_stage
+        if write_stage == INCREMENT_NO_SHOW:
+            deals_inc = _contact_deals(hs, contact)
+            live_inc = policy.live_open_deals(deals_inc)
+            deal_inc = max(live_inc, key=policy.deal_richness) if live_inc else None
+            if deal_inc and deal_inc.get("id") and not policy.deal_is_locked(deal_inc):
+                from crmbrain.hubspot import increment_no_show_count
+
+                if not settings.dry_run:
+                    increment_no_show_count(hs, deal_inc)
+                report.deals_moved.append(
+                    f"{ev.email or ev.display_name()} no_show_count++ (stage unchanged)"
+                )
+                enrolled = ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
+                if enrolled:
+                    report.ticker_enrolled.append(f"{ev.email} no_show")
+            else:
+                report.skipped.append(f"{ev.email or ev.external_id} no_show no open deal")
+            if not already:
+                memory.mark_processed(
+                    ev.source, ev.external_id, {"subject": ev.raw_subject, "skip": "no_show_count"}
+                )
+                report.processed.append(f"gmail:{ev.raw_subject[:60]}")
+            return
         if already and not write_stage:
             report.skipped.append(f"{ev.source}:{ev.external_id} stale no_show")
             return
@@ -1295,7 +1345,7 @@ def apply_gmail_stage_update(
             wrote_amount = commit_amount_write(hs, deal, write_amount, ev=ev, contact=contact)
         if wrote_amount:
             report.amounts_set.append(f"{ev.email} {write_amount}")
-        if ev.stage_hint == STAGE["no_show"]:
+        if ev.stage_hint in {NO_SHOW_HINT, "no_show"}:
             enrolled = ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
             if enrolled:
                 report.ticker_enrolled.append(f"{ev.email} no_show")
@@ -1554,6 +1604,13 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             )
         except Exception as exc:
             report.errors.append(f"reconcile: {exc}")
+        try:
+            from crmbrain import renewals
+
+            if not settings.dry_run:
+                renewals.sweep(hs, report, settings, engagements=held_this_cycle)
+        except Exception as exc:
+            report.errors.append(f"renewals: {exc}")
     elif gmail:
         try:
             mail_events = gmail_scan.scan(settings, gmail, hs, report)

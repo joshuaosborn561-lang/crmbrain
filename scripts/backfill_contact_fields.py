@@ -29,14 +29,15 @@ from crmbrain.leadmagic import (  # noqa: E402
 JUNK_LI = "dnyanoba-mulgir"
 BLANK_DEALS = ("344689944309", "344775829222", "344678917830", "344713141954")
 STAGE_LABEL = {
-    "appointmentscheduled": "Replied",
-    "qualifiedtobuy": "Discovery Scheduled",
-    "presentationscheduled": "Discovery Completed",
+    "appointmentscheduled": "Initial Interest",
+    "qualifiedtobuy": "Meeting Booked",
+    "presentationscheduled": "Discovery Held",
     "decisionmakerboughtin": "Proposal Sent",
-    "closedwon": "Signed",
-    "3482933986": "Paid",
+    "4391745240": "Needs Stakeholder Approval",
+    "4391699184": "Contract Sent / Signed Not Yet Paid",
+    "4391745241": "POC",
+    "closedwon": "Closed Won",
     "3486952153": "Nurture",
-    "3557889773": "No Show",
     "closedlost": "Closed Lost",
 }
 

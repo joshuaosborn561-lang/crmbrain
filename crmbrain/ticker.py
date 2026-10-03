@@ -15,11 +15,13 @@ REASON_RANK = {"no_show": 3, "kicked_can": 2, "deal_died": 2, "never_booked": 1}
 SOFT_STOPS = frozenset({"booked", "emailed_recently", "deal_archived", "legacy_reset", "manual_snooze"})
 HARD_STOPS = frozenset({"client", "non_deal", "unsubscribed", "won", "do_not_contact", "no_identity"})
 MEETING_STAGES = {
-    STAGE["discovery_scheduled"],
-    STAGE["discovery_completed"],
+    STAGE["meeting_booked"],
+    STAGE["discovery_held"],
     STAGE["proposal_sent"],
-    STAGE["signed"],
-    STAGE["paid"],
+    STAGE["needs_stakeholder_approval"],
+    STAGE["contract_signed_unpaid"],
+    STAGE["poc"],
+    STAGE["closed_won"],
 }
 
 
@@ -104,7 +106,7 @@ def already_enrolled(
 def classify_reason(*, stage: str = "", hint: str = "", text: str = "") -> str:
     if hint in REASON_RANK:
         return hint
-    if stage in {STAGE["no_show"], "no_show"}:
+    if stage == "no_show":
         return "no_show"
     facts = heuristic_extract(text or "")
     if facts.get("ticker_reason") in REASON_RANK:
@@ -356,7 +358,8 @@ VERTICALS: tuple[dict, ...] = (
 
 # Josh 2026-09-11: no free POC / free 10K campaign. Guarantee meetings or keep working.
 MEETING_GUARANTEE = "We guarantee meetings, or we keep working until you hit them."
-AIRPODS_OFFER_LIVE = True
+# Josh: no AirPods or tickets in nurture / ticker copy.
+AIRPODS_OFFER_LIVE = False
 
 _FREE_POC_PHRASES = (
     "free poc",
@@ -455,22 +458,14 @@ def infer_industry(
 
 
 def _cta_paragraph(*, include_loom: bool = False, airpods_style: str = "chat") -> str:
-    """Meeting-guarantee first. Soft AirPods gift is optional, never a free POC."""
-    if airpods_style == "name":
-        gift = (
-            "I've also got an extra pair of AirPods with your name on it if you just "
-            "want to hop on a call and see if it makes sense."
-        )
-    elif include_loom:
-        gift = (
-            "I can send a Loom, or a pair of AirPods just for chatting 15 minutes "
-            "to see if this makes sense."
-        )
-    else:
-        gift = (
-            "I can also send you a pair of AirPods just for chatting 15 minutes to "
-            "see if this makes sense."
-        )
+    """Meeting-guarantee first. No AirPods, tickets, or gift offers."""
+    del include_loom, airpods_style
+    if not AIRPODS_OFFER_LIVE:
+        return MEETING_GUARANTEE
+    gift = (
+        "I can also send you a pair of AirPods just for chatting 15 minutes to "
+        "see if this makes sense."
+    )
     return f"{MEETING_GUARANTEE} {gift}"
 
 

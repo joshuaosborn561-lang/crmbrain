@@ -440,6 +440,27 @@ def test_ambiguous_name_with_no_deals_is_review_not_create(tmp_path):
     assert any("ambiguous_name" in line for line in report.review_queue + report.skipped)
 
 
+def test_dave_ackley_existing_open_deal_blocks_create():
+    """Item 7: freeze off still refuses a new deal when contact 531508756184 already has one."""
+    goliath, _goliathsec, deal = _dave_contacts_and_deal()
+    ev = _dave_cube_sep24(email="dave@goliath.com", occurred_at=OCT_4)
+    settings = make_settings(dry_run=True, manual_freeze_at=None)
+    ok, reason = may_open_new_deal(ev, goliath, [deal], settings)
+    assert ok is False
+    assert reason == "existing_open_deal"
+    stage, amount, write_reason = authorize_deal_write(
+        ev,
+        requested_stage=STAGE["discovery_completed"],
+        contact=goliath,
+        deal=None,
+        deals=[deal],
+        settings=settings,
+    )
+    assert stage == ""
+    assert amount == ""
+    assert write_reason == "existing_open_deal"
+
+
 def test_never_propose_create_with_empty_stage():
     report = CycleReport()
     propose_deal_write(report, action="create", label="Dave Ackley", stage="")
