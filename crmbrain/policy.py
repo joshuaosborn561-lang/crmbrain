@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from crmbrain.config import (
+    FREE_MAIL_DOMAINS,
     JOSH_DOMAINS,
     JOSH_EMAILS,
     NO_SHOW_HINT,
@@ -15,9 +16,12 @@ from crmbrain.config import (
     Settings,
     canonicalize_stage,
     has_not_deal_note,
+    is_archived_hs_row,
     is_client_context,
+    is_closed_won_client_domain,
     is_deleted_stage,
     is_excluded_contact,
+    is_non_deal_person,
     is_zoom_room_address,
     now_utc,
 )
@@ -43,22 +47,6 @@ TICKER_WITHOUT_HUBSPOT = frozenset({"smartlead", "heyreach", "rvm"})
 MEETING_CRM_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
 NO_SHOW_GRACE = timedelta(hours=2)
 HELD_MATCH_WINDOW = timedelta(hours=24)
-FREE_MAIL_DOMAINS = frozenset(
-    {
-        "gmail.com",
-        "googlemail.com",
-        "yahoo.com",
-        "outlook.com",
-        "hotmail.com",
-        "live.com",
-        "icloud.com",
-        "me.com",
-        "aol.com",
-        "proton.me",
-        "protonmail.com",
-        "msn.com",
-    }
-)
 JOSH_NAME_KEYS = frozenset({"joshua osborn", "josh osborn", "joshua", "josh"})
 _NOTETAKER_DOMAINS = frozenset(
     {"fireflies.ai", "otter.ai", "fathom.video", "read.ai", "krisp.ai", "tldv.io"}
@@ -287,11 +275,9 @@ def is_salesglider_intro(ev: Engagement) -> bool:
 
 
 def personal_allowed_for_sales_intro(ev: Engagement) -> bool:
-    """Jeremy Ciotola is personal except an explicit SalesGlider Intro meeting."""
-    name = (ev.display_name() or ev.name or "").lower()
-    if "jeremy" not in name and "ciotola" not in name:
-        return False
-    return is_salesglider_intro(ev) and ev.source in {"calendly", "fireflies", "gmail"}
+    """Hard exclude. Jeremy Ciotola is personal and never opens a deal or card."""
+    del ev
+    return False
 
 
 def is_discovery_meeting(ev: Engagement) -> bool:
@@ -900,6 +886,54 @@ def may_mutate_existing_deal(
     return True
 
 
+def exclude_reason_for_nurture_or_deal(
+    *,
+    name: str = "",
+    email: str = "",
+    company: str = "",
+    phone: str = "",
+    title: str = "",
+    notes: str = "",
+    contact: dict | None = None,
+    deals: list[dict] | None = None,
+    company_deals: list[dict] | None = None,
+    extra: dict | None = None,
+) -> str:
+    """Empty if allowed. Else a skip reason shared by nurture cards and deal sync."""
+    extra = extra or {}
+    if (
+        is_archived_hs_row(contact)
+        or extra.get("archived")
+        or extra.get("contact_archived")
+        or extra.get("deal_archived")
+    ):
+        return "archived"
+    for deal in list(deals or []) + list(company_deals or []):
+        if is_archived_hs_row(deal):
+            return "archived"
+    if is_non_deal_person(
+        name=name, email=email, company=company, phone=phone, title=title, notes=notes
+    ):
+        return "non_deal"
+    extra_domains = extra.get("closed_won_domains") or extra.get("won_domains") or set()
+    if isinstance(extra_domains, str):
+        extra_domains = {extra_domains}
+    if is_closed_won_client_domain(email=email, extra_domains=set(extra_domains)):
+        return "closed_won"
+    if person_or_company_closed_won(deals, company_deals, extra):
+        return "closed_won"
+    from crmbrain.renewals import has_existing_client_deal, is_renewal_deal
+
+    if extra.get("has_renewal_deal") or extra.get("renewal_pipeline"):
+        return "client"
+    if has_existing_client_deal(deals, company_deals):
+        return "client"
+    for deal in list(deals or []) + list(company_deals or []):
+        if is_renewal_deal(deal):
+            return "client"
+    return ""
+
+
 def may_open_new_deal(
     ev: Engagement,
     contact: dict | None,
@@ -914,6 +948,19 @@ def may_open_new_deal(
         return False, "non_person"
     if (ev.extra or {}).get("name_ambiguous"):
         return False, "ambiguous_name"
+    blocked = exclude_reason_for_nurture_or_deal(
+        name=ev.display_name() or ev.name or f"{ev.first_name} {ev.last_name}".strip(),
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+        title=ev.title,
+        contact=contact,
+        deals=deals,
+        company_deals=company_deals,
+        extra=ev.extra or {},
+    )
+    if blocked:
+        return False, "not_deal" if blocked == "non_deal" else blocked
     if is_excluded_contact(ev, contact):
         return False, "not_deal"
     if row_has_not_deal_note(contact):

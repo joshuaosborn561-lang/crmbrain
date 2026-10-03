@@ -121,6 +121,7 @@ PERSONAL_NAMES = {
 }
 PERSONAL_FIRST_NAMES = {"sarah", "jeremy", "diana", "cayden", "dad", "mom", "father", "nonna"}
 # Never write these people to HubSpot (contacts, notes, or deals).
+# Hard exclude for both nurture cards and deal sync.
 SEEDED_NON_DEAL_NAMES = (
     "cynthia hernandez",
     "alex branning",
@@ -128,6 +129,9 @@ SEEDED_NON_DEAL_NAMES = (
     "bob carlson",
     "noah brown",
     "leroy hite",
+    "gabriel lopez",
+    "josh bereano",
+    "jeremy ciotola",
     "shore capital",
 )
 PARTNER_INVESTOR_HINTS = (
@@ -143,6 +147,26 @@ NOT_DEAL_NOTE_RE = re.compile(
 )
 SEEDED_NON_DEAL_EMAILS: tuple[str, ...] = (
     "bobcbobc@gmail.com",
+    "jeremy.ciotola@gmail.com",
+    "noahbbrown951@gmail.com",
+    "gabriel.lopez@rocketbox.mx",
+)
+# Free-mail domains never count as a Closed Won client domain.
+FREE_MAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "yahoo.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "icloud.com",
+        "me.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "msn.com",
+    }
 )
 PERSONAL_FAMILY_INTENTS = frozenset({"personal", "family"})
 JOSH_EMAILS = {
@@ -579,8 +603,52 @@ def date_window_cdt(days: int) -> list[str]:
     return [(end - timedelta(days=i)).isoformat() for i in range(span, -1, -1)]
 
 
+def is_archived_hs_row(row: dict | None) -> bool:
+    """True when a HubSpot contact or deal is archived."""
+    if not isinstance(row, dict) or not row:
+        return False
+    if row.get("archived") is True:
+        return True
+    if row.get("archivedAt"):
+        return True
+    props = row.get("properties") if isinstance(row.get("properties"), dict) else {}
+    for key in ("hs_is_archived", "archived"):
+        raw = str(props.get(key) or "").strip().lower()
+        if raw in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def email_domain(email: str | None = None, domain: str | None = None) -> str:
+    raw = (domain or "").strip().lower()
+    if raw:
+        return raw.split("@")[-1]
+    email_l = (email or "").strip().lower()
+    if "@" in email_l:
+        return email_l.rsplit("@", 1)[-1]
+    return ""
+
+
+def is_closed_won_client_domain(
+    email: str | None = None,
+    domain: str | None = None,
+    extra_domains: set[str] | frozenset[str] | None = None,
+) -> bool:
+    """True when this work email domain belongs to a current Closed Won client."""
+    host = email_domain(email, domain)
+    if not host or host in FREE_MAIL_DOMAINS or host in JOSH_DOMAINS:
+        return False
+    extras = {str(d or "").strip().lower() for d in (extra_domains or set()) if str(d or "").strip()}
+    extras.discard("")
+    extras -= FREE_MAIL_DOMAINS
+    extras -= JOSH_DOMAINS
+    return host in extras
+
+
 def is_excluded_contact(ev=None, contact: dict | None = None) -> bool:
     """True when the engagement or HubSpot contact is on the non-deal list."""
+    if is_archived_hs_row(contact):
+        return True
     props = (contact or {}).get("properties") or {}
     name = ""
     email = ""

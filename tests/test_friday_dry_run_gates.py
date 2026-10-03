@@ -104,9 +104,7 @@ def test_gabriel_lopez_calendly_plus_fireflies_hire_creates_no_deal(tmp_path):
     assert hs.contacts == []
     assert not any(w[0] == "upsert_deal" for w in hs.writes)
     assert not any(w[0] == "upsert_contact" for w in hs.writes)
-    assert report.review_queue
-    assert any("hire" in s for s in report.skipped)
-    assert not memory.already_processed("gmail", "cal-gabriel")
+    assert any("excluded" in s or "hire" in s for s in report.skipped) or report.review_queue
 
 
 def test_gabriel_lopez_cycle_creates_no_deal(tmp_path, monkeypatch):
@@ -145,7 +143,7 @@ def test_gabriel_lopez_cycle_creates_no_deal(tmp_path, monkeypatch):
     assert hs.deals == []
     assert hs.contacts == []
     assert not any(w[0] == "upsert_deal" for w in hs.writes)
-    assert any("hire" in (s + " ".join(report.review_queue)) for s in report.skipped) or report.review_queue
+    assert any("excluded" in s or "hire" in s for s in report.skipped) or report.review_queue
 
 
 def test_contractor_agreement_pandadoc_is_not_signed():

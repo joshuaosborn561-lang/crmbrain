@@ -10,7 +10,7 @@ move_deal directly.
 
 from __future__ import annotations
 
-from crmbrain.config import is_deleted_stage, is_excluded_contact, NO_SHOW_HINT
+from crmbrain.config import is_archived_hs_row, is_deleted_stage, is_excluded_contact, NO_SHOW_HINT
 from crmbrain.intelligence import deal_amount_to_write
 from crmbrain.models import CycleReport, Engagement, ProposedWrite
 from crmbrain.policy import (
@@ -137,6 +137,8 @@ def authorize_deal_write(
         return "", "", "deleted_stage"
     if is_excluded_contact(ev, contact) or row_has_not_deal_note(contact) or row_has_not_deal_note(deal):
         return "", "", "not_deal"
+    if is_archived_hs_row(contact) or is_archived_hs_row(deal):
+        return "", "", "archived"
     if closed_won_notes_only(ev, deals, contact=contact, company_deals=company_deals):
         return "", "", "closed_won"
     creating = deal is None

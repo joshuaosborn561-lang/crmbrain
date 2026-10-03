@@ -292,20 +292,85 @@ class HubSpot:
                     logger.warning("create deal prop %s: %s", prop["name"], created.text[:300])
 
     def _search(self, object_name: str, filters: list[dict], properties: list[str]) -> list[dict]:
-        payload = {
-            "filterGroups": [{"filters": filters}],
-            "properties": properties,
-            "limit": 10,
-        }
+        return self.search_objects(object_name, filters, properties, page_limit=10)
+
+    def search_objects(
+        self,
+        object_name: str,
+        filters: list[dict],
+        properties: list[str],
+        *,
+        page_limit: int = 100,
+        max_results: int = 500,
+    ) -> list[dict]:
+        out: list[dict] = []
+        after = None
+        while len(out) < max_results:
+            payload: dict[str, Any] = {
+                "filterGroups": [{"filters": filters}],
+                "properties": properties,
+                "limit": min(100, page_limit, max_results - len(out)),
+            }
+            if after:
+                payload["after"] = after
+            resp = self._request(
+                "POST",
+                f"/crm/v3/objects/{object_name}/search",
+                json=payload,
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            out.extend(data.get("results") or [])
+            after = (data.get("paging") or {}).get("next", {}).get("after")
+            if not after:
+                break
+        return out
+
+    def contacts_for_deal(self, deal_id: str, properties: list[str] | None = None) -> list[dict]:
+        if not deal_id:
+            return []
         resp = self._request(
-            "POST",
-            f"/crm/v3/objects/{object_name}/search",
-            json=payload,
+            "GET",
+            f"/crm/v4/objects/deals/{deal_id}/associations/contacts",
             retry=True,
             timeout=READ_TIMEOUT,
         )
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+        if resp.status_code >= 400:
+            return []
+        ids = []
+        for row in resp.json().get("results") or []:
+            cid = row.get("toObjectId") or row.get("id")
+            if cid:
+                ids.append(str(cid))
+        props = ",".join(
+            properties
+            or [
+                "email",
+                "firstname",
+                "lastname",
+                "phone",
+                "company",
+                "personal_details",
+                "family_notes",
+                "relationship_hooks",
+                "pain_points",
+                "jobtitle",
+            ]
+        )
+        contacts = []
+        for cid in ids:
+            c = self._request(
+                "GET",
+                f"/crm/v3/objects/contacts/{cid}",
+                params={"properties": props},
+                retry=True,
+                timeout=20,
+            )
+            if c.ok:
+                contacts.append(c.json())
+        return contacts
 
     def find_contact(self, email: str = "", phone: str = "", name: str = "") -> dict | None:
         if email and is_zoom_room_address(email):

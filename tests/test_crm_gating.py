@@ -720,7 +720,7 @@ def test_jeremy_personal_except_salesglider_intro():
         raw_subject="New Event: Jeremy Ciotola - SalesGlider Intro",
         extra={"event_type": "SalesGlider Intro"},
     )
-    assert personal_allowed_for_sales_intro(intro)
+    assert not personal_allowed_for_sales_intro(intro)
     assert may_create_hubspot_contact(intro)
 
 
@@ -731,15 +731,15 @@ def test_jeremy_intro_writes_hubspot(tmp_path):
         name="Jeremy Ciotola",
         first_name="Jeremy",
         last_name="Ciotola",
-        email="jeremy@example.com",
+        email="jeremy.ciotola@gmail.com",
         phone="+19733030001",
         raw_subject="New Event: Jeremy Ciotola - SalesGlider Intro",
         extra={"event_type": "SalesGlider Intro"},
     )
     hs, _, report = _handle(tmp_path, ev)
-    assert hs.contacts
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
-    assert not any("personal" == s.split()[-1] and "skip HubSpot" not in s for s in report.skipped if "personal" in s)
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert any("excluded" in s or "personal" in s for s in report.skipped)
 
 
 def test_gcal_and_calendly_stage_from_mail():

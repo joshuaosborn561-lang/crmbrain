@@ -184,8 +184,7 @@ def test_apply_timeline_and_restore_skip_hire_calendar_create(tmp_path):
     restore_missing_deals(hs, settings, memory, report, timelines)
     assert hs.deals == []
     assert hs.contacts == []
-    assert report.review_queue
-    assert any("hire" in s for s in report.skipped) or any("hire" in x for x in report.review_queue)
+    assert any("excluded" in s or "hire" in s for s in report.skipped) or report.review_queue
 
 
 def test_restore_missing_deals_skips_day_job_calendar_create(tmp_path):

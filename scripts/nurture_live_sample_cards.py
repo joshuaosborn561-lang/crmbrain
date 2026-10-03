@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crmbrain.config import STAGE
-from crmbrain.nurture import compose_nurture_draft, infer_nurture_reason
+from crmbrain.nurture import compose_nurture_draft, infer_nurture_reason, is_not_deal_candidate
 
 NURTURE = STAGE["nurture"]
 
@@ -147,6 +147,8 @@ ROWS = [
 def main() -> int:
     cards = []
     for row in ROWS:
+        if is_not_deal_candidate(name=str(row.get("name") or ""), email=str(row.get("email") or "")):
+            continue
         reason = infer_nurture_reason(
             reason=str(row.get("reason") or ""),
             deal_stage=str(row.get("deal_stage") or ""),

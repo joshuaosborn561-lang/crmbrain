@@ -414,7 +414,36 @@ def main() -> int:
         default=True,
         help="Default. Print counts and write nothing.",
     )
+    parser.add_argument(
+        "--sample-cards",
+        type=int,
+        metavar="N",
+        help="Read HubSpot Nurture-stage deals and write N sample cards as JSON.",
+    )
+    parser.add_argument(
+        "--out",
+        default="",
+        help="JSON path for --sample-cards (default artifacts/nurture_hubspot_sample_cards.json).",
+    )
     args = parser.parse_args()
+    if args.sample_cards:
+        import json
+
+        from crmbrain.nurture import sample_hubspot_nurture_cards
+
+        settings = Settings.from_env()
+        if not settings.hubspot_token:
+            print(
+                "HubSpot token missing. On the Railway crmbrain service run:\n"
+                "  python -m crmbrain --sample-cards 10"
+            )
+            return 2
+        payload = sample_hubspot_nurture_cards(
+            settings, args.sample_cards, out_path=args.out or None
+        )
+        print(json.dumps(payload.get("cards") or [], indent=2))
+        print(f"\nwrote {payload.get('count', 0)} cards to {payload.get('out_path')}")
+        return 0
     result = run(apply=args.apply)
     print(result["report"])
     if result.get("collect_errors") or result.get("errors"):
