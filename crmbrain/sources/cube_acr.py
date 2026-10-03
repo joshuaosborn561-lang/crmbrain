@@ -411,7 +411,12 @@ def transcribe_amr_gemini(settings: Settings, content: bytes) -> str:
         return ""
     import base64
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
+    from crmbrain.config import redact_secrets, resolve_gemini_model
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{resolve_gemini_model(getattr(settings, 'gemini_model', ''))}:generateContent"
+    )
     try:
         resp = requests.post(
             url,
@@ -443,7 +448,9 @@ def transcribe_amr_gemini(settings: Settings, content: bytes) -> str:
         body = resp.json()
         return str(body["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
     except Exception as exc:
-        logger.warning("gemini amr transcription failed: %s", exc)
+        from crmbrain.config import redact_secrets
+
+        logger.warning("gemini amr transcription failed: %s", redact_secrets(str(exc)))
         return ""
 
 

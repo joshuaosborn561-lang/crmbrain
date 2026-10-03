@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -8,6 +10,84 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
+
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+_SECRET_KEY_RE = re.compile(r"([?&](?:key|api_key|apikey|token|access_token)=)[^&\s#]+", re.I)
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*", re.I)
+
+
+def redact_secrets(text: object) -> str:
+    """Strip API keys and any URL query string from log / exception text."""
+    raw = "" if text is None else str(text)
+    if not raw:
+        return raw
+    raw = _SECRET_KEY_RE.sub(r"\1REDACTED", raw)
+    raw = _URL_QUERY_RE.sub(r"\1", raw)
+    return raw
+
+
+def _redact_log_value(value: object) -> object:
+    if isinstance(value, BaseException):
+        return redact_secrets(f"{type(value).__name__}: {value}")
+    if isinstance(value, str):
+        return redact_secrets(value)
+    return value
+
+
+class RedactSecretsFilter(logging.Filter):
+    """Drop `key=` and query strings from every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = redact_secrets(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: _redact_log_value(v) for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(_redact_log_value(a) for a in record.args)
+        if record.exc_text:
+            record.exc_text = redact_secrets(record.exc_text)
+        return True
+
+
+_FORMAT_ORIG = logging.Formatter.format
+_FORMAT_EXC_ORIG = logging.Formatter.formatException
+_LOG_REDACTION_INSTALLED = False
+
+
+def install_log_redaction() -> None:
+    """Install once so every handler / traceback redacts secrets."""
+    global _LOG_REDACTION_INSTALLED
+    if _LOG_REDACTION_INSTALLED:
+        return
+
+    def _format(self, record):  # type: ignore[no-untyped-def]
+        return redact_secrets(_FORMAT_ORIG(self, record))
+
+    def _format_exc(self, ei):  # type: ignore[no-untyped-def]
+        return redact_secrets(_FORMAT_EXC_ORIG(self, ei))
+
+    logging.Formatter.format = _format  # type: ignore[method-assign]
+    logging.Formatter.formatException = _format_exc  # type: ignore[method-assign]
+    filt = RedactSecretsFilter()
+    root = logging.getLogger()
+    if not any(isinstance(f, RedactSecretsFilter) for f in root.filters):
+        root.addFilter(filt)
+    for handler in list(root.handlers):
+        if not any(isinstance(f, RedactSecretsFilter) for f in handler.filters):
+            handler.addFilter(filt)
+    _LOG_REDACTION_INSTALLED = True
+
+
+def resolve_gemini_model(name: str | None = None) -> str:
+    """Always Flash. A leftover `*-lite` env value 404s and must not be used."""
+    raw = (name if name is not None else os.getenv("GEMINI_MODEL", "")).strip()
+    if not raw or "lite" in raw.lower():
+        return DEFAULT_GEMINI_MODEL
+    return raw
+
+
+install_log_redaction()
 
 CDT = ZoneInfo("America/Chicago")
 
@@ -45,6 +125,21 @@ SEEDED_NON_DEAL_NAMES = (
     "cynthia hernandez",
     "alex branning",
     "chorbie",
+    "bob carlson",
+    "noah brown",
+    "leroy hite",
+    "shore capital",
+)
+PARTNER_INVESTOR_HINTS = (
+    "pe partner",
+    "private equity partner",
+    "private equity",
+    "equity partner",
+    "limited partner",
+)
+NOT_DEAL_NOTE_RE = re.compile(
+    r"\bnot[- ]a[- ]deal\b|\bnot[- ]deal\b|\bnon[- ]deal\b|\bdo not (?:create|reopen|restore)\b",
+    re.I,
 )
 SEEDED_NON_DEAL_EMAILS: tuple[str, ...] = ()
 PERSONAL_FAMILY_INTENTS = frozenset({"personal", "family"})
@@ -195,7 +290,7 @@ class Settings:
             supabase_url=os.getenv("SUPABASE_URL", "https://azpapwtnrbzywlnxxecz.supabase.co"),
             supabase_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
             gemini_key=os.getenv("GEMINI_API_KEY", ""),
-            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            gemini_model=resolve_gemini_model(os.getenv("GEMINI_MODEL", "")),
             allo_url=os.getenv("ALLO_API_URL", "https://api.withallo.com"),
             allo_key=os.getenv("ALLO_API_KEY", ""),
             lookback_hours=int(os.getenv("CYCLE_LOOKBACK_HOURS", "36")),
@@ -403,17 +498,44 @@ def is_excluded_contact(ev=None, contact: dict | None = None) -> bool:
     email = ""
     company = ""
     phone = ""
+    title = ""
+    notes = ""
     if ev is not None:
         display = getattr(ev, "display_name", None)
         name = (display() if callable(display) else "") or getattr(ev, "name", "") or ""
         email = getattr(ev, "email", "") or ""
         company = getattr(ev, "company", "") or ""
         phone = getattr(ev, "phone", "") or ""
+        title = getattr(ev, "title", "") or ""
     name = name or f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
     email = email or props.get("email") or ""
     company = company or props.get("company") or ""
     phone = phone or props.get("phone") or ""
-    return is_non_deal_person(name=name, email=email, company=company, phone=phone)
+    title = title or props.get("jobtitle") or ""
+    notes = " ".join(
+        str(props.get(k) or "")
+        for k in ("personal_details", "family_notes", "relationship_hooks", "notes", "not_deal_note")
+    )
+    return is_non_deal_person(
+        name=name, email=email, company=company, phone=phone, title=title, notes=notes
+    )
+
+
+def has_not_deal_note(*blobs: object) -> bool:
+    """True when notes / properties say this person is not a deal."""
+    text = " ".join(str(b or "") for b in blobs if b)
+    return bool(text and NOT_DEAL_NOTE_RE.search(text))
+
+
+def is_partner_or_investor(
+    name: str | None = None,
+    company: str | None = None,
+    title: str | None = None,
+) -> bool:
+    blob = " ".join(part for part in (name or "", company or "", title or "") if part).lower()
+    if not blob.strip():
+        return False
+    return any(h in blob for h in PARTNER_INVESTOR_HINTS)
 
 
 def is_non_deal_person(
@@ -421,12 +543,20 @@ def is_non_deal_person(
     email: str | None = None,
     company: str | None = None,
     phone: str | None = None,
+    title: str | None = None,
+    notes: str | None = None,
 ) -> bool:
     """Hard block: no HubSpot contact, note, or deal writes for these people."""
     email_l = (email or "").strip().lower()
     if email_l and email_l in non_deal_emails():
         return True
-    blob = " ".join(part for part in (name or "", company or "", email_l, phone or "") if part).lower()
+    blob = " ".join(
+        part for part in (name or "", company or "", email_l, phone or "", title or "") if part
+    ).lower()
+    if notes and has_not_deal_note(notes):
+        return True
+    if is_partner_or_investor(name=name, company=company, title=title):
+        return True
     if not blob.strip():
         return False
     for token in non_deal_names():

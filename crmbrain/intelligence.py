@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings
+from crmbrain.config import STAGE, Settings, redact_secrets, resolve_gemini_model
 from crmbrain.models import Engagement
 
 logger = logging.getLogger(__name__)
@@ -383,54 +383,119 @@ def tcv_from_terms(terms: dict[str, Any] | None) -> str:
     return ""
 
 
-def parse_deal_amount(text: str) -> str:
-    """USD monthly, TCV, or one-time when clearly stated. Never invent."""
-    if not text:
-        return ""
-    terms = heuristic_deal_terms(text)
-    computed = tcv_from_terms(terms)
-    if re.search(r"\bor\b", text.lower()) and not terms.get("term_months"):
-        computed = ""
-    if computed and terms.get("term_months"):
-        return computed
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_QUOTE_CUT_RES = (
+    re.compile(r"\nOn .{0,160}wrote:\s*", re.I),
+    re.compile(r"\n-{2,}\s*Original Message\b", re.I),
+    re.compile(r"\nFrom:\s", re.I),
+    re.compile(r"\nSent:\s", re.I),
+)
+_INSTALMENT_SENT_RE = re.compile(r"install?ment|this payment|partial payment|per month due", re.I)
+_TOTAL_SENT_RE = re.compile(
+    r"(?:total|in full|full amount|contract (?:value|total)|agreement total|engagement is|package is)",
+    re.I,
+)
+
+
+def priced_sentences(text: str) -> list[str]:
+    """Sentences that contain a price. Regex amounts never look outside these."""
+    out: list[str] = []
+    for part in _SENTENCE_SPLIT_RE.split(text or ""):
+        sentence = part.strip()
+        if sentence and _MONEY_RE.search(sentence):
+            out.append(sentence)
+    return out
+
+
+def _figures_in_sentence(sentence: str) -> list[str]:
+    if not sentence or _window_has(sentence.lower(), _PITCH_HINTS):
+        return []
     hits: list[str] = []
-    for match in _MONEY_RE.finditer(text):
+    for match in _MONEY_RE.finditer(sentence):
         num = match.group(1) or match.group(3) or match.group(5)
         suffix = match.group(2) or match.group(4) or match.group(6) or ""
         val = _money_value(num, suffix)
         if val is None:
             continue
-        start = max(0, match.start() - 48)
-        end = min(len(text), match.end() + 48)
-        window = text[start:end].lower()
-        if _window_has(window, _PITCH_HINTS):
-            continue
-        if not _window_has(window, _PRICE_HINTS) and "$" not in match.group(0):
-            continue
-        if not _window_has(window, _PRICE_HINTS):
-            continue
         formatted = format_amount(val)
         if formatted:
             hits.append(formatted)
+    return list(dict.fromkeys(hits))
+
+
+def parse_deal_amount(text: str) -> str:
+    """One total from priced sentences. Skip if ambiguous. Never pick the largest figure."""
+    if not text:
+        return ""
+    priced = priced_sentences(text)
+    if not priced:
+        return ""
+    hits: list[str] = []
+    for sentence in priced:
+        if _window_has(sentence.lower(), _PITCH_HINTS):
+            continue
+        terms = heuristic_deal_terms(sentence)
+        computed = tcv_from_terms(terms)
+        if re.search(r"\bor\b", sentence.lower()) and not terms.get("term_months"):
+            computed = ""
+        if computed:
+            hits.append(computed)
+            continue
+        figs = _figures_in_sentence(sentence)
+        if len(figs) == 1:
+            hits.append(figs[0])
+        elif len(figs) > 1:
+            return ""
     unique = list(dict.fromkeys(hits))
-    if computed and computed in unique:
-        return computed
-    if computed and terms.get("monthly_fee") and terms.get("term_months"):
-        return computed
     if len(unique) == 1:
         return unique[0]
-    if computed:
-        return computed
-    if len(unique) > 1:
-        # Alternatives ("$3,000 or the $8,500 package") stay empty.
-        span = text.lower()
-        if re.search(r"\bor\b", span):
-            return ""
-        # Multiple figures that form a range / TCV already handled; keep the largest.
-        try:
-            return max(unique, key=lambda x: float(x))
-        except ValueError:
-            return unique[0]
+    return ""
+
+
+def josh_new_text(text: str) -> str:
+    """Josh's new reply only — drop quoted history / Original Message / > lines."""
+    if not text:
+        return ""
+    cut = text
+    earliest = None
+    for pat in _QUOTE_CUT_RES:
+        match = pat.search(cut)
+        if match and (earliest is None or match.start() < earliest):
+            earliest = match.start()
+    if earliest is not None:
+        cut = cut[:earliest]
+    lines = []
+    for line in cut.splitlines():
+        if line.lstrip().startswith(">"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def latest_proposal_figure(text: str) -> str:
+    """Latest total in Josh's text. Ignore instalment amounts when a total exists."""
+    scoped = josh_new_text(text) or (text or "")
+    priced = priced_sentences(scoped)
+    if not priced:
+        return ""
+    totals: list[str] = []
+    instalments: list[str] = []
+    for sentence in priced:
+        amt = parse_deal_amount(sentence)
+        if not amt:
+            figs = _figures_in_sentence(sentence)
+            amt = figs[-1] if len(figs) == 1 else ""
+        if not amt:
+            continue
+        if _INSTALMENT_SENT_RE.search(sentence) and not _TOTAL_SENT_RE.search(sentence):
+            instalments.append(amt)
+        else:
+            totals.append(amt)
+    if totals:
+        return totals[-1]
+    unique_inst = list(dict.fromkeys(instalments))
+    if len(unique_inst) == 1:
+        return unique_inst[0]
     return ""
 
 
@@ -702,10 +767,34 @@ def extraction_text(ev: Engagement) -> str:
     return "\n\n".join(parts)[:EXTRACT_TEXT_CAP]
 
 
+CALL_SOURCES = frozenset({"fireflies", "cube_acr", "allo"})
+
+
+def _call_amount_from_gemini(facts: dict[str, Any], text: str) -> str:
+    """Call amounts require a Gemini deal_terms result with a validated quote."""
+    terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
+    quote = str(terms.get("quote") or "")
+    if not quote or not quote_matches_source(quote, text):
+        return ""
+    amount = (
+        tcv_from_terms(terms)
+        or _as_amount(facts.get("amount_hint"))
+        or _as_amount(facts.get("deal_amount"))
+        or _as_amount(terms.get("tcv"))
+    )
+    return amount or ""
+
+
 def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
     global _GEMINI_KEY_WARNED
-    text = extraction_text(ev)
+    raw_text = extraction_text(ev)
+    extra = ev.extra or {}
+    if ev.source == "gmail" and extra.get("josh_sent_proposal"):
+        text = josh_new_text(raw_text) or raw_text
+    else:
+        text = raw_text
     facts = heuristic_extract(text)
+    gemini_ok = False
     if not getattr(settings, "gemini_key", ""):
         if text.strip() and not _GEMINI_KEY_WARNED:
             logger.warning("gemini key missing; heuristic extract only")
@@ -713,27 +802,31 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
     elif text.strip():
         try:
             facts = merge_fact_dicts(facts, _gemini(settings, text))
+            gemini_ok = True
         except Exception as exc:
-            logger.warning("gemini extract failed: %s", exc)
+            logger.warning("gemini extract failed: %s", redact_secrets(str(exc)))
     if ev.stage_hint:
         facts["stage_hint"] = facts.get("stage_hint") or ev.stage_hint
     silent = _is_silent_source(ev)
-    if ev.source in {"fireflies", "cube_acr", "allo"} and not silent:
+    if ev.source in CALL_SOURCES and not silent:
         hint = str(facts.get("stage_hint") or "").strip().lower()
         if hint in {"no_show", STAGE["no_show"]}:
             facts["stage_hint"] = "discovery_completed"
         if str(facts.get("ticker_reason") or "").strip().lower() == "no_show":
             facts["ticker_reason"] = ""
     terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
-    quote = str(terms.get("quote") or "")
-    amount = normalize_amount_hint(
-        facts.get("amount_hint") or facts.get("deal_amount") or terms.get("tcv"),
-        text,
-        quote=quote,
-        terms=terms,
-    )
-    if not amount:
-        amount = tcv_from_terms(terms)
+    if ev.source in CALL_SOURCES:
+        amount = _call_amount_from_gemini(facts, text) if gemini_ok else ""
+    elif extra.get("josh_sent_proposal"):
+        amount = latest_proposal_figure(text)
+        if not amount and gemini_ok:
+            amount = _call_amount_from_gemini(facts, text)
+    else:
+        amount = ""
+        if gemini_ok:
+            amount = _call_amount_from_gemini(facts, text)
+        if not amount:
+            amount = parse_deal_amount(text)
     facts["amount_hint"] = amount
     facts["deal_amount"] = amount
     if amount and isinstance(terms, dict) and not terms.get("tcv"):
@@ -751,7 +844,8 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
 
 
 def _gemini(settings: Settings, text: str) -> dict[str, Any]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
+    model = resolve_gemini_model(getattr(settings, "gemini_model", "") or "")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     resp = requests.post(
         url,
         params={"key": settings.gemini_key},
@@ -761,7 +855,10 @@ def _gemini(settings: Settings, text: str) -> dict[str, Any]:
         },
         timeout=90,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(redact_secrets(str(exc))) from None
     body = resp.json()
     raw = body["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw)

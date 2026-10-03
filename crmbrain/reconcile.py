@@ -1005,5 +1005,16 @@ def _restore_archived_deal(hs: HubSpot, contact: dict, ev: Engagement, stage: st
     archived = find(contact.get("id") or "")
     if not archived:
         return None
+    if policy.row_has_not_deal_note(archived) or policy.row_has_not_deal_note(contact):
+        return None
+    props = (contact or {}).get("properties") or {}
+    if is_non_deal_person(
+        name=f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip() or ev.display_name(),
+        email=props.get("email") or ev.email,
+        company=props.get("company") or ev.company,
+        phone=props.get("phone") or ev.phone,
+        title=props.get("jobtitle") or ev.title,
+    ):
+        return None
     restored = restore(str(archived.get("id") or ""), stage)
     return restored

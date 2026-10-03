@@ -144,22 +144,28 @@ class FakeHubSpot:
         return hits[0] if len(hits) == 1 else None
 
     def find_deal_by_amount(self, amount=""):
-        try:
-            wanted = f"{float(str(amount).replace(',', '').strip()):.2f}"
-        except ValueError:
-            return None
-        hits = []
-        for deal in self.deals:
-            raw = (deal.get("properties") or {}).get("amount") or ""
-            try:
-                key = f"{float(str(raw).replace(',', '').strip()):.2f}"
-            except ValueError:
+        del amount
+        return None
+
+    def deals_for_company(self, company=""):
+        raw = (company or "").strip().lower()
+        if len(raw) < 3:
+            return []
+        deals = []
+        seen = set()
+        for row in self.contacts:
+            other = ((row.get("properties") or {}).get("company") or "").strip().lower()
+            if not other or (raw not in other and other not in raw):
                 continue
-            if key == wanted:
-                hits.append(deal)
-        return hits[0] if len(hits) == 1 else None
+            for deal in self.open_deals_for_contact(row["id"]):
+                did = str(deal.get("id") or "")
+                if did and did not in seen:
+                    seen.add(did)
+                    deals.append(deal)
+        return deals
 
     def find_contact_for_commerce(self, name="", company="", amount="", email=""):
+        del company, amount
         if email:
             found = self.find_contact(email=email)
             if found:
@@ -173,16 +179,6 @@ class FakeHubSpot:
             found = self.find_contact(name=name)
             if found:
                 return found
-        if company:
-            found = self.find_contact_by_company(company)
-            if found:
-                return found
-        if amount:
-            deal = self.find_deal_by_amount(amount)
-            if deal:
-                contacts = self.contacts_for_deal(deal["id"])
-                if len(contacts) == 1:
-                    return contacts[0]
         return None
 
     def search_contacts_by_email_token(self, token):
@@ -300,6 +296,8 @@ class FakeHubSpot:
             deal = max(won, key=policy.deal_richness)
             self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
             return deal
+        if not live and won and not policy.is_new_completed_paperwork(ev):
+            return {}
         if not live and policy.blocks_no_show_create(existing, stage):
             return {}
         wanted = policy.deal_name_for(ev, contact)
@@ -340,8 +338,31 @@ class FakeHubSpot:
         return deal
 
 
-def _handle(tmp_path: Path, ev: Engagement, hs: FakeHubSpot | None = None):
-    settings = make_settings()
+def stub_gemini_extract(monkeypatch, amount=None, quote=None, stage_hint=""):
+    """Gemini success path: deal_terms + quote so call amounts may write."""
+
+    def _fake(_settings, text):
+        from crmbrain.intelligence import heuristic_extract
+
+        facts = heuristic_extract(text)
+        terms = dict(facts.get("deal_terms") or {})
+        amt = amount or facts.get("amount_hint") or ""
+        q = quote or terms.get("quote") or (f"${amt}" if amt else "")
+        if amt:
+            terms["tcv"] = amt
+            terms["quote"] = q
+            facts["deal_terms"] = terms
+            facts["amount_hint"] = amt
+            facts["deal_amount"] = amt
+        if stage_hint:
+            facts["stage_hint"] = stage_hint
+        return facts
+
+    monkeypatch.setattr("crmbrain.intelligence._gemini", _fake)
+
+
+def _handle(tmp_path: Path, ev: Engagement, hs: FakeHubSpot | None = None, settings=None):
+    settings = settings or make_settings()
     memory = Memory(settings, data_dir=tmp_path)
     report = CycleReport()
     hs = hs or FakeHubSpot()
@@ -432,7 +453,8 @@ def test_fireflies_held_is_discovery_completed(tmp_path):
     assert report.contacts_upserted
 
 
-def test_cube_disco_through_handle_engagement(tmp_path):
+def test_cube_disco_through_handle_engagement(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000")
     ev = Engagement(
         source="cube_acr",
         external_id="cu-1",
@@ -450,7 +472,7 @@ def test_cube_disco_through_handle_engagement(tmp_path):
     assert is_cube_business_discovery(ev)
     assert may_create_hubspot_contact(ev)
     assert resolve_stage(ev) == STAGE["discovery_completed"]
-    hs, _, report = _handle(tmp_path, ev)
+    hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
     assert hs.contacts
     assert any(w[0] == "upsert_contact" for w in hs.writes)
     assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
@@ -668,7 +690,8 @@ def test_meeting_evidence_and_blank_contact():
     assert not is_blank_contact(meeting)
 
 
-def test_fireflies_lands_relational_notes_and_amount(tmp_path):
+def test_fireflies_lands_relational_notes_and_amount(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000")
     ev = Engagement(
         source="fireflies",
         external_id="ff-notes",
@@ -680,7 +703,7 @@ def test_fireflies_lands_relational_notes_and_amount(tmp_path):
         ),
         raw_subject="Robert Lawson and Joshua Osborn",
     )
-    hs, _, report = _handle(tmp_path, ev)
+    hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
     note_patch = next((p for p in hs.patches if p[1].get("family_notes") or p[1].get("relationship_hooks")), None)
     assert note_patch
     assert "son" in (note_patch[1].get("family_notes") or "").lower()
@@ -712,7 +735,8 @@ def test_calendar_system_email_never_upserts_hubspot(tmp_path):
         assert f"calendly:sys-{email}" in memory._local["processed"]
 
 
-def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
+def test_fireflies_3000_per_month_patches_deal_amount(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000/month")
     ev = Engagement(
         source="fireflies",
         external_id="ff-3k-month",
@@ -723,7 +747,7 @@ def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
         transcript="Laura walked the discovery. They want to start at $3,000/month next month.",
         raw_subject="Laura Klein and Joshua Osborn",
     )
-    hs, _, report = _handle(tmp_path, ev)
+    hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
     assert any(w[0] == "patch_deal" and w[2].get("amount") == "3000" for w in hs.writes) or (
         hs.deals and hs.deals[0]["properties"].get("amount") == "3000"
     )
@@ -731,7 +755,7 @@ def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
     assert any("3000" in a for a in report.amounts_set)
 
 
-def test_fireflies_gemini_failure_still_uses_heuristic_amount(tmp_path, monkeypatch):
+def test_fireflies_gemini_failure_writes_no_amount(tmp_path, monkeypatch):
     ev = Engagement(
         source="fireflies",
         external_id="ff-gemini-fail",
@@ -747,18 +771,20 @@ def test_fireflies_gemini_failure_still_uses_heuristic_amount(tmp_path, monkeypa
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("gemini 500")),
     )
     facts = extract(settings, ev)
-    assert facts["amount_hint"] == "3000"
+    assert facts["amount_hint"] == ""
     assert "son" in (facts.get("family_notes") or "").lower()
     hs = FakeHubSpot()
     memory = Memory(settings, data_dir=tmp_path)
     report = CycleReport()
     _handle_engagement(ev, settings, hs, memory, None, report)
-    assert hs.deals[0]["properties"]["amount"] == "3000"
-    assert any("3000" in a for a in report.amounts_set)
+    assert hs.deals
+    assert hs.deals[0]["properties"].get("amount") in {"", None}
+    assert report.amounts_set == []
     assert report.notes_updated
 
 
-def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
+def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="4500", quote="$4,500")
     ev = Engagement(
         source="fireflies",
         external_id="ff-name-only",
@@ -794,7 +820,7 @@ def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
             },
         }
     )
-    settings = make_settings()
+    settings = make_settings(gemini_key="fake")
     memory = Memory(settings, data_dir=tmp_path)
     memory.mark_processed("fireflies", "ff-name-only", {"contact_id": "lk-1"})
     report = CycleReport()
@@ -809,7 +835,8 @@ def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
     assert len(hs.contacts) == 1
 
 
-def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
+def test_fireflies_already_processed_still_refreshes_notes(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="4500", quote="$4,500")
     ev = Engagement(
         source="fireflies",
         external_id="ff-refresh",
@@ -838,7 +865,7 @@ def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
             "properties": {"dealstage": STAGE["discovery_completed"], "dealname": "Robert", "amount": ""},
         }
     )
-    settings = make_settings()
+    settings = make_settings(gemini_key="fake")
     memory = Memory(settings, data_dir=tmp_path)
     memory.mark_processed("fireflies", "ff-refresh", {"contact_id": "77"})
     report = CycleReport()
@@ -849,7 +876,8 @@ def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
     assert any("4500" in (n[1] or "") for n in hs.notes)
 
 
-def test_notes_amount_backfill_dry_run_does_not_write():
+def test_notes_amount_backfill_dry_run_does_not_write(monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000")
     path = Path(__file__).resolve().parents[1] / "scripts" / "backfill_notes_and_amounts.py"
     spec = importlib.util.spec_from_file_location("backfill_notes_and_amounts", path)
     assert spec and spec.loader
@@ -868,7 +896,7 @@ def test_notes_amount_backfill_dry_run_does_not_write():
     result = mod.run(
         apply=False,
         days=7,
-        settings=make_settings(),
+        settings=make_settings(gemini_key="fake"),
         hs=hs,
         engagements=[ev],
     )

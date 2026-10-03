@@ -220,7 +220,9 @@ def is_josh_sent_proposal(sender: str, subject: str, body: str = "", to: str = "
     """Josh's SENT mail that mentions proposal / SOW / pricing."""
     if not is_josh_address((_addresses(sender) or [""])[0]):
         return False
-    blob = f"{subject} {body}".lower()
+    from crmbrain.intelligence import josh_new_text
+
+    blob = f"{subject} {josh_new_text(body) or body}".lower()
     if any(h in f"{sender} {subject}".lower() for h in ("pandadoc", "docusign", "calendly")):
         return False
     return any(h in blob for h in JOSH_PROPOSAL_HINTS)
@@ -395,25 +397,40 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 if payer_emails and (not ev_email or is_system_address(ev_email)):
                     ev_email = payer_emails[0]
             elif josh_proposal:
-                from crmbrain.intelligence import extract as extract_facts
+                from crmbrain.intelligence import (
+                    _INSTALMENT_SENT_RE,
+                    _TOTAL_SENT_RE,
+                    extract as extract_facts,
+                    josh_new_text,
+                    latest_proposal_figure,
+                )
 
+                new_text = josh_new_text(body) or body
                 proposal_ev = Engagement(
                     source="gmail",
                     external_id=mid,
                     raw_subject=subject,
                     summary=snippet,
-                    transcript=body,
+                    transcript=new_text,
                     email=ev_email,
+                    extra={"josh_sent_proposal": True},
                 )
                 facts = extract_facts(settings, proposal_ev)
                 extra_terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
-                extra_amount = (
-                    str(facts.get("amount_hint") or facts.get("deal_amount") or extra_amount or "")
+                extra_amount = latest_proposal_figure(new_text) or str(
+                    facts.get("amount_hint") or facts.get("deal_amount") or extra_amount or ""
                 )
+                if (
+                    extra_amount
+                    and _INSTALMENT_SENT_RE.search(new_text)
+                    and not _TOTAL_SENT_RE.search(new_text)
+                ):
+                    amount_is_instalment = True
                 write_stage = STAGE["proposal_sent"]
                 amount_source = "proposal_email"
                 if extra_terms:
                     extra_terms = dict(extra_terms)
+                body = new_text
             if sig_stage == STAGE["signed"] or (sig_name and write_stage == STAGE["signed"]):
                 amount_source = amount_source or "doc"
             out.append(

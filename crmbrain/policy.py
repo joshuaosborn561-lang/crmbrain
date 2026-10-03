@@ -5,7 +5,15 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
 
-from crmbrain.config import JOSH_DOMAINS, JOSH_EMAILS, STAGE, is_client_context, is_zoom_room_address, now_utc
+from crmbrain.config import (
+    JOSH_DOMAINS,
+    JOSH_EMAILS,
+    STAGE,
+    has_not_deal_note,
+    is_client_context,
+    is_zoom_room_address,
+    now_utc,
+)
 from crmbrain.intelligence import stage_id
 from crmbrain.models import Engagement
 from crmbrain.names import (
@@ -299,11 +307,41 @@ def has_paperwork_evidence(ev: Engagement) -> bool:
     return False
 
 
-def closed_won_notes_only(ev: Engagement, deals: list[dict] | None) -> bool:
-    """Paid/Signed contacts: Cube/Fireflies notes only unless new paperwork."""
-    if ev.source not in {"cube_acr", "fireflies"}:
+def is_new_completed_paperwork(ev: Engagement) -> bool:
+    """Completed PandaDoc / DocuSign for a new engagement — the only create on a Paid client."""
+    extra = ev.extra or {}
+    if extra.get("payment") or extra.get("amount_source") == "payment":
         return False
-    return has_closed_won_deal(deals)
+    if ev.source != "gmail":
+        return False
+    stage = ev.stage_hint or extra.get("stage") or ""
+    if stage not in {STAGE["signed"], "signed", "closedwon"}:
+        return False
+    return bool(extra.get("document_id") or extra.get("document_name") or extra.get("completed_doc"))
+
+
+def is_payment_event(ev: Engagement) -> bool:
+    extra = ev.extra or {}
+    if extra.get("payment") or extra.get("amount_source") == "payment":
+        return True
+    return ev.stage_hint == STAGE["paid"]
+
+
+def closed_won_notes_only(
+    ev: Engagement,
+    deals: list[dict] | None,
+    contact: dict | None = None,
+    company_deals: list[dict] | None = None,
+) -> bool:
+    """Paid/Signed at the person or company: notes only. Never a new Gmail/call deal.
+
+    Payment may update an existing closed-won deal. New completed paperwork may
+    open a new engagement. Everything else is notes / review.
+    """
+    del contact
+    if is_new_completed_paperwork(ev) or is_payment_event(ev):
+        return False
+    return person_or_company_closed_won(deals, company_deals, ev.extra or {})
 
 
 def is_cube_business_discovery(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
@@ -475,6 +513,66 @@ def should_move_stage(current: str, target: str, *, back_signal: bool = False) -
     return target_rank > current_rank
 
 
+MANUAL_SOURCE_TYPES = frozenset({"CRM_UI", "USER"})
+INTEGRATION_SOURCE_TYPES = frozenset({"API", "INTEGRATION", "AUTOMATION_PLATFORM", "MERGE_OBJECTS"})
+
+
+def _parse_hs_datetime(value: object) -> datetime | None:
+    dt = parse_iso_datetime(value)
+    if dt:
+        return dt
+    raw = str(value or "").strip()
+    if not raw or not raw.isdigit():
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    if n > 10_000_000_000:
+        n = n / 1000.0
+    try:
+        return datetime.fromtimestamp(n, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def last_manual_modification(deal: dict | None) -> datetime | None:
+    """Last non-integration edit of stage or amount. Test hook: manual_modified_at."""
+    if not deal:
+        return None
+    props = deal.get("properties") or {}
+    hook = _parse_hs_datetime(props.get("manual_modified_at"))
+    if hook:
+        return hook
+    latest: datetime | None = None
+    history = deal.get("propertiesWithHistory") or {}
+    for key in ("dealstage", "amount"):
+        for row in history.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            source = str(row.get("sourceType") or "").upper()
+            user_id = row.get("updatedByUserId") or row.get("updatedByUser")
+            if source in INTEGRATION_SOURCE_TYPES and not user_id:
+                continue
+            if source in MANUAL_SOURCE_TYPES or user_id:
+                ts = _parse_hs_datetime(row.get("timestamp"))
+                if ts and (latest is None or ts > latest):
+                    latest = ts
+    if latest:
+        return latest
+    if props.get("hs_updated_by_user_id"):
+        return _parse_hs_datetime(props.get("hs_lastmodifieddate"))
+    return None
+
+
+def event_predates_manual_edit(ev: Engagement, deal: dict | None) -> bool:
+    manual = last_manual_modification(deal)
+    if not manual or not ev.occurred_at:
+        return False
+    occurred = _aware(ev.occurred_at)
+    return bool(occurred and occurred < manual)
+
+
 def choose_deal_action(
     current: str | None, requested: str, ev: Engagement, deal: dict | None = None
 ) -> str | None:
@@ -482,6 +580,8 @@ def choose_deal_action(
     if not requested:
         return None
     if requires_josh_meeting_to_open_deal(ev) and not current:
+        return None
+    if deal and event_predates_manual_edit(ev, deal):
         return None
     held = is_meeting_held(ev)
     target = requested
@@ -491,8 +591,15 @@ def choose_deal_action(
     if current == STAGE["replied"] and held:
         target = STAGE["discovery_completed"]
     if current in {STAGE["nurture"], STAGE["closed_lost"]}:
-        if target == STAGE["discovery_completed"] and not held:
-            return None
+        if target == STAGE["discovery_completed"]:
+            if not held:
+                return None
+            # Manual edits win. No history → do not pull Nurture / Closed Lost.
+            manual = last_manual_modification(deal)
+            if not manual:
+                return None
+            if ev.occurred_at and _aware(ev.occurred_at) and _aware(ev.occurred_at) <= manual:
+                return None
     if not current:
         if ev.source in NEVER_OPEN_DEAL_SOURCES:
             return None
@@ -505,13 +612,10 @@ def choose_deal_action(
         return None
     if current == STAGE["signed"] and target not in {STAGE["signed"], STAGE["paid"]}:
         return None
-    if (
-        current == STAGE["proposal_sent"]
-        and target == STAGE["discovery_scheduled"]
-        and ev.source == "gmail"
-        and not (ev.extra or {}).get("document_id")
-        and ev.stage_hint not in {STAGE["signed"], STAGE["paid"], STAGE["proposal_sent"]}
-    ):
+    if current == STAGE["proposal_sent"] and target in {
+        STAGE["discovery_completed"],
+        STAGE["discovery_scheduled"],
+    }:
         return None
     back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
     if not should_move_stage(current, target, back_signal=back):
@@ -848,6 +952,25 @@ def has_closed_won_deal(deals: list[dict] | None) -> bool:
         if stage in CLOSED_WON_STAGES:
             return True
     return False
+
+
+def row_has_not_deal_note(row: dict | None) -> bool:
+    if not row:
+        return False
+    props = row.get("properties") or {}
+    blob = " ".join(str(v) for v in list(props.values()) + [row.get("not_deal_note")] if v is not None)
+    return has_not_deal_note(blob)
+
+
+def person_or_company_closed_won(
+    deals: list[dict] | None,
+    company_deals: list[dict] | None = None,
+    extra: dict | None = None,
+) -> bool:
+    extra = extra or {}
+    if has_closed_won_deal(deals) or has_closed_won_deal(company_deals):
+        return True
+    return bool(extra.get("closed_won") or extra.get("company_closed_won") or extra.get("company_has_paid"))
 
 
 def blocks_no_show_create(deals: list[dict] | None, stage: str) -> bool:

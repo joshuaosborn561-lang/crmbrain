@@ -108,6 +108,12 @@ def test_amount_extract_never_hallucinates_pitch_or_vague():
     assert parse_deal_amount("There were 14+ replies per month.") == ""
     # Alternative packages without a term stay empty; ranges / monthly*term do not bail.
     assert parse_deal_amount("Monthly retainer of $3,000 or the $8,500 package.") == ""
+    assert parse_deal_amount(
+        "One of our roofers closed $144,000 in pipeline. Tyler agreed to the $20,000 package."
+    ) in {"", "20000"}
+    assert parse_deal_amount(
+        "One of our roofers closed $144,000 in pipeline. Tyler agreed to the $20,000 package."
+    ) != "144000"
     # Gemini invents a number that is not in the transcript.
     text = "Great discovery. They liked the roofing case study and the $2M pipeline."
     assert normalize_amount_hint("4500", text) == ""

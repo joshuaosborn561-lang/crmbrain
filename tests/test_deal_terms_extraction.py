@@ -106,7 +106,15 @@ def test_earl_proposal_email_is_20000():
     assert tcv_from_terms(facts.get("deal_terms") or {}) == "20000"
 
 
-def test_tyler_fireflies_summary_is_20000():
+def test_tyler_fireflies_summary_is_20000(monkeypatch):
+    from tests.test_crm_gating import stub_gemini_extract
+
+    stub_gemini_extract(
+        monkeypatch,
+        amount="20000",
+        quote="$20,000 package",
+        stage_hint="proposal_sent",
+    )
     ev = Engagement(
         source="fireflies",
         external_id="ff-tyler",
@@ -124,7 +132,7 @@ def test_tyler_fireflies_summary_is_20000():
             "sentence_count": 2,
         },
     )
-    facts = extract(make_settings(), ev)
+    facts = extract(make_settings(gemini_key="fake"), ev)
     assert facts["amount_hint"] == "20000"
     assert resolve_stage(ev, facts) == STAGE["proposal_sent"]
     assert call_supports_proposal_sent(ev, facts)
@@ -212,7 +220,20 @@ def test_nurture_stays_without_new_held_call():
     )
     assert choose_deal_action(STAGE["nurture"], STAGE["discovery_completed"], silent) is None
     assert choose_deal_action(STAGE["closed_lost"], STAGE["discovery_completed"], silent) is None
-    assert choose_deal_action(STAGE["nurture"], STAGE["discovery_completed"], held) == STAGE["discovery_completed"]
+    # No manual-edit history → do not pull Nurture / Closed Lost.
+    assert choose_deal_action(STAGE["nurture"], STAGE["discovery_completed"], held) is None
+    newer = Engagement(
+        source="fireflies",
+        external_id="ff-h2",
+        occurred_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        transcript="We walked discovery.",
+        extra={"has_sentences": True, "sentence_count": 4},
+    )
+    deal = {"properties": {"manual_modified_at": "2026-09-20T00:00:00+00:00"}}
+    assert (
+        choose_deal_action(STAGE["nurture"], STAGE["discovery_completed"], newer, deal=deal)
+        == STAGE["discovery_completed"]
+    )
 
 
 def test_vector_payment_body_sets_paid_without_overwriting_total(tmp_path):
@@ -282,7 +303,10 @@ def test_proposal_email_can_overwrite_call_amount_on_open_stage():
     )
 
 
-def test_amount_budget_is_separate_from_stage(tmp_path):
+def test_amount_budget_is_separate_from_stage(tmp_path, monkeypatch):
+    from tests.test_crm_gating import stub_gemini_extract
+
+    stub_gemini_extract(monkeypatch, amount="4500", quote="$4,500")
     budget = WriteBudget(max_creates=0, max_stage_moves=0, max_amount_writes=1)
     assert budget.allow("amount")
     assert not budget.allow("amount")
@@ -305,7 +329,7 @@ def test_amount_budget_is_separate_from_stage(tmp_path):
             "properties": {"dealstage": STAGE["discovery_completed"], "amount": ""},
         }
     )
-    settings = make_settings(max_amount_writes=0)
+    settings = make_settings(max_amount_writes=0, gemini_key="fake")
     report = CycleReport()
     empty = WriteBudget(max_creates=10, max_stage_moves=20, max_amount_writes=0)
     _apply_transcript_intelligence(

@@ -155,9 +155,10 @@ def test_payment_and_agreement_mail_match_by_name_company_amount():
             "properties": {"dealstage": STAGE["proposal_sent"], "amount": "2875.50"},
         }
     )
-    assert hs.find_contact_for_commerce(company="Vector Energy Group").get("id") == "c-alvaro"
-    assert hs.find_contact_for_commerce(amount="2875.50").get("id") == "c-alvaro"
+    assert hs.find_contact_for_commerce(company="Vector Energy Group") is None
+    assert hs.find_contact_for_commerce(amount="2875.50") is None
     assert hs.find_contact_for_commerce(name="Alvaro Gancman").get("id") == "c-alvaro"
+    assert hs.find_contact_for_commerce(email="alvaro@vectorenergy.com").get("id") == "c-alvaro"
 
     class PayGmail:
         def search(self, query, max_results=30):

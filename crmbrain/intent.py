@@ -429,7 +429,12 @@ def _merge_model(base: IntentDecision, incoming: dict[str, Any], min_confidence:
 
 
 def _gemini_intent(settings: Settings, text: str) -> dict[str, Any]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
+    from crmbrain.config import resolve_gemini_model
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{resolve_gemini_model(getattr(settings, 'gemini_model', ''))}:generateContent"
+    )
     resp = requests.post(
         url,
         params={"key": settings.gemini_key},
@@ -439,7 +444,12 @@ def _gemini_intent(settings: Settings, text: str) -> dict[str, Any]:
         },
         timeout=45,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except Exception as exc:
+        from crmbrain.config import redact_secrets
+
+        raise RuntimeError(redact_secrets(str(exc))) from None
     body = resp.json()
     raw = body["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw)

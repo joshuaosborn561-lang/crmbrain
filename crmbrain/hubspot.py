@@ -385,8 +385,10 @@ class HubSpot:
                 params={
                     "properties": (
                         "dealname,dealstage,pipeline,amount,dealtype,"
-                        "hs_mrr,hs_arr,hs_acv,hs_tcv,hs_is_closed_won"
-                    )
+                        "hs_mrr,hs_arr,hs_acv,hs_tcv,hs_is_closed_won,"
+                        "hs_lastmodifieddate,hs_updated_by_user_id,description"
+                    ),
+                    "propertiesWithHistory": "dealstage,amount",
                 },
                 retry=True,
                 timeout=20,
@@ -434,33 +436,38 @@ class HubSpot:
         return None
 
     def find_deal_by_amount(self, amount: str) -> dict | None:
-        key = _amount_key(amount)
-        if not key:
-            return None
-        rows = self._search(
-            "deals",
-            [{"propertyName": "amount", "operator": "EQ", "value": amount.strip()}],
-            ["dealname", "dealstage", "amount"],
-        )
-        hits = [row for row in rows if _amount_key((row.get("properties") or {}).get("amount")) == key]
-        if len(hits) == 1:
-            return hits[0]
-        if not hits:
-            # HubSpot may store 2875.5 vs 2875.50 — scan open deals when EQ misses.
-            try:
-                for deal in self.iter_deals(["dealname", "dealstage", "amount"]):
-                    if _amount_key((deal.get("properties") or {}).get("amount")) == key:
-                        hits.append(deal)
-            except Exception:
-                hits = []
-            if len(hits) == 1:
-                return hits[0]
+        """Removed: amount-only matching created wrong deals. Always None."""
+        del amount
         return None
+
+    def deals_for_company(self, company: str) -> list[dict]:
+        """Open deals on contacts whose company matches. Used for Paid-client gates."""
+        raw = (company or "").strip()
+        if len(raw) < 3:
+            return []
+        rows = self._search(
+            "contacts",
+            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw}],
+            CONTACT_SEARCH_PROPS,
+        )
+        deals: list[dict] = []
+        seen: set[str] = set()
+        for row in rows[:20]:
+            cid = str(row.get("id") or "")
+            if not cid:
+                continue
+            for deal in self.open_deals_for_contact(cid):
+                did = str(deal.get("id") or "")
+                if did and did not in seen:
+                    seen.add(did)
+                    deals.append(deal)
+        return deals
 
     def find_contact_for_commerce(
         self, name: str = "", company: str = "", amount: str = "", email: str = ""
     ) -> dict | None:
-        """Match a payment or agreement mail to one CRM contact."""
+        """Payer email or exact payer-name match only. No company or amount match."""
+        del company, amount
         if email:
             found = self.find_contact(email=email)
             if found:
@@ -471,19 +478,7 @@ class HubSpot:
                 if len(rows) == 1:
                     return rows[0]
         if name:
-            found = self._find_contact_by_name(name)
-            if found:
-                return found
-        if company:
-            found = self.find_contact_by_company(company)
-            if found:
-                return found
-        if amount:
-            deal = self.find_deal_by_amount(amount)
-            if deal and hasattr(self, "contacts_for_deal"):
-                contacts = self.contacts_for_deal(str(deal.get("id") or ""))
-                if len(contacts) == 1:
-                    return contacts[0]
+            return self._find_contact_by_name(name)
         return None
 
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
@@ -526,6 +521,9 @@ class HubSpot:
         if won and stage == STAGE["paid"]:
             deal = max(won, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        if won and not policy.is_new_completed_paperwork(ev):
+            logger.info("skip new deal; contact already has Paid/Signed")
+            return {}
         if policy.blocks_no_show_create(existing, stage):
             return {}
         target = policy.choose_deal_action(None, stage, ev) if stage else None
@@ -541,6 +539,9 @@ class HubSpot:
         if won and stage == STAGE["paid"]:
             deal = max(won, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        if won and not policy.is_new_completed_paperwork(ev):
+            logger.info("skip new deal; contact already has Paid/Signed")
+            return {}
         if policy.blocks_no_show_create(existing, stage):
             return {}
         name = policy.deal_name_for(ev, contact) or ev.email or "SalesGlider deal"
