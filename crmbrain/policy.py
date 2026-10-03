@@ -667,6 +667,31 @@ def _parse_hs_datetime(value: object) -> datetime | None:
         return None
 
 
+def deal_entered_stage_at(deal: dict | None, stage: str) -> datetime | None:
+    """Latest timestamp when this deal's dealstage became `stage`."""
+    if not deal or not stage:
+        return None
+    want = canonicalize_stage(stage) or str(stage).strip()
+    latest: datetime | None = None
+    history = deal.get("propertiesWithHistory") or {}
+    for row in history.get("dealstage") or []:
+        if not isinstance(row, dict):
+            continue
+        value = canonicalize_stage(str(row.get("value") or "")) or str(row.get("value") or "")
+        if value != want:
+            continue
+        ts = _parse_hs_datetime(row.get("timestamp"))
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    if latest:
+        return latest
+    props = deal.get("properties") or {}
+    current = canonicalize_stage(props.get("dealstage") or "") or str(props.get("dealstage") or "")
+    if current == want:
+        return _parse_hs_datetime(props.get("hs_v2_date_entered_current_stage"))
+    return None
+
+
 def last_manual_modification(deal: dict | None) -> datetime | None:
     """Last non-integration edit of stage or amount. Test hook: manual_modified_at."""
     if not deal:
@@ -1005,9 +1030,15 @@ def choose_deal_action(
         return None
     if requires_josh_meeting_to_open_deal(ev) and not current:
         return None
-    held = is_meeting_held(ev)
+    held = is_meeting_held(ev) or bool(
+        (ev.extra or {}).get("held_meeting") or (ev.extra or {}).get("meeting_held")
+    )
     current = canonicalize_stage(current or "")
     target = canonicalize_stage(requested)
+    # Existing deals cannot move to Discovery Held without a held meeting.
+    # Create-path rewrites (HeyReach → Initial Interest) still run below.
+    if current and target == STAGE["discovery_held"] and not held:
+        return None
     if (
         requested == INCREMENT_NO_SHOW
         or is_deleted_stage(requested)
@@ -1024,6 +1055,22 @@ def choose_deal_action(
     if current == STAGE["initial_interest"] and held:
         target = STAGE["discovery_held"]
     if current in {STAGE["nurture"], STAGE["closed_lost"]}:
+        new_proposal = bool(
+            target == STAGE["proposal_sent"]
+            and (
+                call_supports_proposal_sent(ev)
+                or (ev.extra or {}).get("josh_sent_proposal")
+                or has_paperwork_evidence(ev)
+            )
+        )
+        new_meeting = held or (is_meeting_scheduled(ev) and target == STAGE["meeting_booked"])
+        if current == STAGE["nurture"] and target not in BACK_STAGES:
+            if not (new_meeting or new_proposal):
+                return None
+            entered = deal_entered_stage_at(deal, STAGE["nurture"])
+            occurred = _aware(ev.occurred_at)
+            if entered and occurred and occurred <= entered:
+                return None
         call_forward = ev.source in {"fireflies", "cube_acr"} and target in {
             STAGE["discovery_held"],
             STAGE["meeting_booked"],

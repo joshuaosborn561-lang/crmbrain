@@ -418,12 +418,12 @@ def apply_deal_holder_veto(ev: Engagement, decision: IntentDecision | None = Non
         )
     else:
         rewritten = IntentDecision(
-            verdict="yes",
+            verdict="review",
             intent="sales",
             confidence=max(0.8, min(decision.confidence, 0.9)),
-            reason="Open SalesGlider deal — stay updatable, not day-job/hire/recruiter",
-            stage=decision.stage,
-            amount=decision.amount,
+            reason="Open SalesGlider deal — notes only, no stage move from this veto",
+            stage="",
+            amount="",
             via=decision.via,
         )
     ev._intent_decision = rewritten

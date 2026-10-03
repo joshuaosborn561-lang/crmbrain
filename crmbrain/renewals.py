@@ -145,8 +145,28 @@ def move_to_call_scheduled(hs, deal: dict, ev: Engagement | None = None) -> bool
     return True
 
 
+def is_evidenced_renewal_call(ev: Engagement) -> bool:
+    """True only for a booked or held renewal call, not a mention in email."""
+    if not ev or not is_renewal_meeting(ev):
+        return False
+    extra = ev.extra or {}
+    if ev.source == "calendly":
+        return True
+    if ev.source in {"fireflies", "cube_acr"}:
+        from crmbrain.policy import is_meeting_held
+
+        return is_meeting_held(ev)
+    if ev.source == "gmail":
+        if extra.get("gcal") or extra.get("calendar_event") or extra.get("gcal_create"):
+            return True
+        if extra.get("meeting_at") or extra.get("scheduled_at"):
+            return True
+        return False
+    return False
+
+
 def maybe_schedule_renewal_call(hs, deals: list[dict] | None, ev: Engagement) -> dict | None:
-    if not is_renewal_meeting(ev):
+    if not is_evidenced_renewal_call(ev):
         return None
     if ev.source not in {"calendly", "gmail", "fireflies", "cube_acr"}:
         return None

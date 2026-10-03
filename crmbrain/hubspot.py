@@ -357,6 +357,9 @@ class HubSpot:
                 "relationship_hooks",
                 "pain_points",
                 "jobtitle",
+                "engagements_last_meeting_booked",
+                "notes_last_contacted",
+                "crm_source",
             ]
         )
         contacts = []
@@ -946,32 +949,38 @@ class HubSpot:
             if not after:
                 break
 
-    def contacts_for_deal(self, deal_id: str) -> list[dict]:
-        resp = self._request(
-            "GET",
-            f"/crm/v4/objects/deals/{deal_id}/associations/contacts",
-            retry=True,
-            timeout=20,
-        )
-        if resp.status_code >= 400:
-            return []
-        out = []
-        for row in resp.json().get("results") or []:
-            cid = row.get("toObjectId") or row.get("id")
-            if not cid:
-                continue
-            c = self._request(
+    def last_meeting_at(self, contact_id: str):
+        """Most recent HubSpot meeting start time for this contact, or None."""
+        from datetime import datetime, timezone
+
+        ids = self._meeting_association_ids(contact_id)
+        latest = None
+        for mid in ids:
+            resp = self._request(
                 "GET",
-                f"/crm/v3/objects/contacts/{cid}",
-                params={
-                    "properties": "email,firstname,lastname,phone,company,crm_source,hs_linkedin_url"
-                },
+                f"/crm/v3/objects/meetings/{mid}",
+                params={"properties": "hs_meeting_start_time,hs_timestamp,hs_meeting_title"},
                 retry=True,
                 timeout=20,
             )
-            if c.ok:
-                out.append(c.json())
-        return out
+            if resp.status_code >= 400:
+                continue
+            props = (resp.json() or {}).get("properties") or {}
+            raw = props.get("hs_meeting_start_time") or props.get("hs_timestamp")
+            if not raw:
+                continue
+            try:
+                if str(raw).isdigit():
+                    stamp = datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
+                else:
+                    stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                continue
+            if latest is None or stamp > latest:
+                latest = stamp
+        return latest
 
     def contact_has_meetings(self, contact_id: str) -> bool:
         """True only for real HubSpot meeting engagements. Emails do not count."""

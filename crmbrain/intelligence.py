@@ -399,7 +399,8 @@ def quote_states_priced_offer(quote: str) -> bool:
         re.I,
     ):
         return True
-    if _MONEY_RE.search(q) or re.search(r"\$\s*\d", q):
+    # A dollar figure in the quote is a priced term. Bare digits (83234) are not.
+    if "$" in q and _MONEY_RE.search(q):
         return True
     return False
 
@@ -862,6 +863,13 @@ def amount_to_write(
 def deal_amount_to_write(deal: dict | None, amount: str, ev: Engagement | None = None) -> str:
     props = (deal or {}).get("properties") or {}
     extra = (ev.extra if ev else {}) or {}
+    terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
+    quote = str(terms.get("quote") or "")
+    if amount and ev is not None and not quote_states_priced_offer(quote):
+        tcv = tcv_from_terms(terms)
+        if not tcv:
+            return ""
+        amount = tcv
     return amount_to_write(
         props.get("amount"),
         amount,
@@ -1025,7 +1033,7 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
         amount = ""
         if gemini_ok:
             amount = _call_amount_from_gemini(facts, text)
-        if not amount:
+        if not amount and quote_states_priced_offer(str(terms.get("quote") or "")):
             amount = parse_deal_amount(text)
     facts["amount_hint"] = amount
     facts["deal_amount"] = amount

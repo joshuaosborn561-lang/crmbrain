@@ -33,7 +33,9 @@ from crmbrain.renewals import (
     at_risk_needed,
     due_for_renewal_create,
     has_existing_client_deal,
+    is_evidenced_renewal_call,
     is_renewal_meeting,
+    maybe_schedule_renewal_call,
 )
 from crmbrain.sources.gmail_scan import _stage_from_mail
 from tests.test_crm_gating import FakeHubSpot, make_settings
@@ -255,3 +257,202 @@ def test_no_show_count_increment_path(tmp_path):
     )
     assert deal["properties"].get("no_show_count") == "2"
     assert deal["properties"]["dealstage"] == STAGE["meeting_booked"]
+
+
+def test_nsa_backward_guard_holds_on_september_first():
+    nsa = STAGE["needs_stakeholder_approval"]
+    ps = STAGE["proposal_sent"]
+    earl = Engagement(
+        source="gmail",
+        external_id="g-earl-91",
+        occurred_at=datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc),
+        email="ej@accg-inc.com",
+        first_name="Earl",
+        last_name="Jackson",
+        raw_subject="Intro to Earl",
+        summary="Quick intro email plus the original proposal recap.",
+        stage_hint=ps,
+    )
+    earl_deal = {
+        "id": "351592972993",
+        "properties": {
+            "dealstage": nsa,
+            "dealname": "Earl Jackson - Accg",
+            "amount": "20000",
+            "hs_lastmodifieddate": "2026-08-20T12:00:00Z",
+        },
+    }
+    assert choose_deal_action(nsa, ps, earl, deal=earl_deal) is None
+    assert not should_move_stage(nsa, ps)
+
+
+def test_nurture_does_not_advance_without_new_meeting_after_enter():
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-kevin-old",
+        occurred_at=datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc),
+        email="kevin@kevinhagemoser.com",
+        name="Kevin Hagemoser",
+        transcript="Let's knock out a website. I will pick ONE offer.",
+        extra={"has_sentences": True, "sentence_count": 8},
+        stage_hint=STAGE["proposal_sent"],
+    )
+    deal = {
+        "id": "d-kevin",
+        "properties": {
+            "dealstage": STAGE["nurture"],
+            "dealname": "Kevin Hagemoser",
+            "hs_v2_date_entered_current_stage": "2026-08-15T00:00:00Z",
+        },
+        "propertiesWithHistory": {
+            "dealstage": [
+                {
+                    "value": STAGE["nurture"],
+                    "timestamp": "2026-08-15T00:00:00Z",
+                    "sourceType": "CRM_UI",
+                }
+            ]
+        },
+    }
+    assert choose_deal_action(STAGE["nurture"], STAGE["proposal_sent"], ev, deal=deal) is None
+    fresh = Engagement(
+        source="fireflies",
+        external_id="ff-kevin-new",
+        occurred_at=datetime(2026, 9, 10, 18, 0, tzinfo=timezone.utc),
+        email="kevin@kevinhagemoser.com",
+        name="Kevin Hagemoser",
+        transcript="Discovery follow-up. Same website plan.",
+        extra={"has_sentences": True, "sentence_count": 8},
+        stage_hint=STAGE["discovery_held"],
+    )
+    assert (
+        choose_deal_action(STAGE["nurture"], STAGE["discovery_held"], fresh, deal=deal)
+        == STAGE["discovery_held"]
+    )
+
+
+def test_travis_discovery_held_requires_held_meeting():
+    gmail = Engagement(
+        source="gmail",
+        external_id="g-travis",
+        email="travis@example.com",
+        name="Travis L",
+        raw_subject="Catching up",
+        summary="Can we talk next week?",
+        stage_hint=STAGE["discovery_held"],
+    )
+    assert choose_deal_action(STAGE["meeting_booked"], STAGE["discovery_held"], gmail) is None
+    held = Engagement(
+        source="fireflies",
+        external_id="ff-travis",
+        email="travis@example.com",
+        name="Travis L",
+        transcript="Discovery with Travis about their roofing pipeline and owners.",
+        extra={"has_sentences": True, "sentence_count": 10},
+        stage_hint=STAGE["discovery_held"],
+    )
+    assert (
+        choose_deal_action(STAGE["meeting_booked"], STAGE["discovery_held"], held)
+        == STAGE["discovery_held"]
+    )
+
+
+def test_bare_number_is_not_a_quoted_amount():
+    from crmbrain.deal_write import authorize_deal_write
+    from crmbrain.intelligence import deal_amount_to_write, quote_states_priced_offer
+
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-kevin-amt",
+        email="kevin@kevinhagemoser.com",
+        transcript="We talked about 83234 and maybe 2500 later.",
+        extra={"deal_terms": {"quote": "we talked about 83234", "tcv": "83234"}},
+    )
+    assert quote_states_priced_offer("we talked about 83234") is False
+    assert deal_amount_to_write({"properties": {"dealstage": STAGE["nurture"]}}, "83234", ev=ev) == ""
+    stage, amount, reason = authorize_deal_write(
+        ev,
+        requested_stage=STAGE["proposal_sent"],
+        amount="83234",
+        contact={"id": "c-k"},
+        deal={
+            "id": "d-k",
+            "properties": {
+                "dealstage": STAGE["nurture"],
+                "hs_v2_date_entered_current_stage": "2026-08-15T00:00:00Z",
+            },
+        },
+        settings=make_settings(),
+    )
+    assert amount == ""
+    assert stage == ""
+
+
+def test_deal_holder_veto_does_not_move_stage():
+    from crmbrain.intent import apply_deal_holder_veto
+    from crmbrain.models import IntentDecision
+    from crmbrain.policy import stamp_deal_context
+
+    ev = Engagement(
+        source="fireflies",
+        external_id="ff-veto",
+        email="pat@example.com",
+        first_name="Pat",
+        last_name="Lee",
+        raw_subject="Recruiter intro",
+        transcript="Pat is a recruiter talking talent acquisition.",
+        extra={"has_sentences": True, "sentence_count": 6},
+    )
+    stamp_deal_context(
+        ev,
+        {"id": "c-p", "properties": {"email": "pat@example.com"}},
+        [{"id": "d-p", "properties": {"dealstage": STAGE["discovery_scheduled"]}}],
+    )
+    incoming = IntentDecision(
+        verdict="no",
+        intent="recruiter",
+        confidence=0.9,
+        reason="Recruiter meeting",
+        stage=STAGE["discovery_held"],
+        amount="83234",
+    )
+    decision = apply_deal_holder_veto(ev, incoming)
+    assert decision.intent != "recruiter"
+    assert decision.stage == ""
+    assert decision.amount == ""
+    assert "no stage move" in (decision.reason or "").lower()
+
+
+def test_bolder_renewal_needs_evidenced_call():
+    email = Engagement(
+        source="gmail",
+        external_id="g-bolder",
+        email="mike@boldercyberpartners.com",
+        raw_subject="Renewal thoughts",
+        summary="Can we talk about the renewal sometime?",
+    )
+    assert is_renewal_meeting(email)
+    assert not is_evidenced_renewal_call(email)
+    hs = FakeHubSpot()
+    renewal = {
+        "id": "r-bolder",
+        "contact_id": "1",
+        "properties": {
+            "dealstage": RENEWAL_STAGE["renewal_upcoming"],
+            "pipeline": RENEWAL_PIPELINE,
+            "dealname": "Bolder - Renewal",
+        },
+    }
+    hs.deals.append(renewal)
+    assert maybe_schedule_renewal_call(hs, [renewal], email) is None
+    assert renewal["properties"]["dealstage"] == RENEWAL_STAGE["renewal_upcoming"]
+    cal = Engagement(
+        source="calendly",
+        external_id="cal-bolder",
+        email="mike@boldercyberpartners.com",
+        raw_subject="QBR / renewal review",
+        extra={"event_type": "Client renewal", "scheduled_at": "2026-10-10T16:00:00Z"},
+    )
+    assert is_evidenced_renewal_call(cal)
+    assert maybe_schedule_renewal_call(hs, [renewal], cal) is not None
+    assert renewal["properties"]["dealstage"] == RENEWAL_STAGE["call_scheduled"]

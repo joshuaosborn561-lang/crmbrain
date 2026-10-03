@@ -294,11 +294,25 @@ class _FakeNurtureHS:
         return list(self.contacts.get(str(deal_id), []))
 
 
+class _ThreadGmail:
+    def __init__(self):
+        self.calls = []
+
+    def find_contact_thread(self, email, name=""):
+        self.calls.append((email, name))
+        if email == "jackie@kellyroofing.com":
+            return {
+                "thread_id": "thread-jackie-live",
+                "original_subject": "Follow up from our call earlier",
+            }
+        return None
+
+
 def test_sample_cards_come_from_hubspot_nurture_and_skip_exclusions(tmp_path):
     settings = make_settings()
     out = tmp_path / "cards.json"
     payload = sample_hubspot_nurture_cards(
-        settings, 10, hs=_FakeNurtureHS(), out_path=str(out)
+        settings, 10, hs=_FakeNurtureHS(), gmail=_ThreadGmail(), out_path=str(out)
     )
     names = [c["name"] for c in payload["cards"]]
     emails = [c["email"] for c in payload["cards"]]
@@ -315,3 +329,190 @@ def test_sample_cards_come_from_hubspot_nurture_and_skip_exclusions(tmp_path):
         letters = [ch for ch in line if ch.isalpha()]
         if letters:
             assert letters[0].isupper()
+    assert jackie["reason"] in {"met", "booked", "kicked_can"}
+    assert "Fit:" not in str(jackie["reason"])
+    assert jackie["body"].split("\n\n")[1].rstrip().endswith(".")
+    assert "Quick follow up" not in jackie["subject"]
+
+
+def test_sample_cards_fail_loud_on_gmail_config_error(tmp_path):
+    settings = make_settings(gmail_client_id="partial-id")
+    try:
+        sample_hubspot_nurture_cards(
+            settings, 1, hs=_FakeNurtureHS(), out_path=str(tmp_path / "boom.json")
+        )
+    except RuntimeError as exc:
+        assert "missing_gmail_config" in str(exc)
+    else:
+        raise AssertionError("sample cards must fail loud when Gmail config is incomplete")
+
+
+class _CompanyHS(_FakeNurtureHS):
+    def __init__(self):
+        super().__init__()
+        self.deals["nurture"].extend(
+            [
+                {
+                    "id": "d-bradley",
+                    "properties": {
+                        "dealname": "Bradley Lord - Empire Roofing",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-04-20T15:00:00Z",
+                        "nurture_reason": "Fit: Empire Roofing wants to cut 80% of outbound grind.",
+                    },
+                },
+                {
+                    "id": "d-lionel",
+                    "properties": {
+                        "dealname": "Lionel Francis - Empire Roofing",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-04-20T15:00:00Z",
+                        "nurture_reason": "Fit: Empire Roofing wants to cut 80% of outbound grind.",
+                    },
+                },
+                {
+                    "id": "d-reese",
+                    "properties": {
+                        "dealname": "Reese Samala - The Roof Docs",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-05-01T15:00:00Z",
+                    },
+                },
+                {
+                    "id": "d-ryan",
+                    "properties": {
+                        "dealname": "Ryan Parker - The Roof Docs",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-05-02T15:00:00Z",
+                    },
+                },
+            ]
+        )
+        self.contacts.update(
+            {
+                "d-bradley": [
+                    {
+                        "id": "c-brad",
+                        "properties": {
+                            "firstname": "Bradley",
+                            "lastname": "Lord",
+                            "email": "bradley@empireroofing.com",
+                            "company": "Empire Roofing",
+                            "crm_source": "fireflies",
+                        },
+                    }
+                ],
+                "d-lionel": [
+                    {
+                        "id": "c-lionel",
+                        "properties": {
+                            "firstname": "Lionel",
+                            "lastname": "Francis",
+                            "email": "lionel@empireroofing.com",
+                            "company": "Empire Roofing",
+                        },
+                    }
+                ],
+                "d-reese": [
+                    {
+                        "id": "c-reese",
+                        "properties": {
+                            "firstname": "Reese",
+                            "lastname": "Samala",
+                            "email": "reese@wrsroof.com",
+                            "company": "wrsroof.com",
+                        },
+                    }
+                ],
+                "d-ryan": [
+                    {
+                        "id": "c-ryan",
+                        "properties": {
+                            "firstname": "Ryan",
+                            "lastname": "Parker",
+                            "email": "ryan@wrsroof.com",
+                            "company": "wrsroof.com",
+                        },
+                    }
+                ],
+            }
+        )
+
+    def last_meeting_at(self, contact_id):
+        if contact_id == "c-jackie":
+            return datetime(2026, 4, 10, 20, 30, tzinfo=timezone.utc)
+        if contact_id == "c-brad":
+            return datetime(2026, 4, 20, 15, 0, tzinfo=timezone.utc)
+        return None
+
+
+def test_sample_run_calls_find_contact_thread_and_dedupes_company(tmp_path):
+    settings = make_settings()
+    gmail = _ThreadGmail()
+    payload = sample_hubspot_nurture_cards(
+        settings, 10, hs=_CompanyHS(), gmail=gmail, out_path=str(tmp_path / "cards.json")
+    )
+    assert gmail.calls
+    assert any(email == "jackie@kellyroofing.com" for email, _name in gmail.calls)
+    jackie = next(c for c in payload["cards"] if c["email"] == "jackie@kellyroofing.com")
+    assert jackie["thread_id"] == "thread-jackie-live"
+    names = [c["name"] for c in payload["cards"]]
+    empire = [n for n in names if n in {"Bradley Lord", "Lionel Francis"}]
+    assert len(empire) == 1
+    assert empire[0] == "Bradley Lord"
+    roof_docs = [n for n in names if n in {"Reese Samala", "Ryan Parker"}]
+    assert len(roof_docs) == 1
+    assert payload["skipped"].get("same_company", 0) >= 2
+    for card in payload["cards"]:
+        assert "Fit:" not in str(card["reason"])
+        assert card["reason"] in {"met", "booked", "kicked_can"}
+        assert "wrsroof.com follow up" not in card["subject"].lower()
+        assert card["subject"] != "Quick follow up"
+        proof = card["body"].split("\n\n")[1]
+        assert proof.rstrip().endswith(".")
+
+
+def test_reason_ignores_raw_hubspot_fit_note():
+    from crmbrain.nurture import infer_nurture_reason
+
+    note = "Fit: Empire Roofing wants to cut 80% of outbound grind."
+    assert infer_nurture_reason(reason=note, deal_stage=STAGE["nurture"]) == "booked"
+    assert infer_nurture_reason(reason=note, deal_stage=STAGE["nurture"], extra={"fireflies": True}) == "met"
+    assert infer_nurture_reason(reason=note, extra={"booked": True}) == "booked"
+
+
+def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
+    from crmbrain.nurture import compose_nurture_draft
+
+    met = compose_nurture_draft(
+        {
+            "name": "Kevin Hagemoser",
+            "company": "Kevin Hagemoser",
+            "reason": "met",
+            "meeting_at": "2026-09-10T18:00:00+00:00",
+            "last_touch_snippet": "Fit: they want to knock out a website first.",
+        }
+    )
+    opener = met.body.split("\n", 1)[0]
+    assert "sep" in opener.lower()
+    assert "website" in opener.lower()
+    assert "fit:" not in opener.lower()
+    assert "following up on our call" not in opener.lower() or "sep" in opener.lower()
+
+    booked = compose_nurture_draft(
+        {
+            "name": "Jonathan Matthews",
+            "reason": "booked",
+            "meeting_at": "2026-03-12T16:00:00+00:00",
+            "last_touch_snippet": "",
+        }
+    )
+    booked_opener = booked.body.split("\n", 1)[0].lower()
+    assert "on our call" not in booked_opener
+    assert "following up on our" not in booked_opener
+    assert "circling back" in booked_opener
+    assert "mar" in booked_opener

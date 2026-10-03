@@ -859,7 +859,7 @@ def test_thread_reply_uses_original_subject_and_new_thread_is_specific():
 def test_nurture_stage_never_keeps_stale_never_booked():
     """Item 1: Nurture without an explicit met flag derives met/booked from evidence."""
     nurture = STAGE["nurture"]
-    assert infer_nurture_reason(reason="never_booked", deal_stage=nurture) == "met"
+    assert infer_nurture_reason(reason="never_booked", deal_stage=nurture) == "booked"
     assert (
         infer_nurture_reason(
             reason="never_booked",
@@ -890,7 +890,7 @@ def test_nurture_stage_never_keeps_stale_never_booked():
             deal_stage=nurture,
             extra={"calendar_event": True, "meeting_at": "2026-06-01T15:00:00Z"},
         )
-        == "met"
+        == "booked"
     )
     assert (
         infer_nurture_reason(
@@ -898,7 +898,7 @@ def test_nurture_stage_never_keeps_stale_never_booked():
             deal_stage=nurture,
             extra={"hs_meeting": True},
         )
-        == "met"
+        == "booked"
     )
     assert (
         infer_nurture_reason(

@@ -1171,6 +1171,11 @@ def apply_gmail_stage_update(
             has_closed_won=has_closed_won,
         )
         ev.stage_hint = write_stage
+        if write_stage == STAGE["discovery_completed"]:
+            extra = dict(ev.extra or {})
+            extra["held_meeting"] = True
+            extra["meeting_held"] = True
+            ev.extra = extra
         if write_stage == INCREMENT_NO_SHOW:
             deals_inc = _contact_deals(hs, contact)
             live_inc = policy.live_open_deals(deals_inc)
