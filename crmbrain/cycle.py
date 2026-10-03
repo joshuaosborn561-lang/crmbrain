@@ -749,6 +749,12 @@ def _apply_transcript_intelligence(
             settings=settings,
         )
         if not stage_out and not amount_out:
+            if write_reason == "refresh" and prev_stage:
+                try:
+                    commit_deal_write(hs, contact, ev, prev_stage)
+                except Exception as exc:
+                    report.errors.append(f"deal {ev.display_name() or ev.email}: {exc}")
+                    logger.warning("deal refresh failed %s: %s", ev.display_name() or ev.email, exc)
             return facts
         if reserved is None:
             extra_kind = None

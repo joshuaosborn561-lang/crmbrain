@@ -39,7 +39,8 @@ def authorize_deal_write(
 ) -> tuple[str, str, str]:
     """Return (stage, amount, reason). Empty stage and amount means do not write.
 
-    reason is `create`, `move`, `amount` when a write is allowed, otherwise the block.
+    reason is `create`, `move`, or `amount` when a write is allowed. `refresh` means
+    the existing deal may be touched for name cleanup only. Any other reason is a block.
     """
     deals = deals if deals is not None else ([deal] if deal else [])
     if is_excluded_contact(ev, contact) or row_has_not_deal_note(contact) or row_has_not_deal_note(deal):
@@ -68,7 +69,7 @@ def authorize_deal_write(
         if write_amount and not may_mutate_existing_deal(ev, deal, settings):
             write_amount = ""
     if not stage and not write_amount:
-        return "", "", "no_write"
+        return "", "", "refresh"
     return stage, write_amount, ("move" if stage else "amount")
 
 
