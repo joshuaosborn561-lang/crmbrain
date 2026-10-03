@@ -20,6 +20,7 @@ from crmbrain.policy import (
     NEVER_OPEN_DEAL_SOURCES,
     STRICT_DISCOVERY_HINTS,
     has_word_hint,
+    is_closed_won_client,
 )
 
 SALES_HINTS = (
@@ -334,8 +335,12 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             reason="Title matches a non-sales pattern",
         )
 
-    if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and not any(
-        h in blob for h in ("proposal", "agreement", "invoice", "pandadoc", "docusign", "paid", "growth partners")
+    if (
+        is_client_context(ev.display_name(), ev.company, ev.raw_subject)
+        and is_closed_won_client(ev)
+        and not any(
+            h in blob for h in ("proposal", "agreement", "invoice", "pandadoc", "docusign", "paid", "growth partners")
+        )
     ):
         return IntentDecision(
             verdict="no",
@@ -392,22 +397,22 @@ def apply_deal_holder_veto(ev: Engagement, decision: IntentDecision | None = Non
         return decision
     if decision.intent == "hire" and _explicit_hire_evidence(_blob(ev)):
         return decision
-    if is_client_context(ev.display_name(), ev.company, ev.raw_subject):
+    if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and is_closed_won_client(ev):
         rewritten = IntentDecision(
             verdict="no",
             intent="client_ops",
             confidence=max(decision.confidence, 0.8),
-            reason="Existing client with a SalesGlider deal — not day-job/hire",
+            reason="Paid/Signed client — notes only, not day-job/hire",
             stage=decision.stage,
             amount=decision.amount,
             via=decision.via,
         )
     else:
         rewritten = IntentDecision(
-            verdict="review" if decision.verdict == "no" else decision.verdict,
-            intent="sales" if decision.verdict != "no" else "",
-            confidence=min(decision.confidence, 0.55),
-            reason="Open SalesGlider deal — not day-job/hire/recruiter without explicit evidence",
+            verdict="yes",
+            intent="sales",
+            confidence=max(0.8, min(decision.confidence, 0.9)),
+            reason="Open SalesGlider deal — stay updatable, not day-job/hire/recruiter",
             stage=decision.stage,
             amount=decision.amount,
             via=decision.via,

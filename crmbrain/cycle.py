@@ -35,7 +35,8 @@ from crmbrain.google_auth import drive_auth_detail, has_drive_access
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
-from crmbrain.models import CycleReport, Engagement, ProposedWrite
+from crmbrain.deal_write import authorize_deal_write, commit_amount_write, commit_deal_write, propose_deal_write
+from crmbrain.models import CycleReport, Engagement
 from crmbrain.leadmagic import should_skip_email, usable_linkedin
 from crmbrain.sources import cube_acr, fireflies, gmail_scan, rvm, smartlead
 from crmbrain.sources.cube_acr import CubeAuthError
@@ -293,14 +294,13 @@ def _propose_engagement(
     decision,
     already: dict | None,
 ) -> None:
-    report.proposed_writes.append(
-        ProposedWrite(
-            action="create" if not already else "update",
-            label=ev.display_name() or ev.email or ev.phone,
-            stage=decision.stage or ev.stage_hint,
-            reason=decision.reason,
-            contact_id=str((already or {}).get("id") or ""),
-        ).as_dict()
+    propose_deal_write(
+        report,
+        action="create" if not already else "update",
+        label=ev.display_name() or ev.email or ev.phone,
+        stage=decision.stage or ev.stage_hint,
+        reason=decision.reason,
+        contact_id=str((already or {}).get("id") or ""),
     )
     if not intent.is_confident_sales(decision) and not intent.is_confident_non_sales(decision):
         report.review_queue.append(
@@ -504,17 +504,16 @@ def _handle_engagement(
                 deal_row = max(live, key=policy.deal_richness) if live else None
                 current_stage = str((deal_row.get("properties") or {}).get("dealstage") or "") if deal_row else ""
                 current_amount = str((deal_row.get("properties") or {}).get("amount") or "") if deal_row else ""
-                write_stage = (
-                    policy.choose_deal_action(
-                        current_stage or None, requested, ev, deal=deal_row, settings=settings
-                    )
-                    if requested
-                    else None
+                write_stage, write_amount, write_reason = authorize_deal_write(
+                    ev,
+                    requested_stage=requested,
+                    amount=str(amount or ""),
+                    contact=already,
+                    deal=deal_row,
+                    deals=deals,
+                    company_deals=_company_deals(hs, ev, already),
+                    settings=settings,
                 )
-                write_amount = ""
-                if amount:
-                    probe = deal_row or {"properties": {"amount": current_amount, "dealstage": current_stage}}
-                    write_amount = intelligence.deal_amount_to_write(probe, str(amount), ev=ev)
                 if not write_stage and not write_amount:
                     report.skipped.append(
                         f"{ev.source}:{ev.external_id} reextract no-op current={current_stage}/{current_amount}"
@@ -529,17 +528,16 @@ def _handle_engagement(
                     return
                 if write_amount and not _reserve_budget(budget, "amount", memory, report, ev):
                     return
-                reason = f"reextract current={current_stage}/{current_amount}"
-                report.proposed_writes.append(
-                    ProposedWrite(
-                        action="update",
-                        label=ev.display_name() or ev.email or ev.phone,
-                        stage=write_stage or current_stage,
-                        amount=str(write_amount or ""),
-                        contact_id=str(already.get("id") or ""),
-                        deal_id=str((deal_row or {}).get("id") or ""),
-                        reason=reason,
-                    ).as_dict()
+                reason = f"reextract current={current_stage}/{current_amount} {write_reason}"
+                propose_deal_write(
+                    report,
+                    action="update",
+                    label=ev.display_name() or ev.email or ev.phone,
+                    stage=write_stage or current_stage,
+                    amount=str(write_amount or ""),
+                    contact_id=str(already.get("id") or ""),
+                    deal_id=str((deal_row or {}).get("id") or ""),
+                    reason=reason,
                 )
                 logger.info(
                     "reextract preview %s stage %s amount %s (%s)",
@@ -735,50 +733,54 @@ def _apply_transcript_intelligence(
             return facts
         prev_amount = ""
         prev_stage = ""
+        deal_row = None
         if live:
-            richest = max(live, key=policy.deal_richness)
-            prev_amount = str((richest.get("properties") or {}).get("amount") or "")
-            prev_stage = str((richest.get("properties") or {}).get("dealstage") or "")
+            deal_row = max(live, key=policy.deal_richness)
+            prev_amount = str((deal_row.get("properties") or {}).get("amount") or "")
+            prev_stage = str((deal_row.get("properties") or {}).get("dealstage") or "")
+        stage_out, amount_out, write_reason = authorize_deal_write(
+            ev,
+            requested_stage=stage,
+            amount=amount,
+            contact=contact,
+            deal=deal_row,
+            deals=deals,
+            company_deals=_company_deals(hs, ev, contact),
+            settings=settings,
+        )
+        if not stage_out and not amount_out:
+            return facts
         if reserved is None:
             extra_kind = None
-            if stage and not live:
+            if write_reason == "create":
                 extra_kind = "create"
-            elif stage and live:
-                current = (max(live, key=policy.deal_richness).get("properties") or {}).get("dealstage") or ""
-                if policy.choose_deal_action(current, stage, ev, settings=settings):
-                    extra_kind = "stage_move"
+            elif write_reason == "move":
+                extra_kind = "stage_move"
             if extra_kind and not _reserve_budget(budget, extra_kind, memory, report, ev):
                 return facts
-        want_amount = bool(amount) and not intelligence.amounts_equal(prev_amount, amount)
-        if want_amount:
-            probe = {"properties": {"amount": prev_amount, "dealstage": ""}}
-            if live:
-                probe = max(live, key=policy.deal_richness)
-            if not intelligence.deal_amount_to_write(probe, amount, ev=ev):
-                want_amount = False
-        if want_amount and not _reserve_budget(budget, "amount", memory, report, ev):
+        if amount_out and not _reserve_budget(budget, "amount", memory, report, ev):
             return facts
         try:
-            deal = hs.upsert_deal(contact, ev, stage, amount=amount)
+            deal = commit_deal_write(hs, contact, ev, stage_out or prev_stage, amount=amount_out)
         except Exception as exc:
             report.errors.append(f"deal {ev.display_name() or ev.email}: {exc}")
             logger.warning("deal write failed %s: %s", ev.display_name() or ev.email, exc)
             return facts
         written_stage = str((deal.get("properties") or {}).get("dealstage") or "")
-        if deal.get("id") and stage and written_stage == stage and written_stage != prev_stage:
-            report.deals_moved.append(f"{ev.display_name()} -> {stage} ({deal.get('id')})")
-            if stage in {STAGE["discovery_scheduled"], STAGE["discovery_completed"], STAGE["paid"], STAGE["signed"]}:
+        if deal.get("id") and stage_out and written_stage == stage_out and written_stage != prev_stage:
+            report.deals_moved.append(f"{ev.display_name()} -> {stage_out} ({deal.get('id')})")
+            if stage_out in {STAGE["discovery_scheduled"], STAGE["discovery_completed"], STAGE["paid"], STAGE["signed"]}:
                 memory.stop_ticker(email=ev.email, hs_contact_id=contact["id"])
         live_amount = (deal.get("properties") or {}).get("amount")
         wrote_amount = False
-        if deal.get("id") and amount:
-            if not intelligence.amounts_equal(prev_amount, amount) and intelligence.amounts_equal(live_amount, amount):
+        if deal.get("id") and amount_out:
+            if not intelligence.amounts_equal(prev_amount, amount_out) and intelligence.amounts_equal(live_amount, amount_out):
                 wrote_amount = True
-            elif not intelligence.amounts_equal(live_amount, amount):
-                wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
+            elif not intelligence.amounts_equal(live_amount, amount_out):
+                wrote_amount = commit_amount_write(hs, deal, amount_out, ev=ev, contact=contact)
         if wrote_amount:
-            report.amounts_set.append(f"{ev.display_name() or ev.email} {amount}")
-            logger.info("amounts_set %s %s", ev.display_name() or ev.email, amount)
+            report.amounts_set.append(f"{ev.display_name() or ev.email} {amount_out}")
+            logger.info("amounts_set %s %s", ev.display_name() or ev.email, amount_out)
     return facts
 
 
@@ -1155,26 +1157,44 @@ def apply_gmail_stage_update(
             report.skipped.append(f"{ev.source}:{ev.external_id} stale no_show")
             return
         if already and write_stage == STAGE["discovery_completed"] and contact_id:
-            promote_kind = "create" if not policy.live_open_deals(_contact_deals(hs, contact)) else "stage_move"
+            deals_ns = _contact_deals(hs, contact)
+            live_ns = policy.live_open_deals(deals_ns)
+            deal_ns = max(live_ns, key=policy.deal_richness) if live_ns else None
+            held = policy.matching_held_event(ev, contact, held_events, scheduled_at)
+            gate_ev = held if held else ev
+            stage_out, _amt, reason = authorize_deal_write(
+                gate_ev,
+                requested_stage=write_stage,
+                contact=contact,
+                deal=deal_ns,
+                deals=deals_ns,
+                company_deals=_company_deals(hs, ev, contact),
+                settings=settings,
+            )
+            if not stage_out:
+                report.skipped.append(f"{ev.email or ev.display_name()} held_beats_noshow {reason}")
+                return
+            promote_kind = "create" if deal_ns is None else "stage_move"
             if settings.dry_run:
                 if not _reserve_budget(budget, promote_kind, memory, report, ev):
                     return
-                report.proposed_writes.append(
-                    ProposedWrite(
-                        action="move",
-                        label=ev.email or ev.display_name(),
-                        stage=write_stage,
-                        contact_id=str(contact_id),
-                        reason="held_beats_noshow",
-                    ).as_dict()
+                propose_deal_write(
+                    report,
+                    action="move" if deal_ns else "create",
+                    label=ev.email or ev.display_name(),
+                    stage=stage_out,
+                    contact_id=str(contact_id),
+                    deal_id=str((deal_ns or {}).get("id") or ""),
+                    reason="held_beats_noshow",
                 )
                 return
-            kind = "create" if not policy.live_open_deals(_contact_deals(hs, contact)) else "stage_move"
-            if not _reserve_budget(budget, kind, memory, report, ev):
+            if not _reserve_budget(budget, promote_kind, memory, report, ev):
                 return
-            deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage)
+            deal = commit_deal_write(
+                hs, contact or {"id": contact_id, "properties": {}}, gate_ev, stage_out
+            )
             if deal.get("id"):
-                report.deals_moved.append(f"{ev.email} gmail -> {write_stage} ({deal.get('id')})")
+                report.deals_moved.append(f"{ev.email} gmail -> {stage_out} ({deal.get('id')})")
             memory.stop_ticker(email=ev.email, hs_contact_id=contact_id)
             return
         if not write_stage:
@@ -1226,10 +1246,18 @@ def apply_gmail_stage_update(
             if won:
                 deal_row = max(won, key=policy.deal_richness)
                 current = (deal_row.get("properties") or {}).get("dealstage") or ""
-        write_stage = policy.choose_deal_action(
-            current or None, ev.stage_hint, ev, deal=deal_row, settings=settings
+        amount = str((ev.extra or {}).get("amount") or "")
+        write_stage, write_amount, write_reason = authorize_deal_write(
+            ev,
+            requested_stage=ev.stage_hint,
+            amount=amount,
+            contact=contact,
+            deal=deal_row,
+            deals=deals,
+            company_deals=_company_deals(hs, ev, contact),
+            settings=settings,
         )
-        if not write_stage:
+        if not write_stage and not write_amount:
             report.skipped.append(
                 f"{ev.email or ev.display_name() or ev.external_id} gmail stage blocked"
             )
@@ -1237,46 +1265,45 @@ def apply_gmail_stage_update(
                 memory.mark_processed(ev.source, ev.external_id, {"skip": "gmail_stage_blocked"})
                 report.processed.append(f"gmail:{ev.raw_subject[:60]}")
             return
-        ev.stage_hint = write_stage
-        gmail_kind = "create" if not live else "stage_move"
+        if write_stage:
+            ev.stage_hint = write_stage
+        gmail_kind = "create" if write_reason == "create" else "stage_move" if write_stage else None
         if settings.dry_run:
-            if not _reserve_budget(budget, gmail_kind, memory, report, ev):
+            if gmail_kind and not _reserve_budget(budget, gmail_kind, memory, report, ev):
                 return
-            report.proposed_writes.append(
-                ProposedWrite(
-                    action="move",
-                    label=ev.email or ev.display_name(),
-                    stage=write_stage,
-                    amount=str((ev.extra or {}).get("amount") or ""),
-                    contact_id=str(contact_id),
-                    reason="gmail",
-                ).as_dict()
+            if write_amount and not _reserve_budget(budget, "amount", memory, report, ev):
+                return
+            propose_deal_write(
+                report,
+                action=write_reason or "move",
+                label=ev.email or ev.display_name(),
+                stage=write_stage or current,
+                amount=str(write_amount or ""),
+                contact_id=str(contact_id),
+                deal_id=str((deal_row or {}).get("id") or ""),
+                reason="gmail",
             )
             return
-        if not _reserve_budget(budget, gmail_kind, memory, report, ev):
+        if gmail_kind and not _reserve_budget(budget, gmail_kind, memory, report, ev):
             return
-        amount = str((ev.extra or {}).get("amount") or "")
         prev_amount = str((deal_row.get("properties") or {}).get("amount") or "") if deal_row else ""
-        want_amount = bool(amount) and not intelligence.amounts_equal(prev_amount, amount)
-        if want_amount:
-            probe = deal_row or {"properties": {"amount": prev_amount, "dealstage": current}}
-            if not intelligence.deal_amount_to_write(probe, amount, ev=ev):
-                want_amount = False
-        if want_amount and not _reserve_budget(budget, "amount", memory, report, ev):
+        if write_amount and not _reserve_budget(budget, "amount", memory, report, ev):
             return
-        deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage, amount=amount)
+        deal = commit_deal_write(
+            hs, contact or {"id": contact_id, "properties": {}}, ev, write_stage or current, amount=write_amount
+        )
         report.deals_moved.append(f"{ev.email} gmail -> {ev.stage_hint} ({deal.get('id')})")
         live_amount = (deal.get("properties") or {}).get("amount")
         wrote_amount = bool(
             deal.get("id")
-            and amount
-            and not intelligence.amounts_equal(prev_amount, amount)
-            and intelligence.amounts_equal(live_amount, amount)
+            and write_amount
+            and not intelligence.amounts_equal(prev_amount, write_amount)
+            and intelligence.amounts_equal(live_amount, write_amount)
         )
-        if deal.get("id") and amount and not wrote_amount:
-            wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
+        if deal.get("id") and write_amount and not wrote_amount:
+            wrote_amount = commit_amount_write(hs, deal, write_amount, ev=ev, contact=contact)
         if wrote_amount:
-            report.amounts_set.append(f"{ev.email} {amount}")
+            report.amounts_set.append(f"{ev.email} {write_amount}")
         if ev.stage_hint == STAGE["no_show"]:
             ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
             report.ticker_enrolled.append(f"{ev.email} no_show")

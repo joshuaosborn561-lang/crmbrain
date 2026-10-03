@@ -3,7 +3,8 @@
 from datetime import datetime, timezone
 
 from crmbrain.config import STAGE, is_excluded_contact, is_non_deal_person
-from crmbrain.cycle import _handle_engagement
+from crmbrain.cycle import apply_gmail_stage_update, _handle_engagement, should_reextract
+from crmbrain.deal_write import authorize_deal_write
 from crmbrain.evidence import build_timelines
 from crmbrain.intent import apply_deal_holder_veto, classify, heuristic_intent
 from crmbrain.memory import Memory
@@ -13,12 +14,17 @@ from crmbrain.policy import (
     choose_deal_action,
     deal_is_locked,
     event_predates_freeze,
+    is_call_screener,
+    is_closed_won_client,
+    is_meeting_held,
     is_unidentified_cube_phone,
+    may_mutate_existing_deal,
     may_open_new_deal,
+    no_show_write_stage,
     stamp_deal_context,
 )
 from crmbrain.reconcile import apply_timeline, restore_missing_deals, run as reconcile_run
-from tests.test_crm_gating import FakeHubSpot, make_settings
+from tests.test_crm_gating import FakeHubSpot, make_settings, stub_gemini_extract
 
 FREEZE = datetime(2026, 10, 3, 1, 30, tzinfo=timezone.utc)
 SEP_CALL = datetime(2026, 9, 25, 16, 0, tzinfo=timezone.utc)
@@ -130,11 +136,33 @@ def test_deal_holder_is_never_day_job_or_recruiter(tmp_path):
         _contact("c-dave", "dave@goliath.com", "Dave", "Ackley", "Goliath"),
         [_deal("d-dave", "c-dave", STAGE["proposal_sent"], amount="21000")],
     )
+    assert is_closed_won_client(dave) is False
     decision = heuristic_intent(dave)
     assert decision.intent != "day_job"
+    assert decision.intent != "client_ops"
     classified = classify(make_settings(), dave)
     assert classified.intent != "day_job"
-    assert classified.intent == "client_ops"
+    assert classified.intent != "client_ops"
+    assert classified.verdict != "no"
+
+    dave_paid = _held(
+        external_id="ff-dave-paid",
+        email="dave@goliath.com",
+        first_name="Dave",
+        last_name="Ackley",
+        company="Goliath",
+        raw_subject="Meraki Discussion with Insight",
+        transcript="Talked about insight.com meraki and the Goliath campaign.",
+    )
+    stamp_deal_context(
+        dave_paid,
+        _contact("c-dave-paid", "dave@goliath.com", "Dave", "Ackley", "Goliath"),
+        [_deal("d-dave-paid", "c-dave-paid", STAGE["paid"], amount="8500")],
+    )
+    assert is_closed_won_client(dave_paid) is True
+    paid_classified = classify(make_settings(), dave_paid)
+    assert paid_classified.intent == "client_ops"
+    assert paid_classified.verdict == "no"
 
     vincent = _held(
         external_id="ff-vincent",
@@ -374,3 +402,200 @@ def test_myles_fuzzy_paid_client_is_notes_only(tmp_path):
     assert hs.deals[0]["properties"]["dealstage"] == STAGE["paid"]
     assert not any(w[0] == "upsert_deal" for w in hs.writes)
     assert not report.deals_restored
+
+
+def test_kevin_hagemoser_pre_freeze_reextract_does_not_write_amount(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="7500", quote="$7,500")
+    ev = _held(
+        external_id="ff-kevin",
+        occurred_at=datetime(2026, 9, 20, 16, 0, tzinfo=timezone.utc),
+        email="kevin@hagemoser.com",
+        first_name="Kevin",
+        last_name="Hagemoser",
+        company="Hagemoser",
+        raw_subject="Kevin Hagemoser and Joshua Osborn",
+        transcript="Discovery about their pipeline. Kevin said he can't afford the $7,500 package.",
+    )
+    contact = _contact("c-kevin", "kevin@hagemoser.com", "Kevin", "Hagemoser", "Hagemoser")
+    deal = _deal("d-kevin", "c-kevin", STAGE["nurture"], amount="", name="Kevin Hagemoser")
+    settings = make_settings(
+        gemini_key="fake",
+        dry_run=True,
+        manual_freeze_at=FREEZE,
+        reextract_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    assert event_predates_freeze(ev, settings)
+    assert may_mutate_existing_deal(ev, deal, settings) is False
+    assert should_reextract(settings, ev)
+    stage, amount, reason = authorize_deal_write(
+        ev,
+        requested_stage=STAGE["discovery_completed"],
+        amount="7500",
+        contact=contact,
+        deal=deal,
+        settings=settings,
+    )
+    assert stage == ""
+    assert amount == ""
+    assert reason == "frozen"
+
+    hs = FakeHubSpot([contact])
+    hs.deals.append(deal)
+    hs.settings = settings
+    memory = Memory(settings, data_dir=tmp_path)
+    memory.mark_processed("fireflies", "ff-kevin", {"contact_id": "c-kevin"})
+    report = CycleReport()
+    _handle_engagement(ev, settings, hs, memory, None, report)
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["nurture"]
+    assert not (hs.deals[0]["properties"].get("amount") or "")
+    labels = " ".join(str(x) for x in (report.proposed_writes, report.amounts_set, hs.writes)).lower()
+    assert "7500" not in labels
+    assert "7,500" not in labels
+    assert report.proposed_writes == []
+    assert hs.writes == []
+
+
+def test_travis_rise_hiring_screener_does_not_promote_no_show(tmp_path):
+    scheduled = datetime(2026, 9, 14, 15, 30, tzinfo=timezone.utc)
+    held_at = datetime(2026, 9, 14, 15, 40, tzinfo=timezone.utc)
+    contact = _contact("c-travis", "travis@risehiring.com", "Travis", "L", "Rise Hiring")
+    deal = _deal("d-travis", "c-travis", STAGE["no_show"], name="Travis L - Rise Hiring")
+    screener = Engagement(
+        source="fireflies",
+        external_id="ff-travis-screener",
+        occurred_at=held_at,
+        email="travis@risehiring.com",
+        first_name="Travis",
+        last_name="L",
+        name="Travis L",
+        company="Rise Hiring",
+        domain="risehiring.com",
+        raw_subject="Travis L and Joshua Osborn",
+        transcript=(
+            "Hi, you've reached the Google Call Screen for Travis. "
+            "Please state your name and reason for calling."
+        ),
+        extra={
+            "call_screener": True,
+            "has_sentences": True,
+            "sentence_count": 4,
+            "participants": ["travis@risehiring.com", "joshua@salesglidergrowth.com"],
+            "meeting_attendees": [
+                {"displayName": "Travis L", "email": "travis@risehiring.com"},
+                {"displayName": "Joshua Osborn", "email": "joshua@salesglidergrowth.com"},
+            ],
+        },
+    )
+    gmail = Engagement(
+        source="gmail",
+        external_id="g-travis-noshow",
+        occurred_at=datetime(2026, 9, 14, 22, 0, tzinfo=timezone.utc),
+        email="travis@risehiring.com",
+        first_name="Travis",
+        last_name="L",
+        name="Travis L",
+        company="Rise Hiring",
+        domain="risehiring.com",
+        raw_subject="Invitee no-show: Travis L - SalesGlider Intro",
+        summary="Mon Sep 14 2026 10:30AM CDT\nSalesGlider Intro",
+        stage_hint=STAGE["no_show"],
+        extra={
+            "hubspot_contact_id": "c-travis",
+            "meeting_when": "Mon Sep 14 2026 10:30AM CDT",
+            "meeting_at": scheduled.isoformat(),
+            "event_type": "SalesGlider Intro",
+        },
+    )
+    assert is_call_screener(screener)
+    assert is_meeting_held(screener) is False
+    assert (
+        no_show_write_stage(
+            prospect=gmail,
+            contact=contact,
+            current_stage=STAGE["no_show"],
+            held_events=[screener],
+            scheduled_at=scheduled,
+            already_processed=True,
+        )
+        == ""
+    )
+    settings = _settings()
+    assert event_predates_freeze(screener, settings)
+    stage, amount, reason = authorize_deal_write(
+        screener,
+        requested_stage=STAGE["discovery_completed"],
+        contact=contact,
+        deal=deal,
+        deals=[deal],
+        settings=settings,
+    )
+    assert stage == ""
+    assert amount == ""
+    assert reason == "frozen"
+    create_stage, _, create_reason = authorize_deal_write(
+        screener,
+        requested_stage=STAGE["discovery_completed"],
+        contact=contact,
+        deal=None,
+        deals=[deal],
+        settings=settings,
+    )
+    assert create_stage == ""
+    assert create_reason == "manual_freeze"
+    ok, open_reason = may_open_new_deal(screener, contact, [deal], settings)
+    assert ok is False
+    assert open_reason == "manual_freeze"
+
+    hs = FakeHubSpot([contact])
+    hs.deals.append(deal)
+    hs.settings = settings
+    memory = Memory(settings, data_dir=tmp_path)
+    memory.mark_processed(gmail.source, gmail.external_id, {"subject": gmail.raw_subject})
+    report = CycleReport()
+    apply_gmail_stage_update(
+        gmail,
+        settings,
+        hs,
+        memory,
+        None,
+        report,
+        held_events=[screener],
+    )
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert len(hs.deals) == 1
+    assert report.proposed_writes == []
+    assert hs.writes == []
+    assert not any(STAGE["discovery_completed"] in str(item) for item in report.deals_moved)
+
+
+def test_production_deal_writes_go_through_single_gate():
+    import ast
+    from pathlib import Path
+
+    allowed = {
+        Path("crmbrain/deal_write.py").resolve(),
+        Path("crmbrain/hubspot.py").resolve(),
+    }
+    forbidden_calls = {"upsert_deal", "fill_deal_amount"}
+    offenders: list[str] = []
+    roots = [Path("crmbrain"), Path("scripts")]
+    for root in roots:
+        for path in root.rglob("*.py"):
+            resolved = path.resolve()
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = ""
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute):
+                    name = func.attr
+                if name in forbidden_calls or name == "ProposedWrite":
+                    if resolved in allowed and name != "ProposedWrite":
+                        continue
+                    if path.name == "deal_write.py" and name == "ProposedWrite":
+                        continue
+                    offenders.append(f"{path}:{node.lineno}:{name}")
+    assert offenders == []

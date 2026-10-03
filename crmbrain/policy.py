@@ -167,6 +167,36 @@ def is_silent_meeting(ev: Engagement) -> bool:
     return False
 
 
+CALL_SCREENER_HINTS = (
+    "call screen",
+    "call screener",
+    "google call screen",
+    "this call is being screened",
+    "please state your name and reason",
+    "the person you are calling is using",
+    "unknown caller screening",
+    "you've reached the google call screen",
+    "hi, you've reached",
+)
+
+
+def is_call_screener(ev: Engagement) -> bool:
+    """Voicemail / Google Call Screen / Silence Unknown Callers is not a held meeting."""
+    extra = ev.extra or {}
+    if extra.get("call_screener") is True or extra.get("screener") is True:
+        return True
+    blob = f"{ev.raw_subject or ''} {ev.summary or ''} {ev.transcript or ''}".lower()
+    return any(h in blob for h in CALL_SCREENER_HINTS)
+
+
+def is_closed_won_client(ev: Engagement, deals: list[dict] | None = None, company_deals: list[dict] | None = None) -> bool:
+    """Paid/Signed at the person or company. Open pipeline is not a client."""
+    extra = ev.extra or {}
+    if extra.get("closed_won") or extra.get("company_closed_won") or extra.get("company_has_paid"):
+        return True
+    return person_or_company_closed_won(deals, company_deals, extra)
+
+
 def call_supports_proposal_sent(ev: Engagement, facts: dict | None = None) -> bool:
     """Held, priced call with a proposal promised or sent."""
     if ev.source not in {"fireflies", "cube_acr"}:
@@ -437,6 +467,8 @@ def is_allo_discovery(ev: Engagement) -> bool:
 
 
 def is_meeting_held(ev: Engagement) -> bool:
+    if is_call_screener(ev):
+        return False
     if ev.source == "fireflies":
         return not is_silent_meeting(ev)
     if ev.source == "cube_acr":
@@ -662,7 +694,12 @@ def may_open_new_deal(
         return False, "manual_freeze"
     if not contact and not (is_meeting_held(ev) or is_meeting_scheduled(ev)):
         return False, "no_contact_no_meeting"
-    if is_client_context_ev(ev) and not is_new_completed_paperwork(ev) and not is_payment_event(ev):
+    if (
+        is_client_context_ev(ev)
+        and is_closed_won_client(ev, deals, company_deals)
+        and not is_new_completed_paperwork(ev)
+        and not is_payment_event(ev)
+    ):
         return False, "client"
     if ev.source in NEVER_OPEN_DEAL_SOURCES:
         return False, "cold_source"
@@ -733,7 +770,7 @@ def choose_deal_action(
 def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     """Only set a stage when evidence warrants it. No HeyReach/RVM Replied. No Smartlead Nurture."""
     facts = facts or {}
-    if is_client_context(ev.display_name(), ev.company, ev.raw_subject):
+    if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and is_closed_won_client(ev):
         return ""
     hint = facts.get("stage_hint") or ev.stage_hint
     stage = stage_id(hint) if hint else ""
@@ -1103,6 +1140,8 @@ def no_show_write_stage(
     A stale processed no_show event must not re-fire or re-promote.
     """
     held = matching_held_event(prospect, contact, held_events, scheduled_at)
+    if held and not is_meeting_held(held):
+        held = None
     completed_or_better = STAGE_RANK.get(current_stage, 0) >= STAGE_RANK[STAGE["discovery_completed"]]
     if already_processed:
         if held:
