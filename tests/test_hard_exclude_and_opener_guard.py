@@ -335,18 +335,6 @@ def test_sample_cards_come_from_hubspot_nurture_and_skip_exclusions(tmp_path):
     assert "Quick follow up" not in jackie["subject"]
 
 
-def test_sample_cards_fail_loud_on_gmail_config_error(tmp_path):
-    settings = make_settings(gmail_client_id="partial-id")
-    try:
-        sample_hubspot_nurture_cards(
-            settings, 1, hs=_FakeNurtureHS(), out_path=str(tmp_path / "boom.json")
-        )
-    except RuntimeError as exc:
-        assert "missing_gmail_config" in str(exc)
-    else:
-        raise AssertionError("sample cards must fail loud when Gmail config is incomplete")
-
-
 class _CompanyHS(_FakeNurtureHS):
     def __init__(self):
         super().__init__()
@@ -388,6 +376,15 @@ class _CompanyHS(_FakeNurtureHS):
                         "dealstage": STAGE["nurture"],
                         "pipeline": "default",
                         "createdate": "2026-05-02T15:00:00Z",
+                    },
+                },
+                {
+                    "id": "d-devx",
+                    "properties": {
+                        "dealname": "Pat Devx",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-05-03T15:00:00Z",
                     },
                 },
             ]
@@ -439,6 +436,17 @@ class _CompanyHS(_FakeNurtureHS):
                         },
                     }
                 ],
+                "d-devx": [
+                    {
+                        "id": "c-devx",
+                        "properties": {
+                            "firstname": "Pat",
+                            "lastname": "Devx",
+                            "email": "pat@devx.com",
+                            "company": "Devx",
+                        },
+                    }
+                ],
             }
         )
 
@@ -450,16 +458,16 @@ class _CompanyHS(_FakeNurtureHS):
         return None
 
 
-def test_sample_run_calls_find_contact_thread_and_dedupes_company(tmp_path):
+def test_sample_run_starts_new_threads_and_dedupes_company(tmp_path):
     settings = make_settings()
     gmail = _ThreadGmail()
     payload = sample_hubspot_nurture_cards(
         settings, 10, hs=_CompanyHS(), gmail=gmail, out_path=str(tmp_path / "cards.json")
     )
-    assert gmail.calls
-    assert any(email == "jackie@kellyroofing.com" for email, _name in gmail.calls)
+    assert gmail.calls == []
     jackie = next(c for c in payload["cards"] if c["email"] == "jackie@kellyroofing.com")
-    assert jackie["thread_id"] == "thread-jackie-live"
+    assert jackie["thread_id"] == ""
+    assert jackie["subject"] == "Kelly Roofing follow up"
     names = [c["name"] for c in payload["cards"]]
     empire = [n for n in names if n in {"Bradley Lord", "Lionel Francis"}]
     assert len(empire) == 1
@@ -471,7 +479,11 @@ def test_sample_run_calls_find_contact_thread_and_dedupes_company(tmp_path):
         assert "Fit:" not in str(card["reason"])
         assert card["reason"] in {"met", "booked", "kicked_can"}
         assert "wrsroof.com follow up" not in card["subject"].lower()
+        assert "devx follow up" not in card["subject"].lower()
         assert card["subject"] != "Quick follow up"
+        assert card["subject"] == "Following up" or card["subject"].endswith("follow up")
+        if card["email"] == "pat@devx.com":
+            assert card["subject"] == "Following up"
         proof = card["body"].split("\n\n")[1]
         assert proof.rstrip().endswith(".")
 
@@ -516,3 +528,122 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
     assert "following up on our" not in booked_opener
     assert "circling back" in booked_opener
     assert "mar" in booked_opener
+
+    undated = compose_nurture_draft(
+        {
+            "name": "Brian Donigan",
+            "company": "Donigan",
+            "reason": "met",
+            "last_touch_snippet": "",
+        }
+    )
+    undated_opener = undated.body.split("\n", 1)[0].lower()
+    assert "wanted to circle back" in undated_opener
+    assert "on our call" not in undated_opener
+    assert "following up on our call" not in undated_opener
+
+
+def test_proof_line_varies_by_vertical():
+    from crmbrain.nurture import CASE_STUDIES, GENERAL_PROOF, compose_nurture_draft
+
+    proofs = {}
+    for industry, company in (
+        ("staffing", "HireRight"),
+        ("msp", "Bytewise"),
+        ("roofing", "Kelly Roofing"),
+        ("saas", "Acme Cloud"),
+        ("financial_advisors", "Northshore Wealth"),
+    ):
+        draft = compose_nurture_draft(
+            {"name": "Pat Reyes", "company": company, "industry": industry}
+        )
+        proofs[industry] = draft.body.split("\n\n")[1]
+        assert proofs[industry].rstrip().endswith(".")
+        assert CASE_STUDIES[industry].rstrip(".")[:12].lower() in proofs[industry].lower()
+    assert len(set(proofs.values())) == 5
+    generic = compose_nurture_draft({"name": "Pat Reyes", "company": "Mystery Co"})
+    assert generic.body.split("\n\n")[1].rstrip(".") == GENERAL_PROOF.rstrip(".")
+    assert generic.body.split("\n\n")[1] not in proofs.values() or True
+    for other in proofs.values():
+        assert generic.body.split("\n\n")[1] != other
+
+
+def test_new_thread_subject_uses_title_case_company_not_domain():
+    from crmbrain.nurture import compose_nurture_draft
+
+    roof = compose_nurture_draft(
+        {"name": "Reese Samala", "company": "the roof docs", "email": "reese@wrsroof.com"}
+    )
+    assert roof.subject == "The Roof Docs follow up"
+    domain = compose_nurture_draft(
+        {"name": "Pat Devx", "company": "Devx", "email": "pat@devx.com"}
+    )
+    assert domain.subject == "Following up"
+    slug = compose_nurture_draft(
+        {
+            "name": "Chris",
+            "company": "wtrenovations.com",
+            "email": "chris@wtrenovations.com",
+        }
+    )
+    assert slug.subject == "Following up"
+    stored = compose_nurture_draft(
+        {
+            "name": "Jackie Darkazalli",
+            "company": "Kelly Roofing",
+            "nurture_thread_id": "th-nurture-1",
+            "nurture_thread_subject": "Kelly Roofing follow up",
+        }
+    )
+    assert stored.subject == "Re: Kelly Roofing follow up"
+
+
+def test_first_send_stores_nurture_thread_and_later_reply_uses_it(tmp_path):
+    from crmbrain.memory import Memory
+    from crmbrain.nurture_actions import send_nurture_reply
+    from tests.test_nurture_rebuild import FakeGmail, FakeSlack
+
+    settings = make_settings(nurture_send_enabled=True)
+    memory = Memory(settings, data_dir=tmp_path)
+    memory._local["ticker"] = [
+        {
+            "id": "t-store",
+            "name": "Pat Reyes",
+            "email": "pat@summitroofs.test",
+            "company": "Summit Roofs",
+            "hs_contact_id": "c-pat",
+            "hs_deal_id": "d-pat",
+            "status": "active",
+            "nurture_state": "queued",
+        }
+    ]
+    gmail = FakeGmail()
+
+    class _HS:
+        def __init__(self):
+            self.patches = []
+
+        def patch_contact(self, cid, props, ev=None, contact=None):
+            del ev, contact
+            self.patches.append(("c", cid, dict(props)))
+
+        def patch_deal(self, did, props):
+            self.patches.append(("d", did, dict(props)))
+
+    hs = _HS()
+    first = send_nurture_reply(
+        settings, memory, "t-store", gmail=gmail, hs=hs, slack=FakeSlack(), channel="C", ts="1"
+    )
+    assert first["ok"] is True
+    assert first["thread_kind"] == "new_thread"
+    assert gmail.sent[0]["threadId"] == ""
+    row = memory.get_ticker("t-store")
+    assert row["nurture_thread_id"] == "th-nurture-1"
+    assert any(p[0] == "c" and p[2].get("nurture_thread_id") == "th-nurture-1" for p in hs.patches)
+    memory.patch_ticker("t-store", {"nurture_state": "queued", "status": "active"})
+    second = send_nurture_reply(
+        settings, memory, "t-store", gmail=gmail, hs=hs, slack=FakeSlack(), channel="C", ts="2"
+    )
+    assert second["ok"] is True
+    assert gmail.sent[1]["threadId"] == "th-nurture-1"
+    assert gmail.sent[1]["subject"].lower().startswith("re:")

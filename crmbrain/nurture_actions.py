@@ -15,6 +15,7 @@ from crmbrain.nurture import (
     VIEW_EDIT,
     attach_gmail_thread,
     compose_nurture_draft,
+    persist_nurture_thread,
     cooldown_until,
     edit_modal,
     outcome_blocks,
@@ -66,12 +67,13 @@ def send_nurture_reply(
     subject: str | None = None,
     body: str | None = None,
     gmail=None,
+    hs=None,
     slack=None,
     channel: str = "",
     ts: str = "",
     action: str = "approve",
 ) -> dict[str, Any]:
-    """Idempotent Gmail thread send. Double-click never double-sends."""
+    """Idempotent Gmail send. First touch starts a new thread; later ones reply there."""
     claim = memory.claim_nurture_action(ticker_id, action)
     row = memory.get_ticker(ticker_id) or {}
     channel = channel or str(row.get("slack_channel") or settings.slack_channel)
@@ -90,7 +92,7 @@ def send_nurture_reply(
         _confirm(settings, slack, channel, ts, row, "error", "Missing email.")
         return {"ok": False, "outcome": "error", "reason": "no_email"}
     client = gmail or Gmail(settings)
-    row = attach_gmail_thread(row, client)
+    row = attach_gmail_thread(row)
     draft = compose_nurture_draft(row)
     sub = subject if subject is not None else (row.get("draft_subject") or draft.subject)
     bod = body if body is not None else (row.get("draft_body") or draft.body)
@@ -99,15 +101,15 @@ def send_nurture_reply(
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
         _confirm(settings, slack, channel, ts, row, "error", f"G7 {checked.reject_reason}")
         return {"ok": False, "outcome": "error", "reason": checked.reject_reason}
-    thread_id = str(row.get("gmail_thread_id") or row.get("thread_id") or "")
+    thread_id = str(row.get("nurture_thread_id") or "")
     thread_kind = str(row.get("thread_kind") or ("reply" if thread_id else "new_thread"))
     memory.patch_ticker(
         ticker_id,
         {
+            "nurture_thread_id": thread_id or None,
+            "nurture_thread_subject": row.get("nurture_thread_subject") or (sub if not thread_id else None),
             "gmail_thread_id": thread_id or None,
-            "original_subject": row.get("original_subject") or None,
-            "in_reply_to": row.get("in_reply_to") or None,
-            "references": row.get("references") or None,
+            "original_subject": row.get("nurture_thread_subject") or row.get("original_subject") or None,
             "thread_kind": thread_kind,
         },
     )
@@ -125,6 +127,20 @@ def send_nurture_reply(
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
         _confirm(settings, slack, channel, ts, row, "error", str(exc))
         return {"ok": False, "outcome": "error", "reason": str(exc)}
+    stored_id = ""
+    if isinstance(sent, dict):
+        stored_id = str(sent.get("threadId") or sent.get("thread_id") or thread_id or "")
+    stored_id = stored_id or thread_id
+    stored_subject = str(row.get("nurture_thread_subject") or sub or "")
+    if stored_id:
+        persist_nurture_thread(hs, row, stored_id, stored_subject)
+        if hs is None and getattr(settings, "hubspot_token", ""):
+            try:
+                from crmbrain.hubspot import HubSpot
+
+                persist_nurture_thread(HubSpot(settings), row, stored_id, stored_subject)
+            except Exception as exc:
+                logger.warning("nurture_thread_id hubspot write skipped: %s", exc)
     cool = cooldown_until(now_utc())
     memory.patch_ticker(
         ticker_id,
@@ -134,7 +150,11 @@ def send_nurture_reply(
             "next_fire_at": cool.isoformat(),
             "last_sent_at": now_utc().isoformat(),
             "gmail_message_id": (sent or {}).get("id") if isinstance(sent, dict) else "",
-            "thread_kind": thread_kind,
+            "nurture_thread_id": stored_id or None,
+            "nurture_thread_subject": stored_subject or None,
+            "gmail_thread_id": stored_id or None,
+            "original_subject": stored_subject or None,
+            "thread_kind": "reply" if stored_id else thread_kind,
         },
     )
     _confirm(settings, slack, channel, ts, row, "sent")

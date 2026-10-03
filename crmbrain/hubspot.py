@@ -90,6 +90,22 @@ CONTACT_PROPS = [
         "description": "How this person earned a HubSpot record: call, meeting, reply, LinkedIn, Allo, RVM.",
     },
     {
+        "name": "nurture_thread_id",
+        "label": "Nurture thread id",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "contactinformation",
+        "description": "Gmail thread started by the first #nurture email. Later nurture touches reply here only.",
+    },
+    {
+        "name": "nurture_thread_subject",
+        "label": "Nurture thread subject",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "contactinformation",
+        "description": "Subject of the #nurture thread so later touches can reply with Re:.",
+    },
+    {
         "name": "gift_ideas",
         "label": "Gift ideas",
         "type": "string",
@@ -127,6 +143,21 @@ DEAL_PROPS = [
         "label": "Nurture reason",
         "type": "string",
         "fieldType": "textarea",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "nurture_thread_id",
+        "label": "Nurture thread id",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "dealinformation",
+        "description": "Gmail thread started by the first #nurture email. Later nurture touches reply here only.",
+    },
+    {
+        "name": "nurture_thread_subject",
+        "label": "Nurture thread subject",
+        "type": "string",
+        "fieldType": "text",
         "groupName": "dealinformation",
     },
     {
@@ -360,6 +391,9 @@ class HubSpot:
                 "engagements_last_meeting_booked",
                 "notes_last_contacted",
                 "crm_source",
+                "industry",
+                "nurture_thread_id",
+                "nurture_thread_subject",
             ]
         )
         contacts = []

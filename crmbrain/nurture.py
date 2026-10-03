@@ -59,7 +59,25 @@ REPLY_ONLY_SOURCES = frozenset({"smartlead", "heyreach", "rvm", "gmail_person", 
 CASE_STUDIES = {
     "roofing": "one of our roofers closed $100K in his first 3 months with us.",
     "hvac": "$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months.",
+    "construction": "home-services teams we work with are filling the calendar without adding another closer.",
+    "plumbing": "home-services teams we work with are filling the calendar without adding another closer.",
+    "electrical": "home-services teams we work with are filling the calendar without adding another closer.",
+    "solar": "home-services teams we work with are filling the calendar without adding another closer.",
+    "staffing": "one recruiting desk we support booked 40 qualified conversations in 90 days.",
+    "msp": "an MSP we work with added $2M in pipeline last quarter without hiring another closer.",
+    "financial_advisors": "advisor teams we support are booking 14+ conversations a month with people who already want to talk.",
+    "saas": "a SaaS team we support booked a steady week of demos without standing up another SDR pod.",
+    "agency": "an agency we support filled next month's calendar without adding another closer.",
 }
+PROOF_ALIASES = {
+    "recruiting": "staffing",
+    "it": "msp",
+    "cyber": "msp",
+    "trades": "construction",
+    "home_services": "construction",
+}
+NURTURE_THREAD_PROP = "nurture_thread_id"
+NURTURE_SUBJECT_PROP = "nurture_thread_subject"
 OPENER_MAX_WORDS = 20
 _TRANSCRIPT_FIRST_PERSON_RE = re.compile(
     r"\b(i|i'm|i’m|i'll|i’ll|i'd|i’d|i've|i’ve|lets|let's|let’s)\b",
@@ -755,33 +773,69 @@ def infer_nurture_reason(
     return why or "never_booked"
 
 
+def stored_nurture_thread_id(row: dict | None) -> str:
+    """Only the thread we started. Never an old intro / calendar / third-party thread."""
+    row = row or {}
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    return str(
+        row.get(NURTURE_THREAD_PROP)
+        or extra.get(NURTURE_THREAD_PROP)
+        or ""
+    ).strip()
+
+
+def stored_nurture_thread_subject(row: dict | None) -> str:
+    row = row or {}
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    return str(
+        row.get(NURTURE_SUBJECT_PROP)
+        or extra.get(NURTURE_SUBJECT_PROP)
+        or (row.get("original_subject") if stored_nurture_thread_id(row) else "")
+        or ""
+    ).strip()
+
+
 def attach_gmail_thread(row: dict, gmail=None) -> dict:
-    """Fill thread ids from any-date sent+inbox search. Else mark new_thread."""
+    """Reply only in the stored nurture thread. Never search old Gmail threads."""
+    del gmail
     out = dict(row or {})
-    existing = str(out.get("gmail_thread_id") or out.get("thread_id") or "")
-    if existing:
-        out["gmail_thread_id"] = existing
+    stored = stored_nurture_thread_id(out)
+    subject = stored_nurture_thread_subject(out)
+    if stored:
+        out[NURTURE_THREAD_PROP] = stored
+        out["gmail_thread_id"] = stored
+        out["thread_id"] = stored
         out["thread_kind"] = "reply"
-        return out
-    email = str(out.get("email") or "")
-    found = None
-    finder = getattr(gmail, "find_contact_thread", None) if gmail is not None else None
-    if callable(finder) and email:
-        try:
-            found = finder(email, name=str(out.get("name") or ""))
-        except TypeError:
-            found = finder(email)
-    if found and found.get("thread_id"):
-        out["gmail_thread_id"] = found["thread_id"]
-        out["thread_id"] = found["thread_id"]
-        out["original_subject"] = found.get("original_subject") or out.get("original_subject") or ""
-        out["in_reply_to"] = found.get("in_reply_to") or out.get("in_reply_to") or ""
-        out["references"] = found.get("references") or out.get("references") or ""
-        out["thread_kind"] = "reply"
+        if subject:
+            out["original_subject"] = subject
+            out[NURTURE_SUBJECT_PROP] = subject
         return out
     out["gmail_thread_id"] = ""
+    out["thread_id"] = ""
     out["thread_kind"] = "new_thread"
     return out
+
+
+def persist_nurture_thread(hs, row: dict, thread_id: str, subject: str = "") -> None:
+    """Write the new nurture thread onto the HubSpot contact and deal."""
+    thread_id = str(thread_id or "").strip()
+    if not thread_id or hs is None:
+        return
+    props = {NURTURE_THREAD_PROP: thread_id}
+    if subject:
+        props[NURTURE_SUBJECT_PROP] = subject
+    contact_id = str(row.get("hs_contact_id") or "")
+    deal_id = str(row.get("hs_deal_id") or "")
+    try:
+        if contact_id and hasattr(hs, "patch_contact"):
+            hs.patch_contact(contact_id, props)
+    except Exception as exc:
+        logger.warning("nurture_thread_id contact patch failed: %s", exc)
+    try:
+        if deal_id and hasattr(hs, "patch_deal"):
+            hs.patch_deal(deal_id, props)
+    except Exception as exc:
+        logger.warning("nurture_thread_id deal patch failed: %s", exc)
 
 
 def _topic_from_snippet(snippet: str) -> str:
@@ -795,32 +849,18 @@ def _topic_from_snippet(snippet: str) -> str:
 
 
 def compose_nurture_subject(row: dict) -> str:
-    original = str(row.get("original_subject") or row.get("gmail_subject") or "").strip()
-    thread_id = str(row.get("gmail_thread_id") or row.get("thread_id") or "")
-    if thread_id and original:
+    """New nurture emails get a clean subject. Replies use the stored nurture subject."""
+    stored = stored_nurture_thread_id(row)
+    original = stored_nurture_thread_subject(row)
+    if stored and original:
         return thread_reply_headers(original)["Subject"]
-    usable = scoped_snippet(_strip_poc_phrases(str(row.get("last_touch_snippet") or "")), row)
-    topic = _topic_from_snippet(usable)
-    if topic and is_banned_opener_topic(topic, row):
-        topic = ""
-    name = str(row.get("name") or "").strip()
-    if topic and name and _norm_topic(topic) == _norm_topic(name):
-        topic = ""
-    company = str(row.get("company") or "").strip()
-    if company and topic:
-        if company.lower() in topic.lower():
-            subject = topic
-        else:
-            subject = f"{company}: {topic}"
-        if is_self_or_company_topic(subject, row) or (name and _norm_topic(subject) == _norm_topic(name)):
-            subject = f"{company} follow up"
-        if len(subject) > 70:
-            subject = f"{company} follow up" if company else (f"Following up {topic}" if topic else "Following up")
-        return _no_dashes(subject)
+    company = nurture_company_label(
+        str(row.get("company") or ""),
+        str(row.get("dealname") or row.get("deal_name") or ""),
+        str(row.get("email") or ""),
+    )
     if company:
         return _no_dashes(f"{company} follow up")
-    if topic and not is_banned_opener_topic(topic, row):
-        return _no_dashes(f"Following up {topic}" if len(topic.split()) < 4 else topic)
     return "Following up"
 
 
@@ -835,9 +875,20 @@ def _ensure_sentence_period(text: str) -> str:
     return out
 
 
+def _proof_industry_key(industry: str | None) -> str:
+    key = str(industry or "").strip().lower()
+    if not key:
+        return ""
+    key = PROOF_ALIASES.get(key, key)
+    if key in CASE_STUDIES:
+        return key
+    return ""
+
+
 def _proof_line(industry: str | None) -> str:
-    if industry and industry in CASE_STUDIES:
-        return _ensure_sentence_period(CASE_STUDIES[industry])
+    key = _proof_industry_key(industry)
+    if key:
+        return _ensure_sentence_period(CASE_STUDIES[key])
     return _ensure_sentence_period(GENERAL_PROOF)
 
 
@@ -848,15 +899,57 @@ def is_bare_domain(text: str) -> bool:
 def display_company_name(company: str = "", dealname: str = "", email: str = "") -> str:
     """Real company label. Never a bare domain like wrsroof.com."""
     raw = (company or "").strip()
-    if raw and not is_bare_domain(raw):
+    if raw and not is_bare_domain(raw) and not is_domain_derived_company(raw, email):
         return raw
     tail = ""
     if " - " in (dealname or ""):
         tail = dealname.split(" - ", 1)[-1].strip()
-    if tail and not is_bare_domain(tail) and _norm_topic(tail) not in _STAGE_PIPELINE_NAMES:
+    if (
+        tail
+        and not is_bare_domain(tail)
+        and not is_domain_derived_company(tail, email)
+        and _norm_topic(tail) not in _STAGE_PIPELINE_NAMES
+    ):
         return tail
-    del email
     return ""
+
+
+def title_company_name(name: str) -> str:
+    parts: list[str] = []
+    for word in (name or "").split():
+        if word.isupper() and 2 <= len(word) <= 5:
+            parts.append(word)
+        elif any(ch.isupper() for ch in word[1:]):
+            parts.append(word)
+        else:
+            parts.append(word[:1].upper() + word[1:].lower())
+    return " ".join(parts)
+
+
+def is_domain_derived_company(company: str = "", email: str = "") -> bool:
+    raw = (company or "").strip()
+    if not raw:
+        return True
+    if is_bare_domain(raw):
+        return True
+    from crmbrain.config import email_domain
+
+    host = email_domain(email)
+    if not host:
+        return False
+    label = host.split(".")[0]
+    return _norm_topic(raw) in {
+        _norm_topic(label),
+        _norm_topic(host),
+        _norm_topic(host.replace(".", " ")),
+    }
+
+
+def nurture_company_label(company: str = "", dealname: str = "", email: str = "") -> str:
+    raw = display_company_name(company, dealname, email)
+    if not raw or is_domain_derived_company(raw, email):
+        return ""
+    return title_company_name(raw)
 
 
 def _strip_poc_phrases(text: str) -> str:
@@ -1010,14 +1103,14 @@ def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict
         if spoken and summarized:
             if date_phrase:
                 return f"Hey {first}, on our {date_phrase} call {spoken}."
-            return f"Hey {first}, on our call {spoken}."
+            return f"Hey {first}, wanted to circle back. {spoken[0].upper() + spoken[1:]}."
         if spoken:
             if date_phrase:
                 return f"Hey {first}, on our {date_phrase} call you mentioned {spoken}."
-            return f"Hey {first}, on our call you mentioned {spoken}."
+            return f"Hey {first}, wanted to circle back. You mentioned {spoken}."
         if date_phrase:
             return f"Hey {first}, following up on our {date_phrase} call."
-        return f"Hey {first}, following up on our call."
+        return f"Hey {first}, wanted to circle back."
     if booked:
         if spoken and summarized:
             if date_phrase:
@@ -1056,8 +1149,13 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
         str(row.get("dealname") or row.get("deal_name") or ""),
         str(row.get("email") or ""),
     )
-    if company:
-        row = {**row, "company": company}
+    label = nurture_company_label(
+        company,
+        str(row.get("dealname") or row.get("deal_name") or ""),
+        str(row.get("email") or ""),
+    )
+    if label:
+        row = {**row, "company": label}
     industry = (row.get("industry") or "") or None
     campaign = str(row.get("campaign") or "")
     if not industry:
@@ -1164,9 +1262,11 @@ def nurture_row_from_candidate(c: TickerCandidate, now: datetime | None = None) 
         "industry": industry,
         "industry_basis": basis,
         "last_touch_snippet": scoped_snippet(str(extra.get("last_touch_snippet") or ""), extra | {"name": c.name, "email": c.email}),
-        "gmail_thread_id": extra.get("gmail_thread_id") or extra.get("thread_id") or None,
-        "original_subject": extra.get("original_subject") or extra.get("gmail_subject") or None,
-        "thread_kind": extra.get("thread_kind") or ("reply" if extra.get("gmail_thread_id") or extra.get("thread_id") else "new_thread"),
+        "nurture_thread_id": extra.get(NURTURE_THREAD_PROP) or None,
+        "nurture_thread_subject": extra.get(NURTURE_SUBJECT_PROP) or None,
+        "gmail_thread_id": extra.get(NURTURE_THREAD_PROP) or None,
+        "original_subject": extra.get(NURTURE_SUBJECT_PROP) or None,
+        "thread_kind": "reply" if extra.get(NURTURE_THREAD_PROP) else "new_thread",
         "in_reply_to": extra.get("in_reply_to") or None,
         "references": extra.get("references") or None,
         "reason": infer_nurture_reason(
@@ -1780,6 +1880,16 @@ def collect_s2_hubspot(deals: list[dict], *, now: datetime | None = None) -> lis
             "no_show_count": (deal.get("properties") or {}).get("no_show_count")
             or deal.get("no_show_count"),
             "website_text": deal.get("website_text") or contact.get("website_text") or "",
+            "nurture_thread_id": contact.get(NURTURE_THREAD_PROP)
+            or (contact.get("properties") or {}).get(NURTURE_THREAD_PROP)
+            or deal.get(NURTURE_THREAD_PROP)
+            or (deal.get("properties") or {}).get(NURTURE_THREAD_PROP)
+            or "",
+            "nurture_thread_subject": contact.get(NURTURE_SUBJECT_PROP)
+            or (contact.get("properties") or {}).get(NURTURE_SUBJECT_PROP)
+            or deal.get(NURTURE_SUBJECT_PROP)
+            or (deal.get("properties") or {}).get(NURTURE_SUBJECT_PROP)
+            or "",
         }
         name = contact_row["name"]
         out.append(
@@ -1824,12 +1934,10 @@ def collect_s3_gmail(threads: list[dict]) -> list[TickerCandidate]:
         extra = {
             "source_ref": f"gmail:{thread.get('thread_id')}",
             "last_touch_snippet": scoped_snippet(str(inbound.get("body") or ""), contact_row),
-            "gmail_thread_id": thread.get("thread_id"),
-            "thread_id": thread.get("thread_id"),
-            "original_subject": thread.get("subject") or inbound.get("subject") or "",
-            "thread_kind": "reply" if thread.get("thread_id") else "new_thread",
-            "in_reply_to": inbound.get("message_id") or inbound.get("Message-ID") or "",
-            "references": inbound.get("references") or inbound.get("message_id") or "",
+            "original_subject": "",
+            "thread_kind": "new_thread",
+            "in_reply_to": "",
+            "references": "",
             "booked": bool(thread.get("booked") or thread.get("met")),
             "met": bool(thread.get("met") or thread.get("fireflies") or thread.get("cube_acr")),
             "fireflies": thread.get("fireflies"),
@@ -2059,6 +2167,8 @@ _SAMPLE_DEAL_PROPS = [
     "notes_last_updated",
     "hs_last_sales_activity_timestamp",
     "nurture_reason",
+    "nurture_thread_id",
+    "nurture_thread_subject",
     "no_show_count",
     "engagements_last_meeting_booked",
     "description",
@@ -2074,6 +2184,9 @@ def _contact_fields(contact: dict | None) -> dict[str, str]:
         "email": str(props.get("email") or "").strip(),
         "phone": str(props.get("phone") or "").strip(),
         "company": str(props.get("company") or "").strip(),
+        "industry": str(props.get("industry") or "").strip(),
+        "nurture_thread_id": str(props.get(NURTURE_THREAD_PROP) or "").strip(),
+        "nurture_thread_subject": str(props.get(NURTURE_SUBJECT_PROP) or "").strip(),
         "snippet": " ".join(
             str(props.get(k) or "")
             for k in ("personal_details", "pain_points", "relationship_hooks")
@@ -2171,7 +2284,7 @@ def company_cycle_key(company: str = "", email: str = "", dealname: str = "") ->
 
 def _card_rank(row: dict) -> tuple:
     met = 1 if str(row.get("reason") or "") == "met" or row.get("met") else 0
-    thread = 1 if row.get("gmail_thread_id") or row.get("thread_id") else 0
+    thread = 1 if stored_nurture_thread_id(row) else 0
     when = parse_signal_at(row.get("meeting_at") or row.get("signal_at")) or datetime.min.replace(
         tzinfo=timezone.utc
     )
@@ -2224,8 +2337,6 @@ def sample_hubspot_nurture_cards(
         from crmbrain.hubspot import HubSpot
 
         hs = HubSpot(settings)
-    if gmail is None:
-        gmail = _require_gmail(settings)
     won_emails, won_domains, renewal_emails = _harvest_block_sets(hs)
     search = hs.search_objects
     nurture_deals = search(
@@ -2286,6 +2397,10 @@ def sample_hubspot_nurture_cards(
                 "hs_meeting": bool(meeting_at),
                 "fireflies": bool(cprops.get("crm_source") == "fireflies"),
                 "cube_acr": bool(cprops.get("crm_source") == "cube_acr"),
+                NURTURE_THREAD_PROP: fields["nurture_thread_id"]
+                or str(props.get(NURTURE_THREAD_PROP) or ""),
+                NURTURE_SUBJECT_PROP: fields["nurture_thread_subject"]
+                or str(props.get(NURTURE_SUBJECT_PROP) or ""),
             }
             blocked = is_not_deal_candidate(
                 name=fields["name"],
@@ -2306,8 +2421,14 @@ def sample_hubspot_nurture_cards(
                 skipped[blocked] = skipped.get(blocked, 0) + 1
                 continue
             seen.add(key)
-            company = display_company_name(
+            company = nurture_company_label(
                 fields["company"], str(props.get("dealname") or ""), fields["email"]
+            )
+            industry, _basis = infer_industry_resolved(
+                email=fields["email"],
+                company=company or fields["company"],
+                website_text="",
+                hs_industry=fields["industry"],
             )
             candidates.append(
                 {
@@ -2326,6 +2447,10 @@ def sample_hubspot_nurture_cards(
                     ),
                     "meeting_at": meeting_at,
                     "last_touch_snippet": snippet,
+                    "industry": industry,
+                    "hs_industry": fields["industry"],
+                    NURTURE_THREAD_PROP: extra.get(NURTURE_THREAD_PROP) or "",
+                    NURTURE_SUBJECT_PROP: extra.get(NURTURE_SUBJECT_PROP) or "",
                     "signal_at": (
                         meeting_at
                         or props.get("notes_last_contacted")
@@ -2337,7 +2462,7 @@ def sample_hubspot_nurture_cards(
                     "met": extra.get("fireflies") or extra.get("cube_acr"),
                 }
             )
-    attached = [attach_gmail_thread(row, gmail) for row in candidates]
+    attached = [attach_gmail_thread(row) for row in candidates]
     picked, dropped = _pick_one_per_company(attached)
     if dropped:
         skipped["same_company"] = skipped.get("same_company", 0) + dropped
@@ -2351,7 +2476,7 @@ def sample_hubspot_nurture_cards(
                 "email": row["email"],
                 "reason": row["reason"],
                 "subject": draft.subject,
-                "thread_id": row.get("gmail_thread_id") or row.get("thread_id") or "",
+                "thread_id": stored_nurture_thread_id(row),
                 "body": draft.body,
             }
         )

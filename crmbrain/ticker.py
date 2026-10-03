@@ -324,7 +324,14 @@ VERTICALS: tuple[dict, ...] = (
         "label": "construction",
         "subject": "Construction update",
         "client": "construction clients",
-        "keywords": ("construction", "general contractor", "general contracting", "trades"),
+        "keywords": (
+            "construction",
+            "general contractor",
+            "general contracting",
+            "trades",
+            "renovation",
+            "renovations",
+        ),
     },
     {
         "key": "plumbing",
@@ -353,6 +360,20 @@ VERTICALS: tuple[dict, ...] = (
         "subject": "Advisor update",
         "client": "advisor clients",
         "keywords": ("financial advisor", "financial advisors", "wealth advisor", "ria"),
+    },
+    {
+        "key": "saas",
+        "label": "SaaS",
+        "subject": "SaaS update",
+        "client": "SaaS clients",
+        "keywords": ("saas", "software company", "b2b software", "software platform"),
+    },
+    {
+        "key": "agency",
+        "label": "agency",
+        "subject": "Agency update",
+        "client": "agency clients",
+        "keywords": ("agency", "agencies", "marketing agency", "creative agency"),
     },
 )
 
