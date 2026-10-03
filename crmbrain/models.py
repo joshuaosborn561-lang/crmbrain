@@ -50,6 +50,8 @@ class CycleReport:
     junk_blocked: list[str] = field(default_factory=list)
     ticker_enrolled: list[str] = field(default_factory=list)
     ticker_drafts: list[str] = field(default_factory=list)
+    ticker_skipped: list[str] = field(default_factory=list)
+    nurture_cards: list[Any] = field(default_factory=list)
     linkedin_queued: list[str] = field(default_factory=list)
     briefs_sent: list[str] = field(default_factory=list)
     notes_updated: list[str] = field(default_factory=list)
@@ -80,6 +82,8 @@ class CycleReport:
             "junk_blocked": self.junk_blocked,
             "ticker_enrolled": self.ticker_enrolled,
             "ticker_drafts": self.ticker_drafts,
+            "ticker_skipped": self.ticker_skipped,
+            "nurture_cards": self.nurture_cards,
             "linkedin_queued": self.linkedin_queued,
             "briefs_sent": self.briefs_sent,
             "notes_updated": self.notes_updated,

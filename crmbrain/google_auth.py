@@ -27,6 +27,7 @@ NEEDED_SCOPES = (
     ("calendar.readonly", CALENDAR_READONLY),
     ("drive.readonly", DRIVE_READONLY),
     ("gmail.readonly", GMAIL_READONLY),
+    ("gmail.send", GMAIL_SEND),
 )
 
 _SCOPE_CACHE: dict[str, tuple[set[str], float]] = {}

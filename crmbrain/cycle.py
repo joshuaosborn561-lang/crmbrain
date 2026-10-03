@@ -469,8 +469,9 @@ def _handle_engagement(
             return
         reason = ev.ticker_reason or facts_reason_for_ticker(ev)
         if policy.should_enroll_ticker_without_hubspot(ev) and reason:
-            ticker.enroll(memory, ev, reason)
-            report.ticker_enrolled.append(f"{ev.display_name() or ev.email} {reason}")
+            enrolled = ticker.enroll(memory, ev, reason)
+            if enrolled:
+                report.ticker_enrolled.append(f"{ev.display_name() or ev.email} {reason}")
         _queue_linkedin(settings, hey, ev, hs, memory, report, contact=None)
         report.skipped.append(skip_line)
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_meeting_hubspot"})
@@ -627,8 +628,9 @@ def _handle_engagement(
     if reason == "no_show" and policy.is_meeting_held(ev):
         reason = ""
     if reason:
-        ticker.enroll(memory, ev, reason, hs_contact_id=contact["id"])
-        report.ticker_enrolled.append(f"{ev.display_name()} {reason}")
+        enrolled = ticker.enroll(memory, ev, reason, hs_contact_id=contact["id"])
+        if enrolled:
+            report.ticker_enrolled.append(f"{ev.display_name()} {reason}")
 
     _queue_linkedin(settings, hey, ev, hs, memory, report, contact=contact)
 
@@ -1023,28 +1025,9 @@ def _flush_memory_errors(memory: Memory, report: CycleReport) -> None:
 
 
 def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> None:
-    now = now_utc()
-    due = memory.due_ticker(now.isoformat())
-    for row in due:
-        subject, body = ticker.draft_email(
-            row.get("name") or "",
-            row.get("company") or "",
-            row.get("reason") or "",
-            extras=row,
-        )
-        text = (
-            f"90-day ticker (approve before send)\n"
-            f"To: {row.get('email') or row.get('phone')}\n"
-            f"Why: {row.get('reason')}\n"
-            f"Subject: {subject}\n\n{body}"
-        )
-        try:
-            slack_notify.post(settings, text)
-            report.ticker_drafts.append(row.get("email") or row.get("name") or row.get("id"))
-        except Exception as exc:
-            report.errors.append(f"slack ticker: {exc}")
-        next_fire = (now + timedelta(days=90)).isoformat()
-        memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
+    from crmbrain.nurture import fire_due_rows
+
+    fire_due_rows(settings, memory, report)
 
 
 def _mail_contact(hs: HubSpot, ev: Engagement) -> dict | None:
@@ -1313,8 +1296,9 @@ def apply_gmail_stage_update(
         if wrote_amount:
             report.amounts_set.append(f"{ev.email} {write_amount}")
         if ev.stage_hint == STAGE["no_show"]:
-            ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
-            report.ticker_enrolled.append(f"{ev.email} no_show")
+            enrolled = ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
+            if enrolled:
+                report.ticker_enrolled.append(f"{ev.email} no_show")
         if ev.stage_hint in {
             STAGE["paid"],
             STAGE["signed"],

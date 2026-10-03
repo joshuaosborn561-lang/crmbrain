@@ -17,6 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from crmbrain.config import STAGE, Settings, now_utc  # noqa: E402
 from crmbrain.hubspot import HubSpot  # noqa: E402
 from crmbrain.memory import Memory  # noqa: E402
+from crmbrain.nurture import (  # noqa: E402
+    compose_nurture_draft,
+    dry_run_report,
+    merge_candidates,
+    nurture_row_from_candidate,
+    qualify_candidate,
+    render_sample_cards,
+)
 from crmbrain.sources import smartlead  # noqa: E402
 from crmbrain.ticker import (  # noqa: E402
     TickerCandidate,
@@ -56,6 +64,9 @@ def _search_deals(settings: Settings, stages: list[str]) -> list[dict]:
                 "createdate",
                 "hs_lastmodifieddate",
                 "closedate",
+                "notes_last_contacted",
+                "notes_last_updated",
+                "hs_last_sales_activity_timestamp",
             ],
             "limit": 100,
         }
@@ -132,6 +143,9 @@ def collect_smartlead(settings: Settings) -> tuple[list[TickerCandidate], list[s
         reason = classify_reason(hint=ev.ticker_reason, text=text)
         if ev.source == "smartlead" and reason not in {"no_show", "kicked_can", "deal_died"}:
             reason = "never_booked"
+        extra = dict(ev.extra or {})
+        extra.setdefault("campaign", extra.get("campaign_name") or ev.raw_subject or "")
+        extra.setdefault("last_touch_snippet", (ev.summary or ev.transcript or "")[:280])
         out.append(
             TickerCandidate(
                 name=ev.display_name(),
@@ -141,6 +155,7 @@ def collect_smartlead(settings: Settings) -> tuple[list[TickerCandidate], list[s
                 reason=reason,
                 last_signal=parse_signal_at(ev.occurred_at) or now,
                 source="smartlead",
+                extra=extra,
             )
         )
     return out, errors
@@ -151,7 +166,15 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
     if not settings.hubspot_token:
         return [], errors
     try:
-        deals = _search_deals(settings, [STAGE["nurture"], STAGE["no_show"]])
+        deals = _search_deals(
+            settings,
+            [
+                STAGE["nurture"],
+                STAGE["no_show"],
+                STAGE["discovery_completed"],
+                STAGE["proposal_sent"],
+            ],
+        )
     except Exception as exc:
         errors.append(f"hubspot deals: {exc}")
         return [], errors
@@ -160,12 +183,19 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
     for deal in deals:
         props = deal.get("properties") or {}
         stage = props.get("dealstage") or ""
+        # Never use hs_lastmodifieddate as the signal clock.
         last_signal = (
-            parse_signal_at(props.get("hs_lastmodifieddate"))
+            parse_signal_at(props.get("notes_last_contacted"))
+            or parse_signal_at(props.get("notes_last_updated"))
+            or parse_signal_at(props.get("hs_last_sales_activity_timestamp"))
             or parse_signal_at(props.get("closedate"))
             or parse_signal_at(props.get("createdate"))
             or now
         )
+        if stage in {STAGE["discovery_completed"], STAGE["proposal_sent"]}:
+            age = now - last_signal
+            if age.days < 30:
+                continue
         try:
             contacts = _deal_contacts(settings, str(deal["id"]))
         except Exception as exc:
@@ -180,6 +210,7 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
                     last_signal=last_signal,
                     hs_deal_id=str(deal["id"]),
                     source="hubspot",
+                    extra={"deal_stage": stage, "booked": True},
                 )
             )
             continue
@@ -209,9 +240,19 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
                     hs_contact_id=str(contact.get("id") or ""),
                     hs_deal_id=str(deal["id"]),
                     source="hubspot",
+                    extra={
+                        "deal_stage": stage,
+                        "booked": True,
+                        "last_touch_snippet": text[:280],
+                    },
                 )
             )
     return out, errors
+
+
+def collect_gmail(_settings: Settings) -> tuple[list[TickerCandidate], list[str]]:
+    """S3 is collected in the live cycle via gmail_scan. Offline backfill is a no-op without tokens."""
+    return [], []
 
 
 def drop_active_pipeline(
@@ -262,13 +303,22 @@ def format_report(
     lines = [
         "Nurture ticker backfill",
         f"mode: {'apply' if apply else 'dry-run'}",
-        f"sources: smartlead={source_counts.get('smartlead', 0)} hubspot={source_counts.get('hubspot', 0)}",
+        (
+            f"sources: smartlead={source_counts.get('smartlead', 0)} "
+            f"hubspot={source_counts.get('hubspot', 0)} "
+            f"gmail={source_counts.get('gmail', 0)}"
+        ),
         f"already_on_ticker: {result['already_on_ticker']}",
         f"skipped_pipeline: {pipeline_skipped}",
         f"would_enroll: {result['would_enroll']}",
     ]
     for reason, count in sorted((result.get("by_reason") or {}).items()):
         lines.append(f"  {reason}: {count}")
+    skips = result.get("qualify_skips") or {}
+    if skips:
+        lines.append("qualify_skips:")
+        for reason, count in sorted(skips.items()):
+            lines.append(f"  {reason}: {count}")
     if apply:
         lines.append(f"enrolled: {result['enrolled']}")
     if collect_errors or result.get("errors"):
@@ -278,13 +328,13 @@ def format_report(
     rows = result.get("rows") or []
     if rows:
         lines.append("candidates:")
-        for row in rows[:40]:
+        for row in rows[:10]:
             who = row.get("email") or row.get("phone") or row.get("name") or row.get("id")
             lines.append(
                 f"  - {row.get('name') or '?'} <{who}> {row.get('reason')} next_fire={row.get('next_fire_at')}"
             )
-        if len(rows) > 40:
-            lines.append(f"  ... {len(rows) - 40} more")
+        if len(rows) > 10:
+            lines.append(f"  ... {len(rows) - 10} more (full list is file-only)")
     if not apply:
         lines.append(
             "Nothing written. Pass --apply to enroll. Slack drafts fire on the next cycle. No email is sent."
@@ -300,16 +350,42 @@ def run(apply: bool = False, settings: Settings | None = None, memory: Memory | 
     collect_errors.extend(sl_err)
     hs_rows, hs_err = collect_hubspot(settings)
     collect_errors.extend(hs_err)
+    gm, gm_err = collect_gmail(settings)
+    collect_errors.extend(gm_err)
     source_counts = {
         "smartlead": len(sl),
         "hubspot": len(hs_rows),
+        "gmail": len(gm),
     }
     hs = HubSpot(settings) if settings.hubspot_token else None
-    merged, pipeline_skipped = drop_active_pipeline(sl + hs_rows, hs)
-    result = apply_plan(memory, merged, write=apply)
+    merged, pipeline_skipped = drop_active_pipeline(merge_candidates(sl + hs_rows + gm), hs)
+    qualify_skips: dict[str, int] = {}
+    enrollable: list[TickerCandidate] = []
+    for c in merged:
+        skip = c.skip_reason or qualify_candidate(c)
+        if skip:
+            qualify_skips[skip] = qualify_skips.get(skip, 0) + 1
+            continue
+        enrollable.append(c)
+    result = apply_plan(memory, enrollable, write=apply)
     result["source_counts"] = source_counts
     result["collect_errors"] = collect_errors
     result["pipeline_skipped"] = len(pipeline_skipped)
+    result["qualify_skips"] = qualify_skips
+    samples = []
+    for c in enrollable[:10]:
+        try:
+            row = nurture_row_from_candidate(c)
+            draft = compose_nurture_draft(row)
+            samples.append({"name": c.name, "email": c.email, "subject": draft.subject, "body": draft.body})
+        except Exception:
+            continue
+    if not samples:
+        samples = [
+            {"name": s["name"], "email": s["email"], "subject": s["subject"], "body": s["body"]}
+            for s in render_sample_cards()[:10]
+        ]
+    result["dry_run"] = dry_run_report(source_counts, samples, qualify_skips, {})
     result["report"] = format_report(
         result, source_counts, collect_errors, len(pipeline_skipped), apply
     )
@@ -322,6 +398,12 @@ def main() -> int:
         "--apply",
         action="store_true",
         help="Write ticker rows. Default is dry-run (print counts only).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=True,
+        help="Default. Print counts and write nothing.",
     )
     args = parser.parse_args()
     result = run(apply=args.apply)

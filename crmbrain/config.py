@@ -226,6 +226,11 @@ CLIENT_HINTS = (
 )
 
 
+DEFAULT_LEGACY_SLACK_INTERACTIONS_URL = (
+    "https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions"
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     hubspot_token: str
@@ -266,6 +271,11 @@ class Settings:
     manual_freeze_at: datetime | None = None
     google_api_key: str = ""
     cube_lookback_days: int = 14
+    nurture_send_enabled: bool = False
+    nurture_post_enabled: bool = False
+    slack_signing_secret: str = ""
+    nurture_max_per_weekday: int = 5
+    legacy_slack_interactions_url: str = DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -311,6 +321,14 @@ class Settings:
             manual_freeze_at=_parse_lookback_start(os.getenv("CRMBRAIN_MANUAL_FREEZE_AT", "")),
             google_api_key=os.getenv("GOOGLE_API_KEY", ""),
             cube_lookback_days=int(os.getenv("CUBE_LOOKBACK_DAYS", "14")),
+            nurture_send_enabled=os.getenv("NURTURE_SEND_ENABLED", "").strip().lower() in {"1", "true", "yes"},
+            nurture_post_enabled=os.getenv("NURTURE_POST_ENABLED", "").strip().lower() in {"1", "true", "yes"},
+            slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET", ""),
+            nurture_max_per_weekday=int(os.getenv("NURTURE_MAX_PER_WEEKDAY", "5")),
+            legacy_slack_interactions_url=(
+                os.getenv("LEGACY_SLACK_INTERACTIONS_URL", "").strip()
+                or DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
+            ),
         )
 
 

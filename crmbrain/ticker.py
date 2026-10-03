@@ -12,6 +12,8 @@ from crmbrain.models import Engagement
 
 TICKER_DAYS = 90
 REASON_RANK = {"no_show": 3, "kicked_can": 2, "deal_died": 2, "never_booked": 1}
+SOFT_STOPS = frozenset({"booked", "emailed_recently", "deal_archived", "legacy_reset", "manual_snooze"})
+HARD_STOPS = frozenset({"client", "non_deal", "unsubscribed", "won", "do_not_contact", "no_identity"})
 MEETING_STAGES = {
     STAGE["discovery_scheduled"],
     STAGE["discovery_completed"],
@@ -84,6 +86,11 @@ def already_enrolled(
     phone_d = digits_phone(phone)
     hs = str(hs_contact_id or "").strip()
     for row in ticker_rows:
+        status = (row.get("status") or "active").strip().lower()
+        stop = str(row.get("stop_reason") or "").strip()
+        counts = status == "active" or (status == "stopped" and (stop in HARD_STOPS or not stop))
+        if not counts:
+            continue
         if email_l and (row.get("email") or "").strip().lower() == email_l:
             return True
         if hs and str(row.get("hs_contact_id") or "").strip() == hs:
@@ -234,6 +241,11 @@ def apply_plan(
 def enroll(memory: Memory, ev: Engagement, reason: str, hs_contact_id: str = "", hs_deal_id: str = "") -> dict:
     if not (ev.display_name() or "").strip():
         return {}
+    from crmbrain.nurture import may_enroll_from_engagement
+
+    ok, _skip = may_enroll_from_engagement(ev, reason=reason)
+    if not ok:
+        return {}
     if already_enrolled(
         memory.list_ticker(),
         email=ev.email,
@@ -333,10 +345,18 @@ VERTICALS: tuple[dict, ...] = (
         "client": "solar clients",
         "keywords": ("solar", "photovoltaic"),
     },
+    {
+        "key": "financial_advisors",
+        "label": "financial advisors",
+        "subject": "Advisor update",
+        "client": "advisor clients",
+        "keywords": ("financial advisor", "financial advisors", "wealth advisor", "ria"),
+    },
 )
 
 # Josh 2026-09-11: no free POC / free 10K campaign. Guarantee meetings or keep working.
 MEETING_GUARANTEE = "We guarantee meetings, or we keep working until you hit them."
+AIRPODS_OFFER_LIVE = True
 
 _FREE_POC_PHRASES = (
     "free poc",
