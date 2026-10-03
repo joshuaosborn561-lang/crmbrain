@@ -41,7 +41,8 @@ from crmbrain.ticker import (
 
 logger = logging.getLogger(__name__)
 
-AIRPODS_OFFER_LIVE = True
+# Josh: no AirPods or tickets in nurture copy.
+AIRPODS_OFFER_LIVE = False
 NURTURE_MAX_PER_WEEKDAY = 5
 EMAILED_RECENTLY_DAYS = 60
 STALLED_DAYS = 30
@@ -88,6 +89,30 @@ _CRM_FIELD_RE = re.compile(
     r"^(dealname|deal name|deal:|company:|source:|hs_|crm_|pipeline)\b",
     re.I,
 )
+_STAGE_PIPELINE_NAMES = frozenset(
+    {
+        "nurture",
+        "initial interest",
+        "meeting booked",
+        "discovery",
+        "discovery held",
+        "discovery completed",
+        "discovery scheduled",
+        "proposal sent",
+        "needs stakeholder approval",
+        "stakeholder approval",
+        "poc",
+        "closed won",
+        "closed lost",
+        "sales pipeline",
+        "pipeline",
+        "appointmentscheduled",
+        "qualifiedtobuy",
+        "presentationscheduled",
+        "decisionmakerboughtin",
+    }
+)
+_MEETING_RECAP_RE = re.compile(r"your meeting recap", re.I)
 _NAME_STOP = frozenset(
     {
         "yes",
@@ -501,6 +526,51 @@ def _strip_crm_prefix(text: str) -> str:
     return out
 
 
+def _norm_topic(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def is_stage_or_pipeline_name(text: str) -> bool:
+    low = _norm_topic(text)
+    return bool(low) and low in _STAGE_PIPELINE_NAMES
+
+
+def is_self_or_company_topic(text: str, row: dict | None = None) -> bool:
+    """True when text is just this contact's name or the company-name field."""
+    low = _norm_topic(text)
+    if not low:
+        return False
+    row = row or {}
+    name = _norm_topic(str(row.get("name") or ""))
+    company = _norm_topic(str(row.get("company") or ""))
+    first = _norm_topic(str(row.get("first_name") or ""))
+    last = _norm_topic(str(row.get("last_name") or ""))
+    if name and (low == name or low.replace(" ", "") == name.replace(" ", "")):
+        return True
+    parts = [p for p in name.split() if p]
+    if parts and low == parts[0]:
+        return True
+    if len(parts) > 1 and low == " ".join(parts[-2:]):
+        return True
+    if len(parts) > 1 and low == parts[-1] and len(parts[-1]) > 2:
+        return True
+    if first and last and low == f"{first} {last}":
+        return True
+    if company and (low == company or low.replace(" ", "") == company.replace(" ", "")):
+        return True
+    return False
+
+
+def is_banned_opener_topic(text: str, row: dict | None = None) -> bool:
+    if not (text or "").strip():
+        return True
+    if is_stage_or_pipeline_name(text):
+        return True
+    if is_self_or_company_topic(text, row):
+        return True
+    return False
+
+
 def is_usable_speech_snippet(snippet: str, row: dict | None = None) -> bool:
     text = _strip_crm_prefix(snippet_of(snippet or ""))
     if len(text) < 8:
@@ -510,6 +580,8 @@ def is_usable_speech_snippet(snippet: str, row: dict | None = None) -> bool:
     if looks_like_deal_name(text, row):
         return False
     if snippet_mentions_other_person(text, row):
+        return False
+    if is_banned_opener_topic(text, row):
         return False
     return True
 
@@ -522,6 +594,64 @@ def scoped_snippet(snippet: str, row: dict | None = None) -> str:
     return text
 
 
+def _no_show_count_of(extra: dict | None) -> int:
+    extra = extra or {}
+    raw = extra.get("no_show_count") or extra.get("hs_no_show_count")
+    if raw in (None, ""):
+        props = extra.get("properties") if isinstance(extra.get("properties"), dict) else {}
+        raw = props.get("no_show_count")
+    try:
+        return int(float(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def meeting_evidence_from_extra(extra: dict | None) -> tuple[bool, bool]:
+    """Derive (met, booked) from Fireflies/Cube, recap, calendar, HS meeting, no-show count."""
+    extra = extra or {}
+    blob = " ".join(
+        str(extra.get(k) or "")
+        for k in (
+            "last_touch_snippet",
+            "gmail_subject",
+            "original_subject",
+            "subject",
+            "snippet",
+            "source_note",
+        )
+    )
+    source = str(
+        extra.get("meeting_source") or extra.get("evidence_source") or extra.get("source") or ""
+    )
+    met = bool(
+        extra.get("met")
+        or extra.get("has_meeting")
+        or extra.get("meeting_at")
+        or extra.get("meeting_held")
+        or extra.get("past_meeting")
+        or extra.get("calendar_event")
+        or extra.get("hs_meeting")
+        or extra.get("hs_meeting_id")
+        or extra.get("meeting_engagement")
+        or extra.get("fireflies")
+        or extra.get("fireflies_id")
+        or extra.get("cube_acr")
+        or extra.get("cube")
+        or extra.get("cube_recording")
+        or source in MEETING_ENROLL_SOURCES
+        or _MEETING_RECAP_RE.search(blob)
+    )
+    booked = bool(
+        extra.get("booked")
+        or extra.get("has_meeting")
+        or extra.get("hs_meeting")
+        or extra.get("meeting_engagement")
+        or extra.get("calendar_event")
+        or _no_show_count_of(extra) > 0
+    )
+    return met, booked
+
+
 def infer_nurture_reason(
     *,
     reason: str = "",
@@ -530,41 +660,44 @@ def infer_nurture_reason(
     booked: bool = False,
     met: bool = False,
 ) -> str:
-    """Prefer HubSpot/Fireflies/Cube meeting evidence over default never_booked."""
+    """Prefer HubSpot/Fireflies/Cube meeting evidence over stale never_booked."""
     extra = extra or {}
     stage = str(deal_stage or extra.get("deal_stage") or "")
-    met_flag = bool(met or extra.get("met") or extra.get("has_meeting") or extra.get("meeting_at"))
-    booked_flag = bool(booked or extra.get("booked") or extra.get("has_meeting"))
-    source = str(extra.get("meeting_source") or extra.get("evidence_source") or extra.get("source") or "")
-    if source in MEETING_ENROLL_SOURCES:
-        met_flag = True
-    if extra.get("fireflies") or extra.get("cube_acr") or extra.get("cube"):
-        met_flag = True
+    ev_met, ev_booked = meeting_evidence_from_extra(extra)
+    met_flag = bool(met or ev_met)
+    booked_flag = bool(booked or ev_booked)
     met_stages = {
-        stage
-        for stage in (
+        value
+        for value in (
             STAGE.get("discovery_held"),
             STAGE["discovery_completed"],
             STAGE["proposal_sent"],
             STAGE.get("needs_stakeholder_approval"),
-            STAGE["nurture"],
         )
-        if stage
+        if value
     }
     booked_stages = {
-        stage
-        for stage in (
+        value
+        for value in (
             STAGE.get("meeting_booked"),
             STAGE["discovery_scheduled"],
-            STAGE.get("no_show"),
         )
-        if stage
+        if value
     }
-    if met_flag or stage in met_stages:
-        if reason == "kicked_can" and stage == STAGE["nurture"]:
+    # Nurture deals were enrolled as met or booked. Never keep stale never_booked.
+    if stage == STAGE["nurture"]:
+        if reason == "kicked_can":
             return "kicked_can"
-        if stage == STAGE["nurture"] and not met_flag:
-            return reason or "met"
+        if met_flag:
+            return "met"
+        if booked_flag or reason == "no_show":
+            return "booked"
+        if reason in {"kicked_can", "timing_later"}:
+            return "kicked_can"
+        return "met" if reason in {"", "never_booked"} else reason
+    if met_flag or stage in met_stages:
+        if reason == "kicked_can":
+            return "kicked_can"
         return "met"
     if booked_flag or reason == "no_show" or stage in booked_stages:
         return "booked"
@@ -586,7 +719,12 @@ def attach_gmail_thread(row: dict, gmail=None) -> dict:
     finder = getattr(gmail, "find_contact_thread", None) if gmail is not None else None
     if callable(finder) and email:
         try:
-            found = finder(email)
+            found = finder(email, name=str(out.get("name") or ""))
+        except TypeError:
+            try:
+                found = finder(email)
+            except Exception:
+                found = None
         except Exception:
             found = None
     if found and found.get("thread_id"):
@@ -619,18 +757,25 @@ def compose_nurture_subject(row: dict) -> str:
         return thread_reply_headers(original)["Subject"]
     usable = scoped_snippet(_strip_poc_phrases(str(row.get("last_touch_snippet") or "")), row)
     topic = _topic_from_snippet(usable)
+    if topic and is_banned_opener_topic(topic, row):
+        topic = ""
+    name = str(row.get("name") or "").strip()
+    if topic and name and _norm_topic(topic) == _norm_topic(name):
+        topic = ""
     company = str(row.get("company") or "").strip()
     if company and topic:
         if company.lower() in topic.lower():
             subject = topic
         else:
             subject = f"{company}: {topic}"
+        if is_self_or_company_topic(subject, row) or (name and _norm_topic(subject) == _norm_topic(name)):
+            subject = f"{company} follow up"
         if len(subject) > 70:
-            subject = company
+            subject = f"{company} follow up" if company else "Quick follow up"
         return _no_dashes(subject)
     if company:
         return _no_dashes(f"{company} follow up")
-    if topic:
+    if topic and not is_banned_opener_topic(topic, row):
         return _no_dashes(topic)
     return "Quick follow up"
 
@@ -666,18 +811,69 @@ def _strip_poc_phrases(text: str) -> str:
     return out
 
 
+def _row_met_or_booked(row: dict | None) -> bool:
+    row = row or {}
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else row
+    why = str(row.get("reason") or "")
+    ev_met, ev_booked = meeting_evidence_from_extra(extra)
+    if why in {"met", "booked", "kicked_can", "no_show"}:
+        return True
+    if ev_met or ev_booked or row.get("met") or row.get("booked"):
+        return True
+    stage = str(row.get("deal_stage") or extra.get("deal_stage") or "")
+    return stage in {
+        STAGE.get("discovery_held"),
+        STAGE["discovery_completed"],
+        STAGE["proposal_sent"],
+        STAGE.get("needs_stakeholder_approval"),
+        STAGE["nurture"],
+        STAGE.get("meeting_booked"),
+        STAGE["discovery_scheduled"],
+    }
+
+
+def _call_date_phrase(row: dict | None) -> str:
+    row = row or {}
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    raw = row.get("meeting_at") or extra.get("meeting_at") or row.get("call_at")
+    dt = parse_signal_at(raw)
+    if not dt:
+        return ""
+    return dt.astimezone(CDT).strftime("%b %-d")
+
+
 def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict | None = None) -> str:
     first = _first_name(first)
+    row = row or {}
     usable = scoped_snippet(_strip_poc_phrases(snippet), row)
     usable = _no_dashes(_strip_crm_prefix(usable))
+    if usable and is_banned_opener_topic(usable, row):
+        usable = ""
+    spoken = ""
     if usable:
         low = usable.rstrip(".")
         spoken = low[0].lower() + low[1:] if low else low
+    met = _row_met_or_booked(row)
+    date_phrase = _call_date_phrase(row)
+    if met:
+        if spoken:
+            if date_phrase:
+                return f"Hey {first}, on our {date_phrase} call you mentioned {spoken}."
+            return f"Hey {first}, on our call you mentioned {spoken}."
+        if date_phrase:
+            return f"Hey {first}, following up on our {date_phrase} call."
+        return f"Hey {first}, following up on our call."
+    if spoken:
         return f"Hey {first}, you mentioned {spoken}."
     topic = ""
-    if campaign and not looks_like_deal_name(campaign, row):
+    if campaign and not looks_like_deal_name(campaign, row) and not is_banned_opener_topic(campaign, row):
         topic = re.sub(r"salesglider\s*", "", campaign, flags=re.I).strip() or ""
-    if topic and not snippet_mentions_other_person(topic, row) and not _FAMILY_RE.search(topic):
+    if (
+        topic
+        and not is_banned_opener_topic(topic, row)
+        and not snippet_mentions_other_person(topic, row)
+        and not _FAMILY_RE.search(topic)
+    ):
         return f"Hey {first}, you replied a while back when we reached out about {topic}."
     return f"Hey {first}, it's been a few months since we connected."
 
@@ -807,6 +1003,10 @@ def nurture_row_from_candidate(c: TickerCandidate, now: datetime | None = None) 
             booked=bool(extra.get("booked")),
             met=bool(extra.get("met")),
         ),
+        "deal_stage": extra.get("deal_stage") or None,
+        "met": bool(extra.get("met")),
+        "booked": bool(extra.get("booked")),
+        "meeting_at": extra.get("meeting_at") or None,
         "next_fire_at": fire.isoformat(),
         "nurture_state": "queued",
     }
@@ -1371,6 +1571,8 @@ def collect_s2_hubspot(deals: list[dict], *, now: datetime | None = None) -> lis
                 or deal.get("fireflies")
                 or deal.get("cube_acr")
                 or deal.get("meeting_at")
+                or deal.get("hs_meeting")
+                or deal.get("meeting_engagement")
                 or stage
                 in {
                     STAGE["discovery_completed"],
@@ -1381,6 +1583,9 @@ def collect_s2_hubspot(deals: list[dict], *, now: datetime | None = None) -> lis
             "fireflies": deal.get("fireflies"),
             "cube_acr": deal.get("cube_acr") or deal.get("cube"),
             "meeting_at": deal.get("meeting_at"),
+            "hs_meeting": deal.get("hs_meeting") or deal.get("meeting_engagement"),
+            "no_show_count": (deal.get("properties") or {}).get("no_show_count")
+            or deal.get("no_show_count"),
             "website_text": deal.get("website_text") or contact.get("website_text") or "",
         }
         name = contact_row["name"]
@@ -1635,6 +1840,11 @@ def render_sample_cards(rows: list[dict] | None = None) -> list[dict]:
                     booked=bool((row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
                     met=bool((row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
                 ),
+                "thread_id": attached.get("gmail_thread_id")
+                or attached.get("thread_id")
+                or row.get("gmail_thread_id")
+                or row.get("thread_id")
+                or "",
                 "thread_kind": attached.get("thread_kind") or row.get("thread_kind") or "new_thread",
                 "subject": draft.subject,
                 "body": draft.body,

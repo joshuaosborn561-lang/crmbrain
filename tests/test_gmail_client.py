@@ -9,8 +9,14 @@ from crmbrain.gmail_client import (
     READ_TIMEOUT,
     Gmail,
     _retry_after_seconds,
+    header_has_contact_email,
     is_gmail_rate_limit,
     is_gmail_scope_error,
+    should_skip_nurture_thread,
+    subject_is_calendar_noise,
+    subject_is_scheduling_only,
+    subject_is_tj_thread,
+    subject_names_other_meeting_guest,
 )
 from crmbrain.models import CycleReport
 from crmbrain.sources import gmail_scan
@@ -246,3 +252,147 @@ def test_scan_people_timeout_then_success_stays_ok(monkeypatch):
     assert calls["n"] >= 2
     assert report.errors == []
     assert cycle_status(report) == "ok"
+
+
+def _msg(message_id, thread_id, subject, frm, to):
+    return {
+        "id": message_id,
+        "threadId": thread_id,
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": subject},
+                {"name": "From", "value": frm},
+                {"name": "To", "value": to},
+                {"name": "Message-ID", "value": f"<{message_id}@mail>"},
+            ]
+        },
+    }
+
+
+def test_find_contact_thread_skips_calendar_other_person_and_missing_email(monkeypatch):
+    """Item 3: skip calendar / scheduling / other-person recaps; require From/To email."""
+    assert subject_is_calendar_noise("Accepted: Intro with Josh")
+    assert subject_is_calendar_noise("Declined: SalesGlider Intro")
+    assert subject_is_calendar_noise("Invitation: Call tomorrow")
+    assert subject_is_calendar_noise("Updated invitation: Weekly")
+    assert subject_is_calendar_noise("Canceled: Intro")
+    assert subject_is_scheduling_only("Call at 10:30am")
+    assert subject_is_scheduling_only("Re: meeting today")
+    assert subject_names_other_meeting_guest(
+        "Your meeting recap - Lionel Francis and Joshua Osborn",
+        "Bradley Lord",
+    )
+    assert not subject_names_other_meeting_guest(
+        "Your meeting recap - Lionel Francis and Joshua Osborn",
+        "Lionel Francis",
+    )
+    assert not header_has_contact_email(
+        {"from": "josh@salesglidergrowth.com", "to": "list@salesglidergrowth.com"},
+        "mike@dolan.test",
+    )
+    assert should_skip_nurture_thread(
+        {
+            "subject": "Accepted: Intro",
+            "from": "calendar-notification@google.com",
+            "to": "mike@dolan.test",
+        },
+        "mike@dolan.test",
+        "Mike Dolan",
+    )
+
+    gmail = _gmail()
+    inbox = [
+        _msg(
+            "m-cal",
+            "th-cal",
+            "Accepted: Intro with Josh",
+            "calendar-notification@google.com",
+            "mike@dolan.test",
+        ),
+        _msg(
+            "m-sched",
+            "th-sched",
+            "Call at 10:30am",
+            "mike@dolan.test",
+            "joshua@salesglidergrowth.com",
+        ),
+        _msg(
+            "m-recap",
+            "th-recap",
+            "Your meeting recap - Lionel Francis and Joshua Osborn",
+            "fred@fireflies.ai",
+            "joshua@salesglidergrowth.com",
+        ),
+        _msg(
+            "m-blast",
+            "th-blast",
+            "Re: 24 new referrals",
+            "josh@salesglidergrowth.com",
+            "team@salesglidergrowth.com",
+        ),
+        _msg(
+            "m-good",
+            "th-good",
+            "Kelly Roofing intro",
+            "mike@dolan.test",
+            "joshua@salesglidergrowth.com",
+        ),
+    ]
+
+    def fake_search(query, max_results=50):
+        del query, max_results
+        return [{"id": m["id"], "threadId": m["threadId"]} for m in inbox]
+
+    def fake_get(message_id):
+        return next(m for m in inbox if m["id"] == message_id)
+
+    monkeypatch.setattr(gmail, "search", fake_search)
+    monkeypatch.setattr(gmail, "get", fake_get)
+    found = gmail.find_contact_thread("mike@dolan.test", name="Mike Dolan")
+    assert found is not None
+    assert found["thread_id"] == "th-good"
+    assert found["original_subject"] == "Kelly Roofing intro"
+
+    missing = gmail.find_contact_thread("lionel@francis.test", name="Lionel Francis")
+    assert missing is None
+
+
+def test_kevin_hagemoser_skips_tj_thread(monkeypatch):
+    """Item 5: Kevin must not land on a TJ said... thread."""
+    assert subject_is_tj_thread("Re: TJ said we should reconnect")
+    assert should_skip_nurture_thread(
+        {
+            "subject": "Re: TJ said...",
+            "from": "kevin@hag.test",
+            "to": "joshua@salesglidergrowth.com",
+        },
+        "kevin@hag.test",
+        "Kevin Hagemoser",
+    )
+    gmail = _gmail()
+    inbox = [
+        _msg(
+            "m-tj",
+            "th-tj",
+            "Re: TJ said we should reconnect",
+            "kevin@hag.test",
+            "joshua@salesglidergrowth.com",
+        ),
+        _msg(
+            "m-real",
+            "th-kevin",
+            "Hagemoser follow up",
+            "kevin@hag.test",
+            "joshua@salesglidergrowth.com",
+        ),
+    ]
+
+    monkeypatch.setattr(
+        gmail,
+        "search",
+        lambda query, max_results=50: [{"id": m["id"], "threadId": m["threadId"]} for m in inbox],
+    )
+    monkeypatch.setattr(gmail, "get", lambda mid: next(m for m in inbox if m["id"] == mid))
+    found = gmail.find_contact_thread("kevin@hag.test", name="Kevin Hagemoser")
+    assert found["thread_id"] == "th-kevin"
+    assert "TJ" not in found["original_subject"]

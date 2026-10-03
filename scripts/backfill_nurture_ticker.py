@@ -20,6 +20,7 @@ from crmbrain.memory import Memory  # noqa: E402
 from crmbrain.nurture import (  # noqa: E402
     compose_nurture_draft,
     dry_run_report,
+    infer_nurture_reason,
     merge_candidates,
     nurture_row_from_candidate,
     qualify_candidate,
@@ -228,22 +229,31 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
             )
             first = (cp.get("firstname") or "").strip()
             last = (cp.get("lastname") or "").strip()
+            extra = {
+                "deal_stage": stage,
+                "booked": True,
+                "last_touch_snippet": text[:280],
+                "no_show_count": props.get("no_show_count"),
+                "hs_meeting": bool(props.get("hs_last_meeting_id") or props.get("engagements_last_meeting_booked")),
+                "meeting_at": props.get("engagements_last_meeting_booked") or "",
+            }
             out.append(
                 TickerCandidate(
                     name=f"{first} {last}".strip() or (props.get("dealname") or ""),
                     email=(cp.get("email") or "").strip(),
                     phone=(cp.get("phone") or "").strip(),
                     company=(cp.get("company") or "").strip(),
-                    reason=classify_reason(stage=stage, text=text),
+                    reason=infer_nurture_reason(
+                        reason=classify_reason(stage=stage, text=text),
+                        deal_stage=stage,
+                        extra=extra,
+                        booked=True,
+                    ),
                     last_signal=last_signal,
                     hs_contact_id=str(contact.get("id") or ""),
                     hs_deal_id=str(deal["id"]),
                     source="hubspot",
-                    extra={
-                        "deal_stage": stage,
-                        "booked": True,
-                        "last_touch_snippet": text[:280],
-                    },
+                    extra=extra,
                 )
             )
     return out, errors

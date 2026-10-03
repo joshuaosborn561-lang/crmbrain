@@ -358,7 +358,8 @@ VERTICALS: tuple[dict, ...] = (
 
 # Josh 2026-09-11: no free POC / free 10K campaign. Guarantee meetings or keep working.
 MEETING_GUARANTEE = "We guarantee meetings, or we keep working until you hit them."
-AIRPODS_OFFER_LIVE = True
+# Josh: no AirPods or tickets in nurture / ticker copy.
+AIRPODS_OFFER_LIVE = False
 
 _FREE_POC_PHRASES = (
     "free poc",
@@ -457,22 +458,14 @@ def infer_industry(
 
 
 def _cta_paragraph(*, include_loom: bool = False, airpods_style: str = "chat") -> str:
-    """Meeting-guarantee first. Soft AirPods gift is optional, never a free POC."""
-    if airpods_style == "name":
-        gift = (
-            "I've also got an extra pair of AirPods with your name on it if you just "
-            "want to hop on a call and see if it makes sense."
-        )
-    elif include_loom:
-        gift = (
-            "I can send a Loom, or a pair of AirPods just for chatting 15 minutes "
-            "to see if this makes sense."
-        )
-    else:
-        gift = (
-            "I can also send you a pair of AirPods just for chatting 15 minutes to "
-            "see if this makes sense."
-        )
+    """Meeting-guarantee first. No AirPods, tickets, or gift offers."""
+    del include_loom, airpods_style
+    if not AIRPODS_OFFER_LIVE:
+        return MEETING_GUARANTEE
+    gift = (
+        "I can also send you a pair of AirPods just for chatting 15 minutes to "
+        "see if this makes sense."
+    )
     return f"{MEETING_GUARANTEE} {gift}"
 
 

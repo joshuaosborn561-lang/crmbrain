@@ -279,7 +279,7 @@ def test_nurture_roofing_uses_roi_case_study():
     assert "$2M" in body
     assert "$100K" in body
     assert "14+" in body
-    assert "AirPods" in body
+    assert "AirPods" not in body
     assert MEETING_GUARANTEE in body
     assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
@@ -315,9 +315,9 @@ def test_nurture_generalized_when_industry_unknown():
     assert "$2M" in body and "pipeline last quarter" in body
     assert "$100K" in body and "first 3 months" in body
     assert "14+" in body
-    assert "Loom" in body
+    assert "Loom" not in body
     assert MEETING_GUARANTEE in body
-    assert "AirPods" in body
+    assert "AirPods" not in body
     assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
     assert "HVAC" not in body

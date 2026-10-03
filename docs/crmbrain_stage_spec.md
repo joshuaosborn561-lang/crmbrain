@@ -41,7 +41,7 @@ RENEWAL_STAGE = {
     "churned": "4392753854",   # closed lost
 }
 ```
-Suggested STAGE_RANK: closed_lost 0, nurture 1, initial_interest 2, meeting_booked 3, discovery_held 4, proposal_sent 5, needs_stakeholder_approval 5 (peer of proposal_sent; either can follow Discovery Held, so moving between them is not "backward"), contract_signed_unpaid 6, poc 7, closed_won 8.
+Suggested STAGE_RANK: closed_lost 0, nurture 1, initial_interest 2, meeting_booked 3, discovery_held 4, proposal_sent 5, needs_stakeholder_approval 5 (peer of proposal_sent; Proposal Sent may move to Needs Stakeholder Approval. The reverse is backward and needs explicit newer negative evidence such as lost or a re-quote after a rejection. Never regress across NSA / POC / Contract / Closed Won from older re-extraction), contract_signed_unpaid 6, poc 7, closed_won 8.
 CLOSED_WON_STAGES = {closed_won}; MONEY_STAGES = {proposal_sent, needs_stakeholder_approval, contract_signed_unpaid, poc, closed_won}; MEETING_STAGES = meeting_booked..closed_won; PRE_SALE_STAGES = {initial_interest, meeting_booked, discovery_held}; BACK_STAGES = {nurture, closed_lost}.
 
 ## 2. Detection rules, new-business pipeline

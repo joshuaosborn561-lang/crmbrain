@@ -147,6 +147,19 @@ PRE_SALE_STAGES = {
 }
 CLOSED_WON_STAGES = {STAGE["closed_won"]}
 LATERAL_STAGES = {STAGE["proposal_sent"], STAGE["needs_stakeholder_approval"]}
+# Never regress across these without explicit newer negative evidence.
+PROTECTED_LATE_STAGES = {
+    STAGE["needs_stakeholder_approval"],
+    STAGE["poc"],
+    STAGE["contract_signed_unpaid"],
+    STAGE["closed_won"],
+}
+_NEWER_NEGATIVE_RE = re.compile(
+    r"\b(lost|not moving forward|going with (?:someone|another)|rejected|"
+    r"kill the deal|deal is dead|passed on|no longer interested|"
+    r"re-?quot(?:e|ed))\b",
+    re.I,
+)
 CLOSED_STAGES = {STAGE["closed_won"], STAGE["closed_lost"], STAGE["nurture"]}
 DEFAULT_PIPELINE = "default"
 RENEWED_STAGES = {RENEWAL_STAGE["renewed"]}
@@ -576,8 +589,53 @@ def is_explicit_back_signal(stage: str, ev: Engagement) -> bool:
     return True
 
 
-def should_move_stage(current: str, target: str, *, back_signal: bool = False) -> bool:
-    """Advance on stronger evidence. Never regress a held-meeting deal to Nurture or No Show."""
+def is_protected_regression(current: str, target: str) -> bool:
+    """NSA / POC / Contract / Closed Won must not move backward without newer negative evidence."""
+    current = canonicalize_stage(current)
+    target = canonicalize_stage(target)
+    if not current or not target or current == target:
+        return False
+    if current == STAGE["needs_stakeholder_approval"] and target == STAGE["proposal_sent"]:
+        return True
+    if current not in PROTECTED_LATE_STAGES:
+        return False
+    return STAGE_RANK.get(target, 0) < STAGE_RANK.get(current, 0)
+
+
+def is_newer_negative_evidence(ev: Engagement, deal: dict | None = None) -> bool:
+    """Lost / re-quote after rejection, and only when the event is newer than the last stage edit."""
+    hint = str(ev.stage_hint or "").strip().lower()
+    blob = f"{ev.summary or ''} {ev.transcript or ''} {ev.raw_subject or ''} {hint}"
+    negative = hint in {"lost", "closed_lost", STAGE["closed_lost"]} or bool(
+        _NEWER_NEGATIVE_RE.search(blob)
+    )
+    if not negative:
+        return False
+    if not deal or not ev.occurred_at:
+        return True
+    props = deal.get("properties") or {}
+    last = last_manual_modification(deal) or _parse_hs_datetime(props.get("hs_lastmodifieddate"))
+    history = deal.get("propertiesWithHistory") or {}
+    for row in history.get("dealstage") or []:
+        if not isinstance(row, dict):
+            continue
+        ts = _parse_hs_datetime(row.get("timestamp"))
+        if ts and (last is None or ts > last):
+            last = ts
+    occurred = _aware(ev.occurred_at)
+    if last and occurred and occurred <= last:
+        return False
+    return True
+
+
+def should_move_stage(
+    current: str,
+    target: str,
+    *,
+    back_signal: bool = False,
+    newer_negative: bool = False,
+) -> bool:
+    """Advance on stronger evidence. Never regress protected late stages from older re-extraction."""
     if not target or current == target:
         return False
     current = canonicalize_stage(current)
@@ -585,8 +643,12 @@ def should_move_stage(current: str, target: str, *, back_signal: bool = False) -
     held_floor = STAGE_RANK[STAGE["discovery_held"]]
     if target == STAGE["nurture"] and STAGE_RANK.get(current, 0) >= held_floor:
         return False
-    if current in LATERAL_STAGES and target in LATERAL_STAGES and current != target:
+    if is_protected_regression(current, target) and not newer_negative:
+        return False
+    if current == STAGE["proposal_sent"] and target == STAGE["needs_stakeholder_approval"]:
         return True
+    if current in LATERAL_STAGES and target in LATERAL_STAGES and current != target:
+        return bool(newer_negative)
     if target in BACK_STAGES and back_signal:
         return True
     if target in WEAK_STAGES and not back_signal:
@@ -877,6 +939,8 @@ def may_open_new_deal(
         return False, "client"
     if ev.source in NEVER_OPEN_DEAL_SOURCES:
         return False, "cold_source"
+    if live_open_deals(deals):
+        return False, "existing_open_deal"
     return True, ""
 
 
@@ -948,8 +1012,6 @@ def choose_deal_action(
         STAGE["closed_won"],
     }:
         return None
-    if current in LATERAL_STAGES and target in LATERAL_STAGES:
-        return target
     if current == STAGE["proposal_sent"] and target in {
         STAGE["discovery_held"],
         STAGE["meeting_booked"],
@@ -957,8 +1019,13 @@ def choose_deal_action(
         return None
     if target == STAGE["closed_lost"]:
         return None
-    back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
-    if not should_move_stage(current, target, back_signal=back):
+    newer_neg = is_newer_negative_evidence(ev, deal)
+    back = (
+        is_explicit_back_signal(requested, ev)
+        or is_explicit_back_signal(target, ev)
+        or newer_neg
+    )
+    if not should_move_stage(current, target, back_signal=back, newer_negative=newer_neg):
         return None
     return target
 

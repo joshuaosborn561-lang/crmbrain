@@ -14,12 +14,15 @@ from crmbrain.config import (
 from crmbrain.documents import stage_from_signature_mail
 from crmbrain.hubspot import increment_no_show_count
 from crmbrain.models import Engagement
+from crmbrain.cycle import apply_gmail_stage_update
 from crmbrain.policy import (
     CLOSED_WON_STAGES,
     INCREMENT_NO_SHOW,
     choose_deal_action,
     closed_won_deals,
+    is_newer_negative_evidence,
     live_open_deals,
+    may_open_new_deal,
     needs_stakeholder_approval,
     resolve_stage,
     should_move_stage,
@@ -33,7 +36,7 @@ from crmbrain.renewals import (
     is_renewal_meeting,
 )
 from crmbrain.sources.gmail_scan import _stage_from_mail
-from tests.test_crm_gating import FakeHubSpot
+from tests.test_crm_gating import FakeHubSpot, make_settings
 
 
 def test_stage_ids_and_aliases():
@@ -92,7 +95,7 @@ def test_never_write_deleted_or_move_won_to_lost():
 def test_lateral_proposal_and_stakeholder():
     ev = Engagement(source="fireflies", external_id="ff", transcript="They will present to partners.")
     assert should_move_stage(STAGE["proposal_sent"], STAGE["needs_stakeholder_approval"])
-    assert should_move_stage(STAGE["needs_stakeholder_approval"], STAGE["proposal_sent"])
+    assert not should_move_stage(STAGE["needs_stakeholder_approval"], STAGE["proposal_sent"])
     assert needs_stakeholder_approval(ev)
     assert resolve_stage(ev) == STAGE["needs_stakeholder_approval"]
 
@@ -160,3 +163,95 @@ def test_renewal_helpers():
     assert apply_positive_replies(hs, renewal, 4) == RENEWAL_STAGE["at_risk"]
     assert renewal["properties"]["dealstage"] == RENEWAL_STAGE["at_risk"]
     assert renewal["properties"]["positive_replies_30d"] == "4"
+
+
+def test_nsa_does_not_move_back_to_proposal_sent_from_older_evidence():
+    """Item 6: Tyler / Earl stay in Needs Stakeholder Approval on 9/18 re-extraction."""
+    nsa = STAGE["needs_stakeholder_approval"]
+    ps = STAGE["proposal_sent"]
+    assert not should_move_stage(nsa, ps)
+    tyler = Engagement(
+        source="fireflies",
+        external_id="ff-tyler-918",
+        occurred_at=datetime(2026, 9, 18, 16, 0, tzinfo=timezone.utc),
+        email="tyler@deeprootscapital.com",
+        first_name="Tyler",
+        last_name="Leverington",
+        name="Tyler Leverington",
+        transcript="Walked pricing again. Same $20k proposal we already sent.",
+        extra={"has_sentences": True, "sentence_count": 12},
+    )
+    tyler_deal = {
+        "id": "350556988142",
+        "contact_id": "tyler-1",
+        "properties": {
+            "dealstage": nsa,
+            "dealname": "Tyler Leverington - Deep Roots Capital",
+            "amount": "20000",
+            "hs_lastmodifieddate": "2026-09-20T12:00:00Z",
+        },
+        "propertiesWithHistory": {
+            "dealstage": [{"value": nsa, "timestamp": "2026-09-20T12:00:00Z", "sourceType": "CRM_UI"}]
+        },
+    }
+    assert choose_deal_action(nsa, ps, tyler, deal=tyler_deal) is None
+    assert not is_newer_negative_evidence(tyler, tyler_deal)
+
+    earl = Engagement(
+        source="gmail",
+        external_id="g-earl-intro",
+        occurred_at=datetime(2026, 9, 18, 14, 0, tzinfo=timezone.utc),
+        email="ej@accg-inc.com",
+        first_name="Earl",
+        last_name="Jackson",
+        name="Earl Jackson",
+        raw_subject="Intro to Earl",
+        summary="Quick intro email plus the original proposal recap.",
+    )
+    earl_deal = {
+        "id": "351592972993",
+        "contact_id": "earl-1",
+        "properties": {
+            "dealstage": nsa,
+            "dealname": "Earl Jackson - Accg",
+            "amount": "20000",
+            "hs_lastmodifieddate": "2026-09-22T12:00:00Z",
+        },
+    }
+    assert choose_deal_action(nsa, ps, earl, deal=earl_deal) is None
+    lost = Engagement(
+        source="gmail",
+        external_id="g-lost",
+        occurred_at=datetime(2026, 10, 2, 15, 0, tzinfo=timezone.utc),
+        email="ej@accg-inc.com",
+        raw_subject="We are going with someone else",
+        summary="Lost the deal. They rejected the quote and asked for a re-quote later.",
+        stage_hint="lost",
+    )
+    assert is_newer_negative_evidence(lost, earl_deal)
+    assert should_move_stage(nsa, ps, newer_negative=True)
+
+
+def test_no_show_count_increment_path(tmp_path):
+    """Item 8: no-show increments the counter and leaves Meeting Booked in place."""
+    from tests.test_held_beats_noshow import _gmail_no_show, _prep
+
+    hs, memory, report = _prep(tmp_path)
+    past = datetime(2026, 9, 29, 11, 30, tzinfo=timezone.utc)
+    ev = _gmail_no_show(scheduled_at=past, already_id="g-increment-path")
+    apply_gmail_stage_update(ev, make_settings(dry_run=False), hs, memory, None, report, held_events=[])
+    deal = hs.deals[0]
+    assert deal["properties"]["dealstage"] == STAGE["meeting_booked"]
+    assert deal["properties"].get("no_show_count") == "1"
+    assert any("no_show_count++" in line for line in report.deals_moved)
+    apply_gmail_stage_update(
+        _gmail_no_show(scheduled_at=past, already_id="g-increment-path-2"),
+        make_settings(dry_run=False),
+        hs,
+        memory,
+        None,
+        report,
+        held_events=[],
+    )
+    assert deal["properties"].get("no_show_count") == "2"
+    assert deal["properties"]["dealstage"] == STAGE["meeting_booked"]
