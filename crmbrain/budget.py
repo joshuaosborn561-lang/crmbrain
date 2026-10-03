@@ -19,7 +19,7 @@ def _kind(action: str, current: str, target: str) -> str:
         return "create"
     if action == "archive":
         return "archive_regression"
-    if target in {STAGE["no_show"], STAGE["nurture"]}:
+    if target in {STAGE["nurture"], STAGE["closed_lost"]}:
         return "archive_regression"
     if current and STAGE_RANK.get(target, 0) < STAGE_RANK.get(current, 0):
         return "archive_regression"

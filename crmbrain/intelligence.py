@@ -26,8 +26,10 @@ Return ONLY JSON with this shape:
   "buying_committee": "",
   "gift_ideas": "",
   "birthday": "YYYY-MM-DD or empty",
-  "stage_hint": "discovery_scheduled|discovery_completed|proposal_sent|signed|paid|no_show|nurture|closed_lost|",
-  // Use signed when THIS person is in an active paid POC/pilot/kickoff/onboarding.
+  "stage_hint": "meeting_booked|discovery_held|proposal_sent|needs_stakeholder_approval|contract_signed_unpaid|poc|closed_won|nurture|closed_lost|initial_interest|",
+  // contract_signed_unpaid = e-sign/contract sent or signed, not yet paid.
+  // closed_won = payment received. poc = signed pilot running unpaid.
+  // Do not emit no_show as a stage — that is a no_show_count increment.
   "ticker_reason": "kicked_can|no_show|never_booked|deal_died|",
   "amount_hint": "",
   "deal_amount": "",
@@ -51,7 +53,7 @@ Rules:
 - Only facts the person actually said or that are obvious from the meeting.
 - Birthday, kids, spouse, school, sports, city, hobbies matter.
 - stage_hint only with clear evidence.
-- Never set stage_hint to no_show for a meeting that has a transcript. A held call is discovery_completed.
+- Never set stage_hint to no_show. A held call is discovery_held. A no-show increments no_show_count and stays in meeting_booked.
 - Use proposal_sent when a proposal/SOW/pricing was promised or sent on a held, priced call.
 - ticker_reason if they punted, no-showed, or the deal died.
 - deal_terms / amount_hint / deal_amount: THIS deal's price only.
@@ -1008,8 +1010,8 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
     silent = _is_silent_source(ev)
     if ev.source in CALL_SOURCES and not silent:
         hint = str(facts.get("stage_hint") or "").strip().lower()
-        if hint in {"no_show", STAGE["no_show"]}:
-            facts["stage_hint"] = "discovery_completed"
+        if hint in {"no_show", "no_show_count"}:
+            facts["stage_hint"] = "discovery_held"
         if str(facts.get("ticker_reason") or "").strip().lower() == "no_show":
             facts["ticker_reason"] = ""
     terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}

@@ -15,11 +15,13 @@ REASON_RANK = {"no_show": 3, "kicked_can": 2, "deal_died": 2, "never_booked": 1}
 SOFT_STOPS = frozenset({"booked", "emailed_recently", "deal_archived", "legacy_reset", "manual_snooze"})
 HARD_STOPS = frozenset({"client", "non_deal", "unsubscribed", "won", "do_not_contact", "no_identity"})
 MEETING_STAGES = {
-    STAGE["discovery_scheduled"],
-    STAGE["discovery_completed"],
+    STAGE["meeting_booked"],
+    STAGE["discovery_held"],
     STAGE["proposal_sent"],
-    STAGE["signed"],
-    STAGE["paid"],
+    STAGE["needs_stakeholder_approval"],
+    STAGE["contract_signed_unpaid"],
+    STAGE["poc"],
+    STAGE["closed_won"],
 }
 
 
@@ -104,7 +106,7 @@ def already_enrolled(
 def classify_reason(*, stage: str = "", hint: str = "", text: str = "") -> str:
     if hint in REASON_RANK:
         return hint
-    if stage in {STAGE["no_show"], "no_show"}:
+    if stage == "no_show":
         return "no_show"
     facts = heuristic_extract(text or "")
     if facts.get("ticker_reason") in REASON_RANK:

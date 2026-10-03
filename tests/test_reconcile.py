@@ -289,7 +289,11 @@ def test_discovery_scheduled_reeval_noshow_completed_nurture(tmp_path):
         calendar_api_ok=True,
     )
     by_id = {d["id"]: d["properties"]["dealstage"] for d in hs.deals}
-    assert by_id["d-past"] == STAGE["no_show"]
+    assert by_id["d-past"] == STAGE["discovery_scheduled"]
+    assert hs.deals[0]["properties"].get("no_show_count") == "1" or any(
+        (d.get("id") == "d-past" and (d.get("properties") or {}).get("no_show_count") == "1")
+        for d in hs.deals
+    )
     assert by_id["d-held"] == STAGE["discovery_completed"]
     assert by_id["d-cx"] == STAGE["nurture"]
     assert by_id["d-unk"] == STAGE["discovery_scheduled"]
@@ -306,7 +310,7 @@ def test_boyd_gibbons_reply_only_is_not_a_booked_meeting(tmp_path):
         summary="Interested",
     )
     assert reply_only(build_timelines([ev])["name:boyd gibbons"])
-    assert not is_confident_sales(heuristic_intent(ev))
+    assert is_confident_sales(heuristic_intent(ev))
     hs = FakeHubSpot(
         [{"id": "bg-1", "properties": {"email": "", "firstname": "Boyd", "lastname": "Gibbons"}}]
     )

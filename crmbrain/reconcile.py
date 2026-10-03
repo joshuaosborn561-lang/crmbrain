@@ -38,7 +38,7 @@ from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES
 
 logger = logging.getLogger(__name__)
 
-PROTECTED_STAGES = {STAGE["signed"], STAGE["paid"]}
+PROTECTED_STAGES = {STAGE["closed_won"], STAGE["paid"]}
 COLD_CREATE_SOURCES = NEVER_OPEN_DEAL_SOURCES | {"gmail", "gmail_person"}
 MEETING_CRM_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo"})
 
@@ -90,25 +90,27 @@ def stage_from_timeline(
     """Latest evidence wins. POC hints never become Signed."""
     kinds = timeline.kinds()
     if KIND_PAYMENT in kinds:
-        return STAGE["paid"]
+        return STAGE["closed_won"]
     if KIND_SIGNED in kinds:
-        return STAGE["signed"]
+        return STAGE["contract_signed_unpaid"]
     if KIND_PROPOSAL in kinds:
         return STAGE["proposal_sent"]
     if KIND_HELD in kinds:
-        return STAGE["discovery_completed"]
+        return STAGE["discovery_held"]
     if canceled_no_reschedule and not has_upcoming:
         return STAGE["nurture"]
     if KIND_NO_SHOW in kinds and KIND_HELD not in kinds and not has_upcoming:
-        return STAGE["no_show"]
+        return ""
     if KIND_BOOKED in kinds or has_upcoming:
-        return STAGE["discovery_scheduled"]
+        return STAGE["meeting_booked"]
     if past_grace and KIND_HELD not in kinds and not has_upcoming:
-        if KIND_BOOKED in kinds or _current_stage(timeline) == STAGE["discovery_scheduled"]:
-            return STAGE["no_show"]
+        if KIND_BOOKED in kinds or _current_stage(timeline) == STAGE["meeting_booked"]:
+            return ""
     if decision.stage:
-        if decision.stage == STAGE["signed"] and KIND_SIGNED not in kinds and KIND_PAYMENT not in kinds:
-            return STAGE["discovery_completed"] if KIND_HELD in kinds else ""
+        if decision.stage in {STAGE["signed"], STAGE["contract_signed_unpaid"]} and KIND_SIGNED not in kinds and KIND_PAYMENT not in kinds:
+            return STAGE["discovery_held"] if KIND_HELD in kinds else ""
+        if decision.stage == STAGE["closed_lost"]:
+            return ""
         if decision.stage in STAGE.values():
             return decision.stage
         return STAGE.get(decision.stage, "")
@@ -781,7 +783,7 @@ def _reeval_decision(
         and not has_upcoming
         and not calendar_or_future
     ):
-        return STAGE["no_show"], "past_grace_no_show"
+        return "", "past_grace_no_show"
     return "", ""
 
 
@@ -867,7 +869,21 @@ def reeval_discovery_scheduled(
         if reason == "unknown_scheduled_time":
             _queue_review(memory, report, timeline, reason="unknown_scheduled_time", dry_run=dry_run)
             continue
-        if not target or target == STAGE["discovery_scheduled"]:
+        if reason == "past_grace_no_show":
+            ev.stage_hint = "no_show"
+            kind = budget.classify("move", STAGE["meeting_booked"], STAGE["meeting_booked"])
+            if budget.aborted or not budget.allow(kind):
+                _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
+                continue
+            if not dry_run:
+                from crmbrain import ticker
+                from crmbrain.hubspot import increment_no_show_count
+
+                increment_no_show_count(hs, deal)
+                ticker.enroll(memory, ev, "no_show", hs_contact_id=contact.get("id"))
+                report.deals_moved.append(f"{label} no_show_count++ (stage unchanged)")
+            continue
+        if not target or target == STAGE["meeting_booked"] or target == STAGE["discovery_scheduled"]:
             continue
         stage_out, _amt, gate_reason = authorize_deal_write(
             ev,
@@ -899,10 +915,8 @@ def reeval_discovery_scheduled(
         wrote = commit_deal_write(hs, contact, ev, write_stage)
         if wrote.get("id"):
             report.deals_moved.append(f"{label} scheduled-reeval -> {target} ({wrote.get('id')})")
-            if target == STAGE["no_show"]:
-                from crmbrain import ticker
-
-                ticker.enroll(memory, ev, "no_show", hs_contact_id=contact.get("id"))
+            if target in {STAGE["nurture"], STAGE["closed_lost"]}:
+                pass
 
 
 def _count_open_deals(hs: HubSpot, timelines: dict[str, PersonTimeline]) -> int:

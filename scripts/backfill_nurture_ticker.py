@@ -170,7 +170,6 @@ def collect_hubspot(settings: Settings) -> tuple[list[TickerCandidate], list[str
             settings,
             [
                 STAGE["nurture"],
-                STAGE["no_show"],
                 STAGE["discovery_completed"],
                 STAGE["proposal_sent"],
             ],
@@ -287,7 +286,7 @@ def drop_active_pipeline(
             c.skip_reason = "live_pipeline"
             skipped.append(c)
             continue
-        if STAGE["no_show"] in stages:
+        if any(str((d.get("properties") or {}).get("no_show_count") or "0") not in {"", "0"} for d in deals):
             c.reason = "no_show"
         kept.append(c)
     return kept, skipped

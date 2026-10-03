@@ -9,7 +9,17 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact, is_zoom_room_address
+from crmbrain.config import (
+    LOST_REASONS,
+    NO_SHOW_HINT,
+    SG_DEAL_TYPES,
+    STAGE,
+    Settings,
+    digits_phone,
+    is_deleted_stage,
+    is_excluded_contact,
+    is_zoom_room_address,
+)
 from crmbrain.models import Engagement
 from crmbrain.names import names_fuzzy_match, prefer_contact_name
 from crmbrain import intelligence, policy
@@ -88,6 +98,13 @@ CONTACT_PROPS = [
     },
 ]
 
+def _enum_options(values: tuple[str, ...] | list[str]) -> list[dict]:
+    return [
+        {"label": value.replace("_", " ").title(), "value": value, "displayOrder": i, "hidden": False}
+        for i, value in enumerate(values)
+    ]
+
+
 DEAL_PROPS = [
     {
         "name": "crmbrain_locked",
@@ -96,6 +113,72 @@ DEAL_PROPS = [
         "fieldType": "booleancheckbox",
         "groupName": "dealinformation",
         "description": "When true, CRMBrain will not change stage or amount on this deal.",
+    },
+    {
+        "name": "lost_reason",
+        "label": "Lost reason",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "options": _enum_options(LOST_REASONS),
+    },
+    {
+        "name": "nurture_reason",
+        "label": "Nurture reason",
+        "type": "string",
+        "fieldType": "textarea",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "sg_deal_type",
+        "label": "SG deal type",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "options": _enum_options(SG_DEAL_TYPES),
+    },
+    {
+        "name": "monthly_fee",
+        "label": "Monthly fee",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "contract_months",
+        "label": "Contract months",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "contract_end_date",
+        "label": "Contract end date",
+        "type": "date",
+        "fieldType": "date",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "no_show_count",
+        "label": "No-show count",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "positive_replies_30d",
+        "label": "Positive replies last 30 days",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "josh_review_flag",
+        "label": "Josh review flag",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "dealinformation",
+        "description": "Non-empty means Josh needs to review this deal.",
     },
 ]
 
@@ -545,6 +628,9 @@ class HubSpot:
         return None
 
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
+        if _refused_dealstage(stage):
+            logger.info("refuse dealstage write %s", stage)
+            stage = ""
         current = (deal.get("properties") or {}).get("dealstage") or ""
         target = (
             policy.choose_deal_action(current, stage, ev, deal=deal, settings=self.settings)
@@ -583,6 +669,9 @@ class HubSpot:
         return deal
 
     def upsert_deal(self, contact: dict, ev: Engagement, stage: str, amount: str = "") -> dict:
+        if _refused_dealstage(stage):
+            logger.info("refuse dealstage write %s", stage)
+            return {}
         if self._is_excluded(ev, contact):
             logger.info("skip hubspot deal write for excluded person")
             return {}
@@ -684,10 +773,38 @@ class HubSpot:
                 logger.warning("amount note failed %s: %s", contact.get("id"), exc)
         return True
 
+    def create_pipeline_deal(self, contact_id: str, properties: dict[str, Any]) -> dict:
+        """Create a deal on an explicit pipeline (renewals). Refuses deleted stages."""
+        from crmbrain.config import RENEWAL_PIPELINE
+
+        stage = str(properties.get("dealstage") or "")
+        if _refused_dealstage(stage):
+            logger.warning("refuse dealstage write %s", stage)
+            return {}
+        props = {k: v for k, v in properties.items() if v not in (None, "")}
+        props.setdefault("pipeline", RENEWAL_PIPELINE)
+        payload = {
+            "properties": props,
+            "associations": [
+                {
+                    "to": {"id": contact_id},
+                    "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 3}],
+                }
+            ],
+        }
+        resp = self._request("POST", "/crm/v3/objects/deals", json=payload, timeout=WRITE_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
     def patch_deal(self, deal_id: str, properties: dict[str, Any]) -> None:
-        properties = {k: v for k, v in properties.items() if v}
+        properties = {k: v for k, v in properties.items() if v not in (None, "")}
         if not properties:
             return
+        if _refused_dealstage(str(properties.get("dealstage") or "")):
+            logger.warning("refuse dealstage write %s", properties.get("dealstage"))
+            properties = {k: v for k, v in properties.items() if k != "dealstage"}
+            if not properties:
+                return
         resp = self._request(
             "PATCH",
             f"/crm/v3/objects/deals/{deal_id}",
@@ -697,9 +814,16 @@ class HubSpot:
         resp.raise_for_status()
 
     def move_deal(self, deal_id: str, stage: str, evidence: str, dealname: str = "") -> None:
+        if _refused_dealstage(stage):
+            logger.warning("refuse dealstage write %s", stage)
+            return
         props = {"dealstage": stage}
         if dealname:
             props["dealname"] = dealname
+        if stage == STAGE["closed_won"]:
+            existing = _existing_closedate(self, deal_id)
+            if existing:
+                props["closedate"] = existing
         resp = self._request(
             "PATCH",
             f"/crm/v3/objects/deals/{deal_id}",
@@ -707,6 +831,12 @@ class HubSpot:
             timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
+
+    def increment_no_show_count(self, deal: dict) -> int:
+        return increment_no_show_count(self, deal)
+
+    def set_josh_review_flag(self, deal: dict, reason: str) -> None:
+        set_josh_review_flag(self, deal, reason)
 
     def upcoming_meetings(self) -> list[dict]:
         """Meetings in HubSpot engagements if available; otherwise empty (Gmail/Calendly fills this)."""
@@ -871,6 +1001,55 @@ class HubSpot:
             return
         if resp.status_code >= 400:
             raise RuntimeError(f"archive contact {contact_id}: {resp.text[:200]}")
+
+
+def _refused_dealstage(stage: str) -> bool:
+    raw = (stage or "").strip()
+    if not raw:
+        return False
+    return is_deleted_stage(raw) or raw in {NO_SHOW_HINT, "no_show", "increment_no_show_count"}
+
+
+def _existing_closedate(hs: HubSpot, deal_id: str) -> str:
+    try:
+        resp = hs._request(
+            "GET",
+            f"/crm/v3/objects/deals/{deal_id}",
+            params={"properties": "closedate"},
+            retry=True,
+            timeout=READ_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return ""
+        return str(((resp.json() or {}).get("properties") or {}).get("closedate") or "").strip()
+    except Exception:
+        return ""
+
+
+def increment_no_show_count(hs: HubSpot, deal: dict) -> int:
+    """Increment no_show_count. Never changes dealstage."""
+    if not deal or not deal.get("id"):
+        return 0
+    if policy.deal_is_locked(deal):
+        return 0
+    props = deal.setdefault("properties", {})
+    try:
+        current = int(float(str(props.get("no_show_count") or "0").strip() or "0"))
+    except (TypeError, ValueError):
+        current = 0
+    new = current + 1
+    hs.patch_deal(str(deal["id"]), {"no_show_count": str(new)})
+    props["no_show_count"] = str(new)
+    return new
+
+
+def set_josh_review_flag(hs: HubSpot, deal: dict, reason: str) -> None:
+    if not deal or not deal.get("id") or not reason:
+        return
+    if policy.deal_is_locked(deal):
+        return
+    hs.patch_deal(str(deal["id"]), {"josh_review_flag": reason})
+    deal.setdefault("properties", {})["josh_review_flag"] = reason
 
 
 def _sleep(seconds: float) -> None:

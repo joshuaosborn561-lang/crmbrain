@@ -17,6 +17,7 @@ from crmbrain.config import (
     CDT,
     STAGE,
     Settings,
+    canonicalize_stage,
     is_client_context,
     is_josh_address,
     is_non_deal_person,
@@ -294,11 +295,11 @@ def has_meeting_qualification(
     if reason in {"no_show"}:
         return True
     if deal_stage in {
-        STAGE["discovery_scheduled"],
-        STAGE["discovery_completed"],
+        STAGE["meeting_booked"],
+        STAGE["discovery_held"],
         STAGE["proposal_sent"],
+        STAGE["needs_stakeholder_approval"],
         STAGE["nurture"],
-        STAGE["no_show"],
     }:
         return True
     if ev is not None:
@@ -1081,12 +1082,13 @@ def fire_gate(
     stages = list(associated_stages or row.get("associated_stages") or [])
     if row.get("deal_stage"):
         stages.append(str(row.get("deal_stage")))
-    if STAGE["paid"] in stages:
+    canon_stages = {canonicalize_stage(s) or str(s) for s in stages}
+    if STAGE["closed_won"] in canon_stages:
         patch = {"status": "stopped", "stop_reason": "client", "stopped_at": now.isoformat()}
         return "client", patch
-    if STAGE["signed"] in stages:
-        patch = {"status": "stopped", "stop_reason": "won", "stopped_at": now.isoformat()}
-        return "won", patch
+    if STAGE["contract_signed_unpaid"] in canon_stages or STAGE["poc"] in canon_stages:
+        patch = {"status": "stopped", "stop_reason": "booked", "stopped_at": now.isoformat()}
+        return "booked", patch
     if row.get("unsubscribed") or (row.get("extra") or {}).get("unsubscribed"):
         patch = {"status": "stopped", "stop_reason": "unsubscribed", "stopped_at": now.isoformat()}
         return "unsubscribed", patch
@@ -1328,11 +1330,15 @@ def collect_s2_hubspot(deals: list[dict], *, now: datetime | None = None) -> lis
         last_activity = parse_signal_at(deal.get("last_activity"))
         note_at = parse_signal_at(note.get("created") or note.get("date"))
         is_nurture = stage == STAGE["nurture"]
-        is_stalled_open = stage in {STAGE["discovery_completed"], STAGE["proposal_sent"]}
+        is_stalled_open = stage in {
+            STAGE["discovery_held"],
+            STAGE["discovery_completed"],
+            STAGE["proposal_sent"],
+        }
         if is_stalled_open:
             if not last_activity or now - last_activity < timedelta(days=STALLED_DAYS):
                 continue
-        elif not is_nurture and stage != STAGE["no_show"]:
+        elif not is_nurture:
             continue
         signal = note_at or last_activity
         if not signal:

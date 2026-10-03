@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta
 
-from crmbrain.config import CDT, STAGE
+from crmbrain.config import CDT, NO_SHOW_HINT, STAGE
 from crmbrain.cycle import _handle_engagement, apply_gmail_stage_update
 from crmbrain.intelligence import extract, heuristic_extract
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.policy import (
+    INCREMENT_NO_SHOW,
     choose_deal_action,
     matching_held_event,
     no_show_write_stage,
@@ -83,7 +84,7 @@ def _gmail_no_show(*, scheduled_at=SCHEDULED, already_id="g-noshow"):
         domain="deeprootscapital.com",
         raw_subject="Invitee no-show: Tyler Leverington - SalesGlider Intro",
         summary="Tue Sep 29 2026 3:30PM CDT\nSalesGlider Intro",
-        stage_hint=STAGE["no_show"],
+        stage_hint=NO_SHOW_HINT,
         extra={
             "hubspot_contact_id": "tyler-1",
             "meeting_when": "Tue Sep 29 2026 3:30PM CDT",
@@ -119,7 +120,7 @@ def test_same_day_fireflies_blocks_no_show_and_promotes(tmp_path):
     )
     assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
     assert not any("no_show" in t for t in report.ticker_enrolled)
-    assert not any(STAGE["no_show"] in str(d) for d in report.deals_moved)
+    assert not any("3557889773" in str(d) for d in report.deals_moved)
 
 
 def test_late_fireflies_transcript_still_wins(tmp_path):
@@ -157,10 +158,11 @@ def test_true_no_show_without_transcript_still_moves(tmp_path):
         held_events=[],
         scheduled_at=past,
         now=CYCLE_5PM,
-    ) == STAGE["no_show"]
+    ) == INCREMENT_NO_SHOW
 
     apply_gmail_stage_update(ev, make_settings(), hs, memory, None, report, held_events=[])
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
+    assert hs.deals[0]["properties"].get("no_show_count") == "1"
     assert any("no_show" in t for t in report.ticker_enrolled)
 
 
@@ -174,7 +176,7 @@ def test_llm_no_show_override_ignored_when_transcript_exists(tmp_path):
     assert facts["stage_hint"] == "no_show"
     gemini = {"stage_hint": "no_show", "ticker_reason": "no_show"}
     assert resolve_stage(ev, gemini) == STAGE["discovery_completed"]
-    assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["no_show"], ev) == STAGE[
+    assert choose_deal_action(STAGE["discovery_scheduled"], NO_SHOW_HINT, ev) == STAGE[
         "discovery_completed"
     ]
     extracted = extract(make_settings(), ev)
@@ -228,7 +230,7 @@ def test_stale_processed_no_show_does_not_refire(tmp_path):
         held_events=[held],
     )
     assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
-    assert not any(STAGE["no_show"] in str(item) for item in report.deals_moved)
+    assert not any("3557889773" in str(item) for item in report.deals_moved)
 
     hs2, memory2, report2 = _prep(tmp_path / "stale", stage=STAGE["discovery_scheduled"])
     stale = _gmail_no_show(already_id="g-stale")
@@ -279,12 +281,12 @@ def test_policy_never_demotes_held_or_completed_to_no_show():
     gmail = _gmail_no_show()
     held = _fireflies()
     assert not should_move_stage(
-        STAGE["discovery_completed"], STAGE["no_show"], back_signal=True
+        STAGE["discovery_completed"], NO_SHOW_HINT, back_signal=True
     )
-    assert should_move_stage(STAGE["discovery_scheduled"], STAGE["no_show"], back_signal=True)
-    assert choose_deal_action(STAGE["discovery_completed"], STAGE["no_show"], gmail) is None
-    assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["no_show"], gmail) == STAGE["no_show"]
-    assert choose_deal_action(STAGE["discovery_scheduled"], STAGE["no_show"], held) == STAGE[
+    assert not should_move_stage(STAGE["discovery_scheduled"], NO_SHOW_HINT, back_signal=True)
+    assert choose_deal_action(STAGE["discovery_completed"], NO_SHOW_HINT, gmail) is None
+    assert choose_deal_action(STAGE["discovery_scheduled"], NO_SHOW_HINT, gmail) is None
+    assert choose_deal_action(STAGE["discovery_scheduled"], NO_SHOW_HINT, held) == STAGE[
         "discovery_completed"
     ]
     assert resolve_stage(held, {"stage_hint": "no_show"}) == STAGE["discovery_completed"]
@@ -303,10 +305,11 @@ def test_crm_source_fireflies_without_held_event_writes_no_show(tmp_path):
             scheduled_at=past,
             now=CYCLE_5PM,
         )
-        == STAGE["no_show"]
+        == INCREMENT_NO_SHOW
     )
     apply_gmail_stage_update(ev, make_settings(), hs, memory, None, report, held_events=[])
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
+    assert hs.deals[0]["properties"].get("no_show_count") == "1"
 
     hs2, memory2, report2 = _prep(tmp_path / "crm-src-stale", crm_source="fireflies")
     stale = _gmail_no_show(scheduled_at=past, already_id="g-crm-src")
@@ -317,11 +320,11 @@ def test_crm_source_fireflies_without_held_event_writes_no_show(tmp_path):
 
 
 def test_already_processed_no_show_without_held_stays_no_show(tmp_path):
-    hs, memory, report = _prep(tmp_path, stage=STAGE["no_show"])
+    hs, memory, report = _prep(tmp_path, stage=STAGE["discovery_scheduled"])
     ev = _gmail_no_show(scheduled_at=SCHEDULED - timedelta(hours=4))
     memory.mark_processed(ev.source, ev.external_id, {"subject": ev.raw_subject})
     apply_gmail_stage_update(ev, make_settings(), hs, memory, None, report, held_events=[])
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
     assert not any(STAGE["discovery_completed"] in str(item) for item in report.deals_moved)
 
 

@@ -161,17 +161,83 @@ JOSH_DOMAINS = {
 POSITIVE_SMARTLEAD_CATEGORIES = {1, 2, 5}  # Interested, Meeting Request, Info Request
 POSITIVE_SENTIMENTS = {"positive"}
 
+# Sales Pipeline (id `default`). Display names live in HubSpot; values are stage IDs.
+# Old keys stay as aliases so existing callers keep working after the Oct 3 2026 rename.
+# closedwon NOW means payment received (was Signed). signed NOW means contract unpaid.
 STAGE = {
+    "initial_interest": "appointmentscheduled",
+    "meeting_booked": "qualifiedtobuy",
+    "discovery_held": "presentationscheduled",
+    "proposal_sent": "decisionmakerboughtin",
+    "needs_stakeholder_approval": "4391745240",
+    "contract_signed_unpaid": "4391699184",
+    "poc": "4391745241",
+    "closed_won": "closedwon",
+    "closed_lost": "closedlost",
+    "nurture": "3486952153",
+    # Aliases (same IDs or remapped IDs). Do not add deleted stages here.
     "replied": "appointmentscheduled",
     "discovery_scheduled": "qualifiedtobuy",
     "discovery_completed": "presentationscheduled",
-    "proposal_sent": "decisionmakerboughtin",
-    "signed": "closedwon",
-    "paid": "3482933986",
-    "nurture": "3486952153",
-    "no_show": "3557889773",
-    "closed_lost": "closedlost",
+    "signed": "4391699184",
+    "paid": "closedwon",
 }
+
+RENEWAL_PIPELINE = "2604181234"
+RENEWAL_STAGE = {
+    "renewal_upcoming": "4391699185",
+    "call_scheduled": "4391699186",
+    "at_risk": "4391699187",
+    "renewed": "4392753853",
+    "churned": "4392753854",
+}
+
+# Deleted HubSpot stages. Never write these IDs.
+DELETED_STAGE_IDS = frozenset({"3482933986", "3557889773"})
+DELETED_STAGE_CANONICAL = {
+    "3482933986": "closedwon",  # old Paid → Closed Won
+    "3557889773": "qualifiedtobuy",  # old No Show → leave Meeting Booked
+}
+
+# Evidence / ticker signal only. Not a HubSpot dealstage.
+NO_SHOW_HINT = "no_show"
+
+LOST_REASONS = (
+    "prospect_dq",
+    "josh_dq",
+    "not_a_fit",
+    "budget_timing",
+    "went_dark",
+    "other",
+)
+SG_DEAL_TYPES = ("new_business", "paid_poc", "free_poc", "renewal", "expansion")
+DEAL_PROPS_NEW = (
+    "lost_reason",
+    "nurture_reason",
+    "sg_deal_type",
+    "monthly_fee",
+    "contract_months",
+    "contract_end_date",
+    "no_show_count",
+    "positive_replies_30d",
+    "josh_review_flag",
+)
+
+
+def canonicalize_stage(stage: str | None) -> str:
+    """Map leftover deleted IDs to the live stage. Empty if not a stage."""
+    raw = (stage or "").strip()
+    if not raw:
+        return ""
+    if raw in DELETED_STAGE_CANONICAL:
+        return DELETED_STAGE_CANONICAL[raw]
+    if raw in STAGE.values():
+        return raw
+    return STAGE.get(raw, "")
+
+
+def is_deleted_stage(stage: str | None) -> bool:
+    return (stage or "").strip() in DELETED_STAGE_IDS
 
 INTERNAL_MEETING_HINTS = (
     "weekly",

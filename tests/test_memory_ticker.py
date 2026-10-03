@@ -185,7 +185,7 @@ def test_next_fire_from_signal_future_and_past():
 
 
 def test_classify_reason_and_already_enrolled():
-    assert classify_reason(stage=STAGE["no_show"]) == "no_show"
+    assert classify_reason(stage="no_show") == "no_show"
     assert classify_reason(text="Let's circle back next quarter") == "kicked_can"
     assert classify_reason(hint="never_booked") == "never_booked"
     assert classify_reason() == "never_booked"
