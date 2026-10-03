@@ -20,16 +20,19 @@ from crmbrain.nurture import (
     MEETING_GUARANTEE,
     NurtureDraft,
     apply_reenrollment,
+    attach_gmail_thread,
     build_nurture_card,
     collect_s1_positives,
     collect_s2_hubspot,
     collect_s3_gmail,
     compose_nurture_draft,
+    compose_nurture_subject,
     dry_run_report,
     fire_due_rows,
     fire_gate,
     has_meeting_qualification,
     infer_industry_resolved,
+    infer_nurture_reason,
     may_enroll_from_engagement,
     merge_candidates,
     next_fire_at_from_signal,
@@ -88,8 +91,46 @@ def make_settings(**kwargs) -> Settings:
 
 
 class FakeGmail:
-    def __init__(self):
+    def __init__(self, threads=None):
         self.sent: list[dict] = []
+        self.threads = threads or {}
+        self.searches: list[str] = []
+
+    def search(self, query, max_results=50):
+        del max_results
+        self.searches.append(query)
+        hit = self.threads.get(query) or next(
+            (v for k, v in self.threads.items() if k in query or query in k),
+            None,
+        )
+        if isinstance(hit, dict) and hit.get("thread_id"):
+            return [{"id": hit.get("message_id") or "m1", "threadId": hit["thread_id"]}]
+        return []
+
+    def get(self, message_id):
+        for hit in self.threads.values():
+            if not isinstance(hit, dict):
+                continue
+            if hit.get("message_id") == message_id or True:
+                return {
+                    "id": message_id,
+                    "threadId": hit.get("thread_id"),
+                    "payload": {
+                        "headers": [
+                            {"name": "Subject", "value": hit.get("original_subject") or ""},
+                            {"name": "Message-ID", "value": hit.get("in_reply_to") or ""},
+                        ]
+                    },
+                }
+        return {"id": message_id, "payload": {"headers": []}}
+
+    def find_contact_thread(self, email):
+        for key, hit in self.threads.items():
+            if email and email in key and isinstance(hit, dict):
+                return hit
+        if email in self.threads and isinstance(self.threads[email], dict):
+            return self.threads[email]
+        return None
 
     def send_thread_reply(self, to, subject, body, thread_id, in_reply_to="", references=""):
         self.sent.append(
@@ -353,24 +394,29 @@ def test_t22_t26_drafts():
     )
     first = d.body.split("\n", 1)[0].lower()
     assert "q4" in first or "timing" in first
-    assert d.subject == "Morgan?"
+    assert d.subject != "Morgan?"
+    assert "q4" in d.subject.lower() or "timing" in d.subject.lower()
 
     roof = compose_nurture_draft(
         {
             "name": "Pat Reyes",
+            "company": "Summit Roofs",
             "industry": "roofing",
             "last_touch_snippet": "Yes, send me info. Spring is our slow season.",
         }
     )
-    assert roof.subject == "Roofing?"
+    assert roof.subject != "Roofing?"
+    assert "MSP update" not in roof.subject
+    assert "spring" in roof.subject.lower() or "Summit" in roof.subject
     assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
     assert MEETING_GUARANTEE in roof.body
     assert roof.body.strip().endswith("Josh Osborn")
 
     gen = compose_nurture_draft(
-        {"name": "Casey Lin", "last_touch_snippet": "Maybe later this year."}
+        {"name": "Casey Lin", "company": "Lin Holdings", "last_touch_snippet": "Maybe later this year."}
     )
-    assert gen.subject == "Casey?"
+    assert gen.subject != "Casey?"
+    assert "later this year" in gen.subject.lower() or "Lin Holdings" in gen.subject
     assert "$2M" in gen.body and "$100K" in gen.body and "14+" in gen.body
     assert "Quick update" not in gen.subject
 
@@ -661,5 +707,147 @@ def test_fire_due_writes_cards_when_post_off(tmp_path: Path):
     cards = fire_due_rows(settings, memory, report)
     assert cards
     assert report.nurture_cards
-    assert cards[0]["subject"] == "Roofing?"
+    assert cards[0]["subject"] != "Roofing?"
+    assert "busy season" in cards[0]["subject"].lower() or "Kelly Roofing" in cards[0]["subject"]
     assert "Josh Osborn" in cards[0]["body"]
+
+
+def test_gmail_lookup_any_date_sent_and_inbox():
+    gmail = FakeGmail(
+        {
+            "brad@lord.test": {
+                "thread_id": "th-brad",
+                "message_id": "m-brad",
+                "original_subject": "Cyber intro",
+                "in_reply_to": "<brad@mail>",
+                "references": "<brad@mail>",
+            }
+        }
+    )
+    row = attach_gmail_thread({"name": "Bradley Lord", "email": "brad@lord.test"}, gmail)
+    assert row["thread_kind"] == "reply"
+    assert row["gmail_thread_id"] == "th-brad"
+    assert row["original_subject"] == "Cyber intro"
+    missing = attach_gmail_thread({"name": "New Person", "email": "nobody@none.test"}, FakeGmail())
+    assert missing["thread_kind"] == "new_thread"
+    assert not missing.get("gmail_thread_id")
+
+
+def test_send_without_thread_starts_new_one_to_one(tmp_path: Path):
+    settings = make_settings(nurture_send_enabled=True)
+    memory = Memory(settings, data_dir=tmp_path)
+    memory._local["ticker"] = [
+        {
+            "id": "t-new",
+            "name": "Pat Reyes",
+            "email": "pat@summitroofs.test",
+            "company": "Summit Roofs",
+            "status": "active",
+            "nurture_state": "queued",
+            "last_touch_snippet": "Yes, send me info. Spring is our slow season.",
+        }
+    ]
+    gmail = FakeGmail()
+    out = send_nurture_reply(settings, memory, "t-new", gmail=gmail, slack=FakeSlack(), channel="C", ts="1")
+    assert out["ok"] is True
+    assert out["thread_kind"] == "new_thread"
+    assert gmail.sent[0]["threadId"] == ""
+    assert memory.get_ticker("t-new")["thread_kind"] == "new_thread"
+
+
+def test_hubspot_meeting_evidence_is_not_never_booked():
+    rows = collect_s2_hubspot(
+        [
+            {
+                "id": "d1",
+                "dealstage": STAGE["proposal_sent"],
+                "last_activity": "2026-07-01T00:00:00+00:00",
+                "contact": {"id": "c1", "firstname": "Ari", "lastname": "Stone", "email": "stalled@fastpipe.test"},
+                "source_note": {"body": "Proposal is sitting.", "created": "2026-07-01T00:00:00+00:00"},
+                "fireflies": True,
+                "meeting_at": "2026-06-01T00:00:00+00:00",
+            }
+        ],
+        now=datetime(2026, 10, 2, tzinfo=timezone.utc),
+    )
+    assert rows
+    assert rows[0].reason != "never_booked"
+    assert rows[0].reason == "met"
+    assert infer_nurture_reason(deal_stage=STAGE["discovery_completed"], extra={"cube_acr": True}) == "met"
+    assert infer_nurture_reason(reason="no_show", extra={"booked": True}) == "booked"
+
+
+def test_opener_never_quotes_deal_name_or_wrong_capitalization():
+    draft = compose_nurture_draft(
+        {
+            "name": "robert Lawson",
+            "email": "robert@cyber.test",
+            "company": "CyberGuard360",
+            "dealname": "robert Lawson - CyberGuard360",
+            "last_touch_snippet": "robert Lawson - CyberGuard360",
+        }
+    )
+    opener = draft.body.split("\n", 1)[0]
+    assert opener.startswith("Hey Robert")
+    assert "you mentioned" not in opener.lower() or "cyberguard" not in opener.lower()
+    assert "robert Lawson - CyberGuard360" not in draft.body
+    assert "CyberGuard360" not in opener
+
+
+def test_bradley_lord_card_does_not_leak_lionel_francis():
+    row = {
+        "name": "Bradley Lord",
+        "email": "brad@lord.test",
+        "company": "Lord Security",
+        "dealname": "Lionel Francis - Acme",
+        "last_touch_snippet": "you mentioned lionel Francis on the CyberGuard call",
+        "reason": "met",
+        "deal_stage": STAGE["proposal_sent"],
+    }
+    draft = compose_nurture_draft(row)
+    blob = f"{draft.subject}\n{draft.body}".lower()
+    assert "lionel" not in blob
+    assert "francis" not in blob
+    card = build_nurture_card(row, draft)
+    text = json.dumps(card).lower()
+    assert "lionel" not in text
+    assert "francis" not in text
+
+
+def test_opener_excludes_personal_family_details():
+    draft = compose_nurture_draft(
+        {
+            "name": "Kevin Hagemoser",
+            "email": "kevin@hag.test",
+            "company": "Hagemoser",
+            "last_touch_snippet": "Kevin talked about his wife and son and their weekend plans.",
+        }
+    )
+    opener = draft.body.split("\n", 1)[0].lower()
+    assert "wife" not in opener
+    assert "son" not in opener
+    assert "you mentioned" not in opener
+
+
+def test_thread_reply_uses_original_subject_and_new_thread_is_specific():
+    reply = compose_nurture_draft(
+        {
+            "name": "Jackie Darkazalli",
+            "company": "Kelly Roofing",
+            "gmail_thread_id": "thread-jackie",
+            "original_subject": "Kelly Roofing intro",
+            "last_touch_snippet": "Check back after our busy season.",
+        }
+    )
+    assert reply.subject == "Re: Kelly Roofing intro"
+    fresh = compose_nurture_draft(
+        {
+            "name": "Lee Ng",
+            "company": "Bytewise",
+            "industry": "msp",
+            "last_touch_snippet": "We just lost our SDR, maybe now.",
+        }
+    )
+    assert fresh.subject != "MSP update"
+    assert fresh.subject != "Lee?"
+    assert "SDR" in fresh.subject or "Bytewise" in fresh.subject

@@ -74,6 +74,81 @@ _QUOTE_CUT = re.compile(
 )
 _NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _CANDIDATE_CAMPAIGN_RE = re.compile(r"\bcandidates?\b", re.I)
+_FAMILY_RE = re.compile(
+    r"\b(wife|husband|spouse|son|daughter|kids?|child(?:ren)?|family|mom|dad|"
+    r"brother|sister|girlfriend|boyfriend)\b",
+    re.I,
+)
+_DEAL_NAME_RE = re.compile(
+    r"^[A-Za-z][A-Za-z'’.\-]*(?:\s+[A-Za-z][A-Za-z'’.\-]*){0,3}\s+[-–—]\s+\S+",
+)
+_PERSON_NAME_RE = re.compile(r"\b([A-Za-z][A-Za-z'’.\-]{1,20})\s+([A-Za-z][A-Za-z'’.\-]{1,30})\b")
+_CRM_FIELD_RE = re.compile(
+    r"^(dealname|deal name|deal:|company:|source:|hs_|crm_|pipeline)\b",
+    re.I,
+)
+_NAME_STOP = frozenset(
+    {
+        "yes",
+        "send",
+        "info",
+        "spring",
+        "slow",
+        "season",
+        "check",
+        "back",
+        "after",
+        "busy",
+        "maybe",
+        "later",
+        "this",
+        "year",
+        "need",
+        "lost",
+        "just",
+        "interested",
+        "timing",
+        "until",
+        "ping",
+        "then",
+        "said",
+        "they",
+        "are",
+        "slammed",
+        "through",
+        "summer",
+        "fall",
+        "about",
+        "filling",
+        "shoulder",
+        "proposal",
+        "sitting",
+        "activity",
+        "since",
+        "august",
+        "concrete",
+        "talk",
+        "pour",
+        "fill",
+        "seats",
+        "before",
+        "our",
+        "the",
+        "and",
+        "but",
+        "for",
+        "you",
+        "mentioned",
+        "call",
+        "from",
+        "with",
+        "your",
+        "been",
+        "few",
+        "months",
+        "connected",
+    }
+)
 
 
 @dataclass
@@ -299,7 +374,14 @@ def merge_candidates(candidates: list[TickerCandidate]) -> list[TickerCandidate]
         extra["campaign"] = camp or extra.get("campaign") or ""
         extra["campaign_id"] = camp_id or extra.get("campaign_id") or ""
         extra["industry"] = industry
-        extra["last_touch_snippet"] = extra.get("last_touch_snippet") or other.extra.get("last_touch_snippet") or ""
+        own_email = (winner.email or "").strip().lower()
+        other_email = (other.email or "").strip().lower()
+        own_snip = extra.get("last_touch_snippet") or ""
+        other_snip = other.extra.get("last_touch_snippet") or ""
+        if own_email and other_email and own_email != other_email:
+            extra["last_touch_snippet"] = own_snip
+        else:
+            extra["last_touch_snippet"] = own_snip or other_snip
         winner.extra = extra
         if not winner.email:
             winner.email = other.email
@@ -356,7 +438,200 @@ def infer_industry_resolved(
 
 
 def _first_name(name: str) -> str:
-    return (name or "").strip().split(" ")[0] or "there"
+    raw = (name or "").strip().split(" ")[0] or "there"
+    if raw.lower() == "there":
+        return "there"
+    if raw.isupper() or raw.islower() or raw[:1].islower():
+        return raw[:1].upper() + raw[1:].lower()
+    return raw[:1].upper() + raw[1:]
+
+
+def _own_name_tokens(row: dict | None) -> set[str]:
+    text = " ".join(
+        str((row or {}).get(k) or "")
+        for k in ("name", "first_name", "last_name", "email")
+    )
+    tokens = {p.lower() for p in re.split(r"[^A-Za-z']+", text) if len(p) > 1}
+    email = str((row or {}).get("email") or "")
+    if "@" in email:
+        local = email.split("@", 1)[0]
+        tokens.update(p.lower() for p in re.split(r"[._\-]+", local) if len(p) > 1)
+    return tokens
+
+
+def looks_like_deal_name(snippet: str, row: dict | None = None) -> bool:
+    text = (snippet or "").strip()
+    if not text:
+        return False
+    dealname = str((row or {}).get("dealname") or (row or {}).get("deal_name") or "")
+    if dealname and text.lower() == dealname.strip().lower():
+        return True
+    if _DEAL_NAME_RE.match(text):
+        return True
+    if _CRM_FIELD_RE.match(text):
+        return True
+    return False
+
+
+def snippet_mentions_other_person(snippet: str, row: dict | None = None) -> bool:
+    """True when the snippet names a person who is not this contact."""
+    own = _own_name_tokens(row)
+    if not own:
+        return False
+    for match in _PERSON_NAME_RE.finditer(snippet or ""):
+        raw_first, raw_last = match.group(1), match.group(2)
+        first, last = raw_first.lower(), raw_last.lower()
+        if first in _NAME_STOP or last in _NAME_STOP:
+            continue
+        if len(first) < 3 or len(last) < 4:
+            continue
+        if not raw_last[:1].isupper():
+            continue
+        if first in own or last in own:
+            continue
+        return True
+    return False
+
+
+def _strip_crm_prefix(text: str) -> str:
+    out = re.sub(r"^source:\s*[^.]+\.\s*", "", text or "", flags=re.I).strip()
+    if _CRM_FIELD_RE.match(out) and len(out.split()) < 8:
+        return ""
+    return out
+
+
+def is_usable_speech_snippet(snippet: str, row: dict | None = None) -> bool:
+    text = _strip_crm_prefix(snippet_of(snippet or ""))
+    if len(text) < 8:
+        return False
+    if _FAMILY_RE.search(text):
+        return False
+    if looks_like_deal_name(text, row):
+        return False
+    if snippet_mentions_other_person(text, row):
+        return False
+    return True
+
+
+def scoped_snippet(snippet: str, row: dict | None = None) -> str:
+    """Keep only this contact's own speech. Drop deal names, family, other people."""
+    text = snippet_of(snippet or "")
+    if not is_usable_speech_snippet(text, row):
+        return ""
+    return text
+
+
+def infer_nurture_reason(
+    *,
+    reason: str = "",
+    deal_stage: str = "",
+    extra: dict | None = None,
+    booked: bool = False,
+    met: bool = False,
+) -> str:
+    """Prefer HubSpot/Fireflies/Cube meeting evidence over default never_booked."""
+    extra = extra or {}
+    stage = str(deal_stage or extra.get("deal_stage") or "")
+    met_flag = bool(met or extra.get("met") or extra.get("has_meeting") or extra.get("meeting_at"))
+    booked_flag = bool(booked or extra.get("booked") or extra.get("has_meeting"))
+    source = str(extra.get("meeting_source") or extra.get("evidence_source") or extra.get("source") or "")
+    if source in MEETING_ENROLL_SOURCES:
+        met_flag = True
+    if extra.get("fireflies") or extra.get("cube_acr") or extra.get("cube"):
+        met_flag = True
+    met_stages = {
+        stage
+        for stage in (
+            STAGE.get("discovery_held"),
+            STAGE["discovery_completed"],
+            STAGE["proposal_sent"],
+            STAGE.get("needs_stakeholder_approval"),
+            STAGE["nurture"],
+        )
+        if stage
+    }
+    booked_stages = {
+        stage
+        for stage in (
+            STAGE.get("meeting_booked"),
+            STAGE["discovery_scheduled"],
+            STAGE.get("no_show"),
+        )
+        if stage
+    }
+    if met_flag or stage in met_stages:
+        if reason == "kicked_can" and stage == STAGE["nurture"]:
+            return "kicked_can"
+        if stage == STAGE["nurture"] and not met_flag:
+            return reason or "met"
+        return "met"
+    if booked_flag or reason == "no_show" or stage in booked_stages:
+        return "booked"
+    if reason in {"kicked_can", "timing_later"}:
+        return "kicked_can"
+    return reason or "never_booked"
+
+
+def attach_gmail_thread(row: dict, gmail=None) -> dict:
+    """Fill thread ids from any-date sent+inbox search. Else mark new_thread."""
+    out = dict(row or {})
+    existing = str(out.get("gmail_thread_id") or out.get("thread_id") or "")
+    if existing:
+        out["gmail_thread_id"] = existing
+        out["thread_kind"] = "reply"
+        return out
+    email = str(out.get("email") or "")
+    found = None
+    finder = getattr(gmail, "find_contact_thread", None) if gmail is not None else None
+    if callable(finder) and email:
+        try:
+            found = finder(email)
+        except Exception:
+            found = None
+    if found and found.get("thread_id"):
+        out["gmail_thread_id"] = found["thread_id"]
+        out["thread_id"] = found["thread_id"]
+        out["original_subject"] = found.get("original_subject") or out.get("original_subject") or ""
+        out["in_reply_to"] = found.get("in_reply_to") or out.get("in_reply_to") or ""
+        out["references"] = found.get("references") or out.get("references") or ""
+        out["thread_kind"] = "reply"
+        return out
+    out["gmail_thread_id"] = ""
+    out["thread_kind"] = "new_thread"
+    return out
+
+
+def _topic_from_snippet(snippet: str) -> str:
+    clean = snippet_of(snippet, 80)
+    clean = re.sub(r"^(yes[,.]?\s*|hey\s+\w+[,.]?\s*)", "", clean, flags=re.I)
+    part = re.split(r"[.!?]", clean)[0].strip()
+    part = re.sub(r"^(i |we |they |you )", "", part, flags=re.I)
+    if len(part) > 52:
+        part = part[:52].rsplit(" ", 1)[0]
+    return part.strip(" ,")
+
+
+def compose_nurture_subject(row: dict) -> str:
+    original = str(row.get("original_subject") or row.get("gmail_subject") or "").strip()
+    thread_id = str(row.get("gmail_thread_id") or row.get("thread_id") or "")
+    if thread_id and original:
+        return thread_reply_headers(original)["Subject"]
+    usable = scoped_snippet(_strip_poc_phrases(str(row.get("last_touch_snippet") or "")), row)
+    topic = _topic_from_snippet(usable)
+    company = str(row.get("company") or "").strip()
+    if company and topic:
+        if company.lower() in topic.lower():
+            subject = topic
+        else:
+            subject = f"{company}: {topic}"
+        if len(subject) > 70:
+            subject = company
+        return _no_dashes(subject)
+    if company:
+        return _no_dashes(f"{company} follow up")
+    if topic:
+        return _no_dashes(topic)
+    return "Quick follow up"
 
 
 def _airpods_line() -> str:
@@ -390,16 +665,18 @@ def _strip_poc_phrases(text: str) -> str:
     return out
 
 
-def _opener_from_snippet(first: str, snippet: str, campaign: str = "") -> str:
-    clean = _strip_poc_phrases(snippet_of(snippet, 180))
-    clean = _no_dashes(clean)
-    if clean:
-        low = clean.rstrip(".")
-        return f"Hey {first}, you mentioned {low[0].lower() + low[1:] if low else low}."
+def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict | None = None) -> str:
+    first = _first_name(first)
+    usable = scoped_snippet(_strip_poc_phrases(snippet), row)
+    usable = _no_dashes(_strip_crm_prefix(usable))
+    if usable:
+        low = usable.rstrip(".")
+        spoken = low[0].lower() + low[1:] if low else low
+        return f"Hey {first}, you mentioned {spoken}."
     topic = ""
-    if campaign:
-        topic = re.sub(r"salesglider\s*", "", campaign, flags=re.I).strip() or campaign
-    if topic:
+    if campaign and not looks_like_deal_name(campaign, row):
+        topic = re.sub(r"salesglider\s*", "", campaign, flags=re.I).strip() or ""
+    if topic and not snippet_mentions_other_person(topic, row) and not _FAMILY_RE.search(topic):
         return f"Hey {first}, you replied a while back when we reached out about {topic}."
     return f"Hey {first}, it's been a few months since we connected."
 
@@ -422,9 +699,9 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
             website_text=str(row.get("website_text") or ""),
             hs_industry=str(row.get("hs_industry") or ""),
         )
-    snippet = str(row.get("last_touch_snippet") or "")
+    snippet = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)
     use_airpods = AIRPODS_OFFER_LIVE if airpods is None else airpods
-    opener = _no_dashes(_opener_from_snippet(first, snippet, campaign))
+    opener = _no_dashes(_opener_from_snippet(first, snippet, campaign, row))
     proof = _proof_line(industry)
     cta = MEETING_GUARANTEE
     if use_airpods:
@@ -432,13 +709,7 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
     body = _no_dashes(
         f"{opener}\n\n{proof}\n\n{cta}\n\nWorth a look?\n\nJosh Osborn"
     )
-    if industry and industry in INDUSTRY_SUBJECTS:
-        subject = INDUSTRY_SUBJECTS[industry]
-    elif first and first.lower() != "there":
-        subject = f"{first}?"
-    else:
-        subject = "Quick update"
-    subject = _no_dashes(subject)
+    subject = compose_nurture_subject({**row, "last_touch_snippet": snippet})
     draft = NurtureDraft(subject=subject, body=body)
     return validate_draft(draft, row)
 
@@ -514,7 +785,6 @@ def nurture_row_from_candidate(c: TickerCandidate, now: datetime | None = None) 
         "company": c.company or None,
         "hs_contact_id": c.hs_contact_id or None,
         "hs_deal_id": c.hs_deal_id or None,
-        "reason": c.reason,
         "status": "active",
         "source": c.source or None,
         "source_ref": extra.get("source_ref") or None,
@@ -523,10 +793,19 @@ def nurture_row_from_candidate(c: TickerCandidate, now: datetime | None = None) 
         "campaign_id": str(extra.get("campaign_id") or "") or None,
         "industry": industry,
         "industry_basis": basis,
-        "last_touch_snippet": snippet_of(str(extra.get("last_touch_snippet") or "")),
+        "last_touch_snippet": scoped_snippet(str(extra.get("last_touch_snippet") or ""), extra | {"name": c.name, "email": c.email}),
         "gmail_thread_id": extra.get("gmail_thread_id") or extra.get("thread_id") or None,
+        "original_subject": extra.get("original_subject") or extra.get("gmail_subject") or None,
+        "thread_kind": extra.get("thread_kind") or ("reply" if extra.get("gmail_thread_id") or extra.get("thread_id") else "new_thread"),
         "in_reply_to": extra.get("in_reply_to") or None,
         "references": extra.get("references") or None,
+        "reason": infer_nurture_reason(
+            reason=c.reason,
+            deal_stage=str(extra.get("deal_stage") or ""),
+            extra=extra,
+            booked=bool(extra.get("booked")),
+            met=bool(extra.get("met")),
+        ),
         "next_fire_at": fire.isoformat(),
         "nurture_state": "queued",
     }
@@ -600,14 +879,24 @@ def apply_reenrollment(existing: list[dict], candidate: TickerCandidate, now: da
 def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
     signal = parse_signal_at(row.get("signal_at"))
     signal_line = signal.astimezone(CDT).strftime("%b %-d, %Y") if signal else "unknown"
-    snippet = str(row.get("last_touch_snippet") or "")[:120]
+    snippet = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)[:120]
     source = row.get("source") or "unknown"
     campaign = row.get("campaign") or ""
     ticker_id = str(row.get("id") or "")
+    thread_kind = str(row.get("thread_kind") or ("reply" if row.get("gmail_thread_id") else "new_thread"))
+    thread_label = "new thread" if thread_kind == "new_thread" else "thread reply"
+    why = infer_nurture_reason(
+        reason=str(row.get("reason") or ""),
+        deal_stage=str(row.get("deal_stage") or ""),
+        extra=row.get("extra") if isinstance(row.get("extra"), dict) else row,
+        booked=bool((row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
+        met=bool((row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
+    )
     fallback = (
         f"90-day ticker (approve before send)\n"
         f"To: {row.get('email') or row.get('phone')}\n"
-        f"Why: {row.get('reason')}\n"
+        f"Why: {why}\n"
+        f"Thread: {thread_label}\n"
         f"Source: {source} / {campaign}\n"
         f"Signal: {signal_line}\n"
         f'They said: "{snippet}"\n'
@@ -624,7 +913,8 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
                 "type": "mrkdwn",
                 "text": (
                     f"*To:* {row.get('email') or row.get('phone') or row.get('name')}\n"
-                    f"*Why:* {row.get('reason') or 'nurture'}\n"
+                    f"*Why:* {why}\n"
+                    f"*Thread:* {thread_label}\n"
                     f"*Source:* {source} / {campaign or '-'}\n"
                     f"*Signal:* {signal_line}\n"
                     f'*They said:* "{snippet}"'
@@ -670,7 +960,7 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
 
 def outcome_blocks(row: dict, outcome: str, detail: str = "") -> list[dict]:
     label = {
-        "sent": "Sent from Josh's Gmail as a thread reply. Removed from nurture for 90 days.",
+        "sent": "Sent from Josh's Gmail as a thread reply or new 1:1. Removed from nurture for 90 days.",
         "removed": "Removed from nurture permanently. Ticker row stopped.",
         "already_sent": "Already sent. Buttons are locked (idempotent).",
         "already_removed": "Already removed. Buttons are locked.",
@@ -864,6 +1154,7 @@ def fire_due_rows(
     *,
     now: datetime | None = None,
     slack=None,
+    gmail=None,
 ) -> list[dict]:
     """Evaluate due ticker rows. Post Block Kit only when NURTURE_POST_ENABLED."""
     now = _aware(now or now_utc())
@@ -904,6 +1195,15 @@ def fire_due_rows(
                     memory.bump_ticker(str(row.get("id") or row.get("email")), patch["next_fire_at"], now.isoformat())
             report.ticker_skipped.append(f"{row.get('email') or row.get('name')} {reason}")
             continue
+        row = attach_gmail_thread(row, gmail)
+        row["reason"] = infer_nurture_reason(
+            reason=str(row.get("reason") or ""),
+            deal_stage=str(row.get("deal_stage") or ""),
+            extra=row.get("extra") if isinstance(row.get("extra"), dict) else row,
+            booked=bool(row.get("booked") or (row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
+            met=bool(row.get("met") or (row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
+        )
+        row["last_touch_snippet"] = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)
         draft = compose_nurture_draft(row)
         if not draft.valid:
             report.review_queue.append(f"{row.get('name')} G7 {draft.reject_reason}")
@@ -989,7 +1289,10 @@ def collect_s1_positives(campaigns: list[dict], leads: list[dict], histories: di
             "campaign": camp.get("name") or lead.get("campaign") or "",
             "campaign_id": camp.get("id") or lead.get("campaign_id"),
             "source_ref": f"smartlead:{camp.get('id') or lead.get('campaign_id')}:{lead.get('lead_id')}",
-            "last_touch_snippet": snippet_of((inbound or {}).get("email_body") or (inbound or {}).get("body") or ""),
+            "last_touch_snippet": scoped_snippet(
+                (inbound or {}).get("email_body") or (inbound or {}).get("body") or "",
+                {"name": f"{lead.get('first_name') or ''} {lead.get('last_name') or ''}".strip() or lead.get("name") or "", "email": lead.get("email") or ""},
+            ),
             "client_campaign": bool(camp.get("client_campaign") or lead.get("client_campaign")),
             "booked": bool(lead.get("booked") or lead.get("met") or camp.get("booked")),
             "met": bool(lead.get("met")),
@@ -999,7 +1302,11 @@ def collect_s1_positives(campaigns: list[dict], leads: list[dict], histories: di
             name=name,
             email=str(lead.get("email") or ""),
             company=str(lead.get("company") or ""),
-            reason="never_booked",
+            reason=infer_nurture_reason(
+                extra=extra,
+                booked=bool(extra.get("booked")),
+                met=bool(extra.get("met")),
+            ),
             last_signal=parse_signal_at((inbound or {}).get("time") or (inbound or {}).get("date")) if inbound else None,
             source="smartlead",
             extra=extra,
@@ -1030,26 +1337,59 @@ def collect_s2_hubspot(deals: list[dict], *, now: datetime | None = None) -> lis
         signal = note_at or last_activity
         if not signal:
             continue
-        snippet = snippet_of(str(note.get("body") or deal.get("snippet") or ""))
+        contact_row = {
+            "name": f"{contact.get('firstname') or ''} {contact.get('lastname') or ''}".strip() or deal.get("contact_name") or "",
+            "email": contact.get("email") or deal.get("contact_email") or "",
+            "dealname": deal.get("dealname") or (deal.get("properties") or {}).get("dealname") or "",
+        }
+        raw_note = str(note.get("body") or "")
+        raw_snip = str(deal.get("snippet") or "")
         campaign = ""
-        if snippet.lower().startswith("source:"):
-            first = snippet.split(".", 1)[0]
+        source_blob = raw_note or raw_snip
+        if source_blob.lower().startswith("source:"):
+            first = source_blob.split(".", 1)[0]
             campaign = first.split(":", 1)[-1].strip()
+        if looks_like_deal_name(raw_snip, contact_row) or raw_snip.lower() == str(contact_row.get("dealname") or "").lower():
+            raw_snip = ""
+        snippet = scoped_snippet(raw_note or raw_snip, contact_row) or (
+            snippet_of(raw_note) if raw_note.lower().startswith("source:") else ""
+        )
         extra = {
             "source_ref": f"hubspot:deal:{deal.get('id')}:contact:{contact.get('id') or ''}",
             "last_touch_snippet": snippet,
             "campaign": campaign or deal.get("campaign") or "",
             "deal_stage": stage,
             "booked": True,
+            "met": bool(
+                deal.get("met")
+                or deal.get("fireflies")
+                or deal.get("cube_acr")
+                or deal.get("meeting_at")
+                or stage
+                in {
+                    STAGE["discovery_completed"],
+                    STAGE["proposal_sent"],
+                    STAGE["nurture"],
+                }
+            ),
+            "fireflies": deal.get("fireflies"),
+            "cube_acr": deal.get("cube_acr") or deal.get("cube"),
+            "meeting_at": deal.get("meeting_at"),
             "website_text": deal.get("website_text") or contact.get("website_text") or "",
         }
-        name = f"{contact.get('firstname') or ''} {contact.get('lastname') or ''}".strip() or deal.get("contact_name") or ""
+        name = contact_row["name"]
         out.append(
             TickerCandidate(
                 name=name,
                 email=str(contact.get("email") or deal.get("contact_email") or ""),
                 company=str(contact.get("company") or ""),
-                reason="kicked_can" if is_nurture else "never_booked",
+                reason=infer_nurture_reason(
+                    reason="kicked_can" if is_nurture else "",
+                    deal_stage=stage,
+                    extra=extra,
+                    booked=True,
+                    met=bool(extra.get("met")),
+                ),
                 last_signal=signal,
                 hs_contact_id=str(contact.get("id") or ""),
                 hs_deal_id=str(deal.get("id") or ""),
@@ -1073,21 +1413,34 @@ def collect_s3_gmail(threads: list[dict]) -> list[TickerCandidate]:
             inbound = msg
         if not inbound:
             continue
+        contact_row = {
+            "name": str(thread.get("name") or inbound.get("name") or ""),
+            "email": str(thread.get("email") or inbound.get("from") or ""),
+        }
         extra = {
             "source_ref": f"gmail:{thread.get('thread_id')}",
-            "last_touch_snippet": snippet_of(str(inbound.get("body") or "")),
+            "last_touch_snippet": scoped_snippet(str(inbound.get("body") or ""), contact_row),
             "gmail_thread_id": thread.get("thread_id"),
             "thread_id": thread.get("thread_id"),
+            "original_subject": thread.get("subject") or inbound.get("subject") or "",
+            "thread_kind": "reply" if thread.get("thread_id") else "new_thread",
             "in_reply_to": inbound.get("message_id") or inbound.get("Message-ID") or "",
             "references": inbound.get("references") or inbound.get("message_id") or "",
             "booked": bool(thread.get("booked") or thread.get("met")),
-            "met": bool(thread.get("met")),
+            "met": bool(thread.get("met") or thread.get("fireflies") or thread.get("cube_acr")),
+            "fireflies": thread.get("fireflies"),
+            "cube_acr": thread.get("cube_acr"),
         }
         out.append(
             TickerCandidate(
-                name=str(thread.get("name") or inbound.get("name") or ""),
-                email=str(thread.get("email") or inbound.get("from") or ""),
-                reason="kicked_can" if thread.get("intent") == "timing_later" else "never_booked",
+                name=contact_row["name"],
+                email=contact_row["email"],
+                reason=infer_nurture_reason(
+                    reason="kicked_can" if thread.get("intent") == "timing_later" else "",
+                    extra=extra,
+                    booked=bool(extra.get("booked")),
+                    met=bool(extra.get("met")),
+                ),
                 last_signal=parse_signal_at(inbound.get("date")),
                 source="gmail",
                 extra=extra,
@@ -1113,6 +1466,8 @@ def sample_card_rows() -> list[dict]:
             "signal_at": "2026-07-01T16:00:00+00:00",
             "last_touch_snippet": "Check back after our busy season. Roofing crews are slammed until fall.",
             "gmail_thread_id": "thread-jackie",
+            "original_subject": "Kelly Roofing intro",
+            "thread_kind": "reply",
             "in_reply_to": "<jackie-orig@mail>",
         },
         {
@@ -1129,6 +1484,8 @@ def sample_card_rows() -> list[dict]:
             "signal_at": "2026-07-10T16:00:00+00:00",
             "last_touch_snippet": "We are slammed through summer, check back in the fall about filling shoulder season.",
             "gmail_thread_id": "thread-joel",
+            "original_subject": "HVAC shoulder season",
+            "thread_kind": "reply",
         },
         {
             "id": "sample-dana",
@@ -1142,19 +1499,21 @@ def sample_card_rows() -> list[dict]:
             "industry_basis": "campaign",
             "signal_at": "2026-07-10T16:00:00+00:00",
             "last_touch_snippet": "Dana said they are slammed through summer, check back in the fall.",
+            "thread_kind": "new_thread",
         },
         {
             "id": "sample-pat",
             "name": "Pat Reyes",
             "email": "pat@summitroofs.test",
             "company": "Summit Roofs",
-            "reason": "never_booked",
+            "reason": "booked",
             "source": "smartlead",
             "campaign": "SalesGlider Roofers",
             "industry": "roofing",
             "industry_basis": "campaign",
             "signal_at": "2026-06-03T17:20:00+00:00",
             "last_touch_snippet": "Yes, send me info. Spring is our slow season.",
+            "thread_kind": "new_thread",
             "extra": {"booked": True},
         },
         {
@@ -1168,6 +1527,7 @@ def sample_card_rows() -> list[dict]:
             "industry": None,
             "signal_at": "2026-08-01T12:00:00+00:00",
             "last_touch_snippet": "Maybe later this year.",
+            "thread_kind": "new_thread",
         },
         {
             "id": "sample-morgan",
@@ -1181,6 +1541,8 @@ def sample_card_rows() -> list[dict]:
             "signal_at": "2026-06-21T18:30:00+00:00",
             "last_touch_snippet": "Interested but timing is bad until Q4. Ping me then.",
             "gmail_thread_id": "t-777",
+            "original_subject": "Q4 follow up",
+            "thread_kind": "reply",
             "in_reply_to": "<morgan-q4@mail>",
             "references": "<morgan-q4@mail>",
         },
@@ -1189,13 +1551,14 @@ def sample_card_rows() -> list[dict]:
             "name": "Lee Ng",
             "email": "lee@bytewise.test",
             "company": "Bytewise",
-            "reason": "never_booked",
+            "reason": "booked",
             "source": "smartlead",
             "campaign": "SalesGlider MSPs",
             "industry": "msp",
             "industry_basis": "campaign",
             "signal_at": "2026-06-15T12:00:00+00:00",
             "last_touch_snippet": "We just lost our SDR, maybe now.",
+            "thread_kind": "new_thread",
             "extra": {"booked": True},
         },
         {
@@ -1210,6 +1573,8 @@ def sample_card_rows() -> list[dict]:
             "deal_stage": STAGE["proposal_sent"],
             "signal_at": "2026-08-18T15:00:00+00:00",
             "last_touch_snippet": "Proposal is sitting. No activity since mid-August.",
+            "thread_kind": "new_thread",
+            "met": True,
         },
         {
             "id": "sample-earl",
@@ -1223,19 +1588,22 @@ def sample_card_rows() -> list[dict]:
             "industry_basis": "website",
             "signal_at": "2026-07-20T15:00:00+00:00",
             "last_touch_snippet": "Concrete season is busy. Let's talk after this pour.",
+            "thread_kind": "new_thread",
         },
         {
             "id": "sample-sam",
             "name": "Sam Cole",
             "email": "sam@hireright.test",
             "company": "HireRight",
-            "reason": "never_booked",
+            "reason": "met",
             "source": "hubspot",
             "campaign": "SalesGlider Staffing",
             "industry": "staffing",
             "industry_basis": "campaign",
             "signal_at": "2026-06-10T12:00:00+00:00",
             "last_touch_snippet": "Need to fill two AE seats before Q4.",
+            "thread_kind": "new_thread",
+            "deal_stage": STAGE["discovery_completed"],
         },
     ]
     del now
@@ -1247,12 +1615,21 @@ def render_sample_cards(rows: list[dict] | None = None) -> list[dict]:
     for row in rows or sample_card_rows():
         draft = compose_nurture_draft(row)
         card = build_nurture_card(row, draft)
+        attached = attach_gmail_thread(row, None)
         cards.append(
             {
                 "name": row.get("name"),
                 "email": row.get("email"),
                 "source": row.get("source"),
                 "industry": row.get("industry"),
+                "reason": infer_nurture_reason(
+                    reason=str(row.get("reason") or ""),
+                    deal_stage=str(row.get("deal_stage") or ""),
+                    extra=row.get("extra") if isinstance(row.get("extra"), dict) else row,
+                    booked=bool((row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
+                    met=bool((row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
+                ),
+                "thread_kind": attached.get("thread_kind") or row.get("thread_kind") or "new_thread",
                 "subject": draft.subject,
                 "body": draft.body,
                 "valid": draft.valid,

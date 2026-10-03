@@ -13,6 +13,7 @@ from crmbrain.nurture import (
     ACTION_EDIT,
     ACTION_REMOVE,
     VIEW_EDIT,
+    attach_gmail_thread,
     compose_nurture_draft,
     cooldown_until,
     edit_modal,
@@ -83,6 +84,13 @@ def send_nurture_reply(
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
         _confirm(settings, slack, channel, ts, row, blocked, "Send blocked.")
         return {"ok": False, "outcome": blocked, "ticker_id": ticker_id}
+    to = str(row.get("email") or "")
+    if not to:
+        memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
+        _confirm(settings, slack, channel, ts, row, "error", "Missing email.")
+        return {"ok": False, "outcome": "error", "reason": "no_email"}
+    client = gmail or Gmail(settings)
+    row = attach_gmail_thread(row, client)
     draft = compose_nurture_draft(row)
     sub = subject if subject is not None else (row.get("draft_subject") or draft.subject)
     bod = body if body is not None else (row.get("draft_body") or draft.body)
@@ -91,13 +99,18 @@ def send_nurture_reply(
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
         _confirm(settings, slack, channel, ts, row, "error", f"G7 {checked.reject_reason}")
         return {"ok": False, "outcome": "error", "reason": checked.reject_reason}
-    to = str(row.get("email") or "")
     thread_id = str(row.get("gmail_thread_id") or row.get("thread_id") or "")
-    if not to or not thread_id:
-        memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
-        _confirm(settings, slack, channel, ts, row, "error", "Missing email or threadId.")
-        return {"ok": False, "outcome": "error", "reason": "no_thread"}
-    client = gmail or Gmail(settings)
+    thread_kind = str(row.get("thread_kind") or ("reply" if thread_id else "new_thread"))
+    memory.patch_ticker(
+        ticker_id,
+        {
+            "gmail_thread_id": thread_id or None,
+            "original_subject": row.get("original_subject") or None,
+            "in_reply_to": row.get("in_reply_to") or None,
+            "references": row.get("references") or None,
+            "thread_kind": thread_kind,
+        },
+    )
     try:
         sent = client.send_thread_reply(
             to=to,
@@ -121,10 +134,17 @@ def send_nurture_reply(
             "next_fire_at": cool.isoformat(),
             "last_sent_at": now_utc().isoformat(),
             "gmail_message_id": (sent or {}).get("id") if isinstance(sent, dict) else "",
+            "thread_kind": thread_kind,
         },
     )
     _confirm(settings, slack, channel, ts, row, "sent")
-    return {"ok": True, "outcome": "sent", "ticker_id": ticker_id, "cooldown_until": cool.isoformat()}
+    return {
+        "ok": True,
+        "outcome": "sent",
+        "ticker_id": ticker_id,
+        "cooldown_until": cool.isoformat(),
+        "thread_kind": thread_kind,
+    }
 
 
 def remove_from_nurture(

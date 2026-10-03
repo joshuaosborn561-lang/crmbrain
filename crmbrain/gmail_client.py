@@ -219,6 +219,39 @@ class Gmail:
         resp.raise_for_status()
         return resp.json().get("messages", [])
 
+    def find_contact_thread(self, email: str) -> dict[str, str] | None:
+        """Any-date sent+inbox thread for this contact. No after:/before: filter."""
+        addr = (email or "").strip()
+        if not addr or "@" not in addr:
+            return None
+        query = f"(from:{addr} OR to:{addr}) (in:inbox OR in:sent) -in:chats"
+        try:
+            stubs = self.search(query, max_results=15)
+        except Exception as exc:
+            logger.warning("gmail find_contact_thread search failed: %s", exc)
+            return None
+        for stub in stubs or []:
+            mid = str((stub or {}).get("id") or "")
+            if not mid:
+                continue
+            try:
+                msg = self.get(mid)
+            except Exception as exc:
+                logger.warning("gmail find_contact_thread get %s failed: %s", mid, exc)
+                continue
+            headers = self.headers_map(msg)
+            thread_id = str(msg.get("threadId") or stub.get("threadId") or "")
+            if not thread_id:
+                continue
+            return {
+                "thread_id": thread_id,
+                "message_id": mid,
+                "original_subject": headers.get("subject") or "",
+                "in_reply_to": headers.get("message-id") or "",
+                "references": headers.get("references") or headers.get("message-id") or "",
+            }
+        return None
+
     def get(self, message_id: str) -> dict[str, Any]:
         resp = self._request(
             "GET",

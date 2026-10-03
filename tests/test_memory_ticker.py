@@ -272,7 +272,8 @@ def test_fire_ticker_posts_subject_and_body_for_approval(tmp_path: Path, monkeyp
     assert "90-day ticker (approve before send)" in card["text"]
     assert "To: jackie@kellyroofing.com" in card["text"]
     assert "Why: kicked_can" in card["text"]
-    assert card["subject"] == "Roofing?"
+    assert card["subject"] != "Roofing?"
+    assert "busy season" in card["subject"].lower() or "Kelly Roofing" in card["subject"]
     assert "Josh Osborn" in card["body"]
     assert "$100K" in card["body"]
     assert report.ticker_drafts == ["jackie@kellyroofing.com"]
