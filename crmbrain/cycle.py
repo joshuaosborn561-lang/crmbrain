@@ -285,13 +285,19 @@ def _propose_engagement(
     action = "create" if not already else "update"
     if action == "create" and not stage:
         return
+    raw_amount = str(getattr(decision, "amount", "") or "")
+    amount = ""
+    if raw_amount:
+        amount = intelligence.deal_amount_to_write(None, raw_amount, ev=ev) or ""
     propose_deal_write(
         report,
         action=action,
         label=ev.display_name() or ev.email or ev.phone,
         stage=stage,
+        amount=amount,
         reason=decision.reason,
         contact_id=str((already or {}).get("id") or ""),
+        ev=ev,
     )
     if not intent.is_confident_sales(decision) and not intent.is_confident_non_sales(decision):
         report.review_queue.append(
@@ -539,6 +545,7 @@ def _handle_engagement(
                     contact_id=str(already.get("id") or ""),
                     deal_id=str((deal_row or {}).get("id") or ""),
                     reason=reason,
+                    ev=ev,
                 )
                 logger.info(
                     "reextract preview %s stage %s amount %s (%s)",
@@ -1232,6 +1239,7 @@ def apply_gmail_stage_update(
                     contact_id=str(contact_id),
                     deal_id=str((deal_ns or {}).get("id") or ""),
                     reason="held_beats_noshow",
+                    ev=gate_ev,
                 )
                 return
             if not _reserve_budget(budget, promote_kind, memory, report, ev):
@@ -1328,6 +1336,7 @@ def apply_gmail_stage_update(
                 contact_id=str(contact_id),
                 deal_id=str((deal_row or {}).get("id") or ""),
                 reason="gmail",
+                ev=ev,
             )
             return
         if gmail_kind and not _reserve_budget(budget, gmail_kind, memory, report, ev):

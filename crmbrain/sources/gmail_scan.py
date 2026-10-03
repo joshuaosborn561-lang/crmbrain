@@ -699,6 +699,10 @@ def scan_people(
             try:
                 msg = gmail.get(mid)
             except Exception as exc:
+                from crmbrain.gmail_client import is_gmail_rate_limit_exc
+
+                if is_gmail_rate_limit_exc(exc):
+                    raise
                 if report is not None:
                     report.skipped.append(f"gmail_person:{mid} {exc}")
                     report.warnings.append(f"gmail_person skipped {mid}")

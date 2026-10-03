@@ -409,6 +409,49 @@ class HubSpot:
                 contacts.append(c.json())
         return contacts
 
+    def associated_company_industry(self, *, contact_id: str = "", deal_id: str = "") -> str:
+        """HubSpot company.industry for the associated company — not the contact field."""
+        cache = getattr(self, "_company_industry_cache", None)
+        if cache is None:
+            self._company_industry_cache = {}
+            cache = self._company_industry_cache
+        for kind, oid in (("contact", contact_id), ("deal", deal_id)):
+            key = f"{kind}:{oid}"
+            if not oid:
+                continue
+            if key in cache:
+                if cache[key]:
+                    return cache[key]
+                continue
+            from_object = "contacts" if kind == "contact" else "deals"
+            resp = self._request(
+                "GET",
+                f"/crm/v4/objects/{from_object}/{oid}/associations/companies",
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
+            industry = ""
+            if resp.ok:
+                company_id = ""
+                for row in resp.json().get("results") or []:
+                    company_id = str(row.get("toObjectId") or row.get("id") or "")
+                    if company_id:
+                        break
+                if company_id:
+                    c = self._request(
+                        "GET",
+                        f"/crm/v3/objects/companies/{company_id}",
+                        params={"properties": "name,industry"},
+                        retry=True,
+                        timeout=20,
+                    )
+                    if c.ok:
+                        industry = str((c.json().get("properties") or {}).get("industry") or "").strip()
+            cache[key] = industry
+            if industry:
+                return industry
+        return ""
+
     def find_contact(self, email: str = "", phone: str = "", name: str = "") -> dict | None:
         if email and is_zoom_room_address(email):
             return None

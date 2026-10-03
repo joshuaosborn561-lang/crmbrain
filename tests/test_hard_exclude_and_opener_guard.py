@@ -335,6 +335,47 @@ def test_sample_cards_come_from_hubspot_nurture_and_skip_exclusions(tmp_path):
     assert "Quick follow up" not in jackie["subject"]
 
 
+class _CompanyIndustryHS(_FakeNurtureHS):
+    def __init__(self):
+        super().__init__()
+        self.deals["nurture"].append(
+            {
+                "id": "d-rlp",
+                "properties": {
+                    "dealname": "Alex Rivera - RLP Mechanical",
+                    "dealstage": STAGE["nurture"],
+                    "pipeline": "default",
+                    "createdate": "2026-04-12T15:00:00Z",
+                },
+            }
+        )
+        self.contacts["d-rlp"] = [
+            {
+                "id": "c-rlp",
+                "properties": {
+                    "firstname": "Alex",
+                    "lastname": "Rivera",
+                    "email": "alex@rlpmechanical.test",
+                    "company": "RLP Mechanical",
+                },
+            }
+        ]
+
+    def associated_company_industry(self, *, contact_id="", deal_id=""):
+        if contact_id == "c-rlp" or deal_id == "d-rlp":
+            return "Mechanical or Industrial Engineering"
+        return ""
+
+
+def test_sample_cards_read_company_industry_and_name_keywords(tmp_path):
+    settings = make_settings()
+    payload = sample_hubspot_nurture_cards(
+        settings, 10, hs=_CompanyIndustryHS(), out_path=str(tmp_path / "cards.json")
+    )
+    alex = next(c for c in payload["cards"] if c["email"] == "alex@rlpmechanical.test")
+    assert "trades" in alex["body"].lower() or "$2M" in alex["body"]
+
+
 class _CompanyHS(_FakeNurtureHS):
     def __init__(self):
         super().__init__()

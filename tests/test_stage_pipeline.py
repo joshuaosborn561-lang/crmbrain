@@ -456,3 +456,146 @@ def test_bolder_renewal_needs_evidenced_call():
     assert is_evidenced_renewal_call(cal)
     assert maybe_schedule_renewal_call(hs, [renewal], cal) is not None
     assert renewal["properties"]["dealstage"] == RENEWAL_STAGE["call_scheduled"]
+
+
+def test_intro_and_unquoted_gmail_never_set_amount():
+    from crmbrain.cycle import _propose_engagement
+    from crmbrain.deal_write import authorize_deal_write, propose_deal_write
+    from crmbrain.intelligence import deal_amount_to_write
+    from crmbrain.models import CycleReport, IntentDecision
+
+    intro = Engagement(
+        source="gmail",
+        external_id="g-kevin-intro",
+        email="kevin@kevinhagemoser.com",
+        name="Kevin Hagemoser",
+        raw_subject="SalesGlider Intro",
+        summary="Great to meet you on the intro.",
+        extra={"deal_terms": {"quote": "Sales evidence 83234", "tcv": "83234"}},
+    )
+    assert deal_amount_to_write(None, "83234", ev=intro) == ""
+    stage, amount, reason = authorize_deal_write(
+        intro,
+        requested_stage=STAGE["meeting_booked"],
+        amount="83234",
+        contact={"id": "c-k"},
+        deal=None,
+        settings=make_settings(),
+    )
+    assert amount == ""
+    report = CycleReport()
+    _propose_engagement(
+        report,
+        intro,
+        IntentDecision(
+            verdict="yes",
+            intent="sales",
+            reason="Sales evidence (intro)",
+            stage=STAGE["meeting_booked"],
+            amount="83234",
+        ),
+        {"id": "c-k"},
+    )
+    assert all(not w.get("amount") for w in report.proposed_writes)
+
+    reextract = Engagement(
+        source="fireflies",
+        external_id="ff-kevin-500",
+        email="kevin@kevinhagemoser.com",
+        transcript="He mentioned 500 somewhere in passing.",
+        extra={"deal_terms": {"quote": "mentioned 500", "tcv": "500"}},
+    )
+    _, re_amount, _ = authorize_deal_write(
+        reextract,
+        requested_stage=STAGE["discovery_held"],
+        amount="500",
+        contact={"id": "c-k"},
+        deal={
+            "id": "347748772577",
+            "properties": {"dealstage": STAGE["nurture"]},
+        },
+        settings=make_settings(),
+    )
+    assert re_amount == ""
+
+    gmail_fig = Engagement(
+        source="gmail",
+        external_id="g-unquoted",
+        email="pat@example.com",
+        raw_subject="Following up",
+        extra={"deal_terms": {"quote": "we could do 500", "tcv": "500"}},
+    )
+    assert deal_amount_to_write(None, "500", ev=gmail_fig) == ""
+
+
+def test_travis_discovery_held_dedupes_and_needs_held_source():
+    from crmbrain.deal_write import propose_deal_write
+    from crmbrain.models import CycleReport
+
+    report = CycleReport()
+    deal_id = "347687452347"
+    intro = Engagement(
+        source="gmail",
+        external_id="g-travis-intro",
+        email="travis@example.com",
+        name="Travis L",
+        raw_subject="SalesGlider Intro",
+    )
+    propose_deal_write(
+        report,
+        action="update",
+        label="Travis L",
+        stage=STAGE["discovery_held"],
+        deal_id=deal_id,
+        reason="Sales evidence (intro)",
+        ev=intro,
+    )
+    propose_deal_write(
+        report,
+        action="update",
+        label="Travis L",
+        stage=STAGE["discovery_held"],
+        deal_id=deal_id,
+        reason="reextract current=qualifiedtobuy/",
+    )
+    propose_deal_write(
+        report,
+        action="move",
+        label="Travis L",
+        stage=STAGE["discovery_held"],
+        deal_id=deal_id,
+        reason="held_beats_noshow",
+    )
+    assert report.proposed_writes == []
+
+    held = Engagement(
+        source="fireflies",
+        external_id="ff-travis-held",
+        occurred_at=datetime(2026, 9, 18, 17, 0, tzinfo=timezone.utc),
+        email="travis@example.com",
+        name="Travis L",
+        extra={"has_sentences": True, "sentence_count": 10},
+    )
+    propose_deal_write(
+        report,
+        action="update",
+        label="Travis L",
+        stage=STAGE["discovery_held"],
+        deal_id=deal_id,
+        reason="reextract",
+        ev=held,
+    )
+    propose_deal_write(
+        report,
+        action="move",
+        label="Travis L",
+        stage=STAGE["discovery_held"],
+        deal_id=deal_id,
+        reason="held_beats_noshow",
+        ev=held,
+    )
+    assert len(report.proposed_writes) == 1
+    reason = report.proposed_writes[0]["reason"]
+    assert "fireflies" in reason
+    assert "ff-travis-held" in reason
+    assert "2026-09-18" in reason

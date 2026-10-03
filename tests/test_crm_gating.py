@@ -74,6 +74,10 @@ class FakeHubSpot:
     def ensure_properties(self):
         return None
 
+    def associated_company_industry(self, *, contact_id="", deal_id=""):
+        del contact_id, deal_id
+        return ""
+
     def find_contact(self, email="", phone="", name=""):
         from crmbrain.config import is_zoom_room_address
 

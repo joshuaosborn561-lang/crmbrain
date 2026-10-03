@@ -280,7 +280,15 @@ VERTICALS: tuple[dict, ...] = (
         "label": "HVAC",
         "subject": "HVAC update",
         "client": "HVAC clients",
-        "keywords": ("hvac", "heating and cooling", "air conditioning", "air conditioner", "heat pump"),
+        "keywords": (
+            "hvac",
+            "heating and cooling",
+            "air conditioning",
+            "air conditioner",
+            "heat pump",
+            "mechanical",
+            "plumbing",
+        ),
     },
     {
         "key": "roofing",
@@ -299,8 +307,10 @@ VERTICALS: tuple[dict, ...] = (
             "recruiting",
             "recruiter",
             "recruiters",
+            "recruit",
             "executive search",
             "talent acquisition",
+            "talent",
         ),
     },
     {
@@ -331,6 +341,10 @@ VERTICALS: tuple[dict, ...] = (
             "trades",
             "renovation",
             "renovations",
+            "fire",
+            "electric",
+            "built",
+            "builders",
         ),
     },
     {
@@ -442,12 +456,14 @@ def _extras_blob(extras: dict | None) -> str:
     )
 
 
-_PREFIX_KEYS = {"roof", "cyber", "hvac", "solar"}
+_PREFIX_KEYS = {"roof", "cyber", "hvac", "solar", "recruit"}
+# Company-name tokens that appear inside a brand (IntegriBuilt).
+_SUBSTRING_KEYS = {"built"}
 
 
 def _has_keyword(blob: str, keywords: tuple[str, ...]) -> bool:
     for kw in keywords:
-        if " " in kw:
+        if " " in kw or kw in _SUBSTRING_KEYS:
             if kw in blob:
                 return True
             continue
@@ -467,7 +483,12 @@ def infer_industry(
     hinted = (industry or extras.get("industry") or extras.get("vertical") or "").strip().lower()
     if hinted:
         for row in VERTICALS:
-            if hinted in {row["key"], row["label"].lower()}:
+            key = row["key"]
+            label = row["label"].lower()
+            if hinted in {key, label} or key in hinted or label in hinted:
+                return row
+        for row in VERTICALS:
+            if _has_keyword(hinted, row["keywords"]):
                 return row
     blob = _blob(company, _extras_blob(extras))
     if not blob.strip():

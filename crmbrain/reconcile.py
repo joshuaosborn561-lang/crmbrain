@@ -322,6 +322,7 @@ def _commit(
         contact_id=str((contact or {}).get("id") or ""),
         deal_id=str((deal or {}).get("id") or ""),
         reason=reason,
+        ev=ev,
     )
     if dry_run:
         return True

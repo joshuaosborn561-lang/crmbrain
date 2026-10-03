@@ -335,6 +335,18 @@ def test_t12_t15_industry():
     )
     assert (key, basis) == ("hvac", "website")
     assert infer_industry_resolved(email="casey@linholdings.test", company="Lin Holdings") == (None, None)
+    assert infer_industry_resolved(company="RLP Mechanical") == ("hvac", "website")
+    assert infer_industry_resolved(company="Talent Unify") == ("staffing", "website")
+    assert infer_industry_resolved(company="IntegriBuilt") == ("construction", "website")
+    assert infer_industry_resolved(company="RDS Fire Systems") == ("construction", "website")
+    assert infer_industry_resolved(company="Lin Holdings", hs_industry="Staffing and Recruiting") == (
+        "staffing",
+        "website",
+    )
+    assert infer_industry_resolved(company="Lin Holdings", hs_industry="Construction") == (
+        "construction",
+        "website",
+    )
 
 
 def test_t16_t21_gates():
@@ -1019,3 +1031,15 @@ def test_nurture_body_has_no_airpods_and_is_personalized():
     assert "shoulder" in hvac.body.lower() or "summer" in hvac.body.lower()
     default = compose_nurture_draft({"name": "Pat Reyes", "industry": "roofing"})
     assert "AirPods" not in default.body
+
+
+def test_company_name_keywords_pick_vertical_proof():
+    cases = (
+        ("RLP Mechanical", "hvac", "trades"),
+        ("Talent Unify", "staffing", "recruit"),
+        ("IntegriBuilt", "construction", "home-services"),
+        ("RDS Fire Systems", "construction", "home-services"),
+    )
+    for company, key, token in cases:
+        draft = compose_nurture_draft({"name": "Alex Rivera", "company": company})
+        assert CASE_STUDIES[key].split(",")[0][:12] in draft.body or token in draft.body.lower()

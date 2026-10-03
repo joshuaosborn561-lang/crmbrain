@@ -860,12 +860,33 @@ def amount_to_write(
     return ""
 
 
+def amount_forbidden_from_engagement(ev: Engagement | None) -> bool:
+    """Intro emails never set an amount. Unquoted Gmail figures are gated separately."""
+    if ev is None:
+        return False
+    extra = ev.extra or {}
+    if extra.get("josh_sent_proposal"):
+        return False
+    if ev.source == "calendly":
+        return True
+    blob = f"{ev.raw_subject or ''} {ev.summary or ''} {ev.transcript or ''}".lower()
+    if ev.source in {"gmail", "gmail_person"} and re.search(
+        r"\b(?:sg intro|intro call|intro)\b", blob
+    ):
+        return True
+    return False
+
+
 def deal_amount_to_write(deal: dict | None, amount: str, ev: Engagement | None = None) -> str:
+    if not amount:
+        return ""
+    if amount_forbidden_from_engagement(ev):
+        return ""
     props = (deal or {}).get("properties") or {}
     extra = (ev.extra if ev else {}) or {}
     terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
     quote = str(terms.get("quote") or "")
-    if amount and ev is not None and not quote_states_priced_offer(quote):
+    if ev is not None and not quote_states_priced_offer(quote):
         tcv = tcv_from_terms(terms)
         if not tcv:
             return ""
@@ -1023,18 +1044,25 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
         if str(facts.get("ticker_reason") or "").strip().lower() == "no_show":
             facts["ticker_reason"] = ""
     terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
-    if ev.source in CALL_SOURCES:
+    if amount_forbidden_from_engagement(ev):
+        amount = ""
+    elif ev.source in CALL_SOURCES:
         amount = _call_amount_from_gemini(facts, text) if gemini_ok else ""
     elif extra.get("josh_sent_proposal"):
         amount = latest_proposal_figure(text)
         if not amount and gemini_ok:
             amount = _call_amount_from_gemini(facts, text)
+        if amount and not quote_states_priced_offer(str(terms.get("quote") or text or "")):
+            if not tcv_from_terms(terms):
+                amount = ""
     else:
         amount = ""
         if gemini_ok:
             amount = _call_amount_from_gemini(facts, text)
         if not amount and quote_states_priced_offer(str(terms.get("quote") or "")):
             amount = parse_deal_amount(text)
+        if amount and ev.source == "gmail" and not quote_states_priced_offer(str(terms.get("quote") or "")):
+            amount = ""
     facts["amount_hint"] = amount
     facts["deal_amount"] = amount
     if amount and isinstance(terms, dict) and not terms.get("tcv"):

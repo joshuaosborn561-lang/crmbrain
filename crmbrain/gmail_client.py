@@ -65,6 +65,10 @@ GMAIL_RATE_LIMIT_REASONS = frozenset(
 )
 
 
+class GmailRateLimitError(RuntimeError):
+    """Gmail 429/403 quota. Do not skip the message or mark it processed."""
+
+
 def _sleep(seconds: float) -> None:
     if seconds > 0:
         time.sleep(seconds)
@@ -125,6 +129,22 @@ def is_gmail_rate_limit(resp: requests.Response) -> bool:
         return True
     blob = f"{_gmail_error_reason(resp)} {resp.text or ''}".lower()
     return "rate limit" in blob or "too many" in blob or "quota exceeded" in blob
+
+
+def is_gmail_rate_limit_exc(exc: BaseException | None) -> bool:
+    """True when a raised error is a Gmail quota 403/429 — never skip or mark processed."""
+    if exc is None:
+        return False
+    if isinstance(exc, GmailRateLimitError):
+        return True
+    resp = getattr(exc, "response", None)
+    if resp is not None and is_gmail_rate_limit(resp):
+        return True
+    blob = _normalize_reason(str(exc))
+    text = str(exc).lower()
+    if any(r in blob for r in GMAIL_RATE_LIMIT_REASONS):
+        return True
+    return "403" in text and ("ratelimit" in blob or "rate limit" in text)
 
 
 def is_gmail_scope_error(resp: requests.Response) -> bool:
@@ -278,7 +298,26 @@ class Gmail:
                 _sleep(delay)
                 continue
             rate_limited = is_gmail_rate_limit(resp)
-            if retry and (resp.status_code in RETRYABLE_STATUS or rate_limited) and attempt + 1 < attempts:
+            if rate_limited:
+                if retry and attempt + 1 < attempts:
+                    delay = min(BACKOFF_CAP, _retry_after_seconds(resp, _backoff_with_jitter(attempt)))
+                    logger.warning(
+                        "gmail %s %s HTTP %s (%s), retry %s/%s in %.2fs",
+                        method,
+                        url,
+                        resp.status_code,
+                        _gmail_error_reason(resp) or resp.reason,
+                        attempt + 1,
+                        MAX_READ_RETRIES,
+                        delay,
+                    )
+                    _sleep(delay)
+                    continue
+                raise GmailRateLimitError(
+                    f"gmail {method} {url} HTTP {resp.status_code} "
+                    f"{_gmail_error_reason(resp) or resp.reason}"
+                )
+            if retry and resp.status_code in RETRYABLE_STATUS and attempt + 1 < attempts:
                 delay = min(BACKOFF_CAP, _retry_after_seconds(resp, _backoff_with_jitter(attempt)))
                 logger.warning(
                     "gmail %s %s HTTP %s (%s), retry %s/%s in %.2fs",
@@ -332,6 +371,8 @@ class Gmail:
             try:
                 msg = self.get(mid)
             except Exception as exc:
+                if is_gmail_rate_limit_exc(exc):
+                    raise
                 logger.warning("gmail find_contact_thread get %s failed: %s", mid, exc)
                 continue
             headers = self.headers_map(msg)
@@ -416,6 +457,10 @@ class Gmail:
             retry=True,
             timeout=READ_TIMEOUT,
         )
+        if is_gmail_rate_limit(resp):
+            raise GmailRateLimitError(
+                f"calendar api {resp.status_code} {_gmail_error_reason(resp) or resp.reason}"
+            )
         if resp.status_code in {401, 403}:
             logger.info("calendar api %s — falling back to Gmail invites", resp.status_code)
             raise PermissionError(

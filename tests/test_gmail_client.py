@@ -8,9 +8,11 @@ from crmbrain.gmail_client import (
     MAX_READ_RETRIES,
     READ_TIMEOUT,
     Gmail,
+    GmailRateLimitError,
     _retry_after_seconds,
     header_has_contact_email,
     is_gmail_rate_limit,
+    is_gmail_rate_limit_exc,
     is_gmail_scope_error,
     should_skip_nurture_thread,
     subject_is_calendar_noise,
@@ -229,6 +231,62 @@ def test_search_403_missing_scope_is_not_retried(monkeypatch):
         assert "403" in str(exc)
     assert calls["n"] == 1
     assert slept == []
+
+
+def test_search_exhausted_403_rate_limit_raises(monkeypatch):
+    gmail = _gmail()
+    monkeypatch.setattr("crmbrain.gmail_client._sleep", lambda _s: None)
+    payload = {
+        "error": {
+            "code": 403,
+            "message": "Rate Limit Exceeded",
+            "errors": [{"reason": "rateLimitExceeded"}],
+        }
+    }
+
+    def fake_request(method, url, timeout=None, **kwargs):
+        return FakeResp(403, payload, text="rateLimitExceeded")
+
+    gmail.session.request = fake_request
+    try:
+        gmail.search("after:2026/09/01")
+        raise AssertionError("expected GmailRateLimitError")
+    except GmailRateLimitError as exc:
+        assert "403" in str(exc)
+        assert is_gmail_rate_limit_exc(exc)
+
+
+def test_scan_people_does_not_skip_or_mark_rate_limit_403():
+    class PartialGmail:
+        def search(self, query, max_results=80):
+            return [{"id": "ok-1"}, {"id": "bad-403"}]
+
+        def get(self, mid):
+            if mid == "bad-403":
+                raise GmailRateLimitError("403 userRateLimitExceeded")
+            return {
+                "id": mid,
+                "internalDate": "1728000000000",
+                "snippet": "hello",
+                "_headers": {
+                    "from": "Pat Lee <pat@clientco.com>",
+                    "to": "Joshua <joshua@salesglidergrowth.com>",
+                    "subject": "intro",
+                },
+            }
+
+        def headers_map(self, msg):
+            return msg["_headers"]
+
+    settings = make_settings()
+    report = CycleReport()
+    try:
+        gmail_scan.scan_people(settings, PartialGmail(), report=report)
+        raise AssertionError("expected GmailRateLimitError")
+    except GmailRateLimitError:
+        pass
+    assert not any("bad-403" in s for s in report.skipped)
+    assert not any("bad-403" in w for w in report.warnings)
 
 
 def test_scan_people_timeout_then_success_stays_ok(monkeypatch):

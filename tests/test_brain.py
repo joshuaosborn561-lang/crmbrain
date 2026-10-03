@@ -312,6 +312,10 @@ def test_nurture_generalized_when_industry_unknown():
     subject, body = draft_email("Pat Lee", "Acme Holdings", "never_booked")
     assert subject == "Quick update"
     assert infer_industry("Acme Holdings") is None
+    assert infer_industry("RLP Mechanical")["key"] == "hvac"
+    assert infer_industry("Talent Unify")["key"] == "staffing"
+    assert infer_industry("IntegriBuilt")["key"] == "construction"
+    assert infer_industry("RDS Fire Systems")["key"] == "construction"
     assert "$2M" in body and "pipeline last quarter" in body
     assert "$100K" in body and "first 3 months" in body
     assert "14+" in body

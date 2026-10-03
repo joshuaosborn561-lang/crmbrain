@@ -512,6 +512,8 @@ def infer_industry_resolved(
                     return row["key"], "domain"
     if hs_industry:
         hit = infer_industry("", industry=hs_industry)
+        if not hit:
+            hit = infer_industry(hs_industry)
         if hit:
             return hit["key"], "website"
     if website_text:
@@ -1880,6 +1882,17 @@ def collect_s2_hubspot(deals: list[dict], *, now: datetime | None = None) -> lis
             "no_show_count": (deal.get("properties") or {}).get("no_show_count")
             or deal.get("no_show_count"),
             "website_text": deal.get("website_text") or contact.get("website_text") or "",
+            "hs_industry": (
+                str(deal.get("company_industry") or "")
+                or (
+                    str((deal.get("company") or {}).get("industry") or "")
+                    if isinstance(deal.get("company"), dict)
+                    else ""
+                )
+                or str(contact.get("company_industry") or "")
+                or str((contact.get("properties") or {}).get("industry") or "")
+                or str(contact.get("industry") or "")
+            ),
             "nurture_thread_id": contact.get(NURTURE_THREAD_PROP)
             or (contact.get("properties") or {}).get(NURTURE_THREAD_PROP)
             or deal.get(NURTURE_THREAD_PROP)
@@ -2424,11 +2437,22 @@ def sample_hubspot_nurture_cards(
             company = nurture_company_label(
                 fields["company"], str(props.get("dealname") or ""), fields["email"]
             )
+            company_industry = ""
+            getter = getattr(hs, "associated_company_industry", None)
+            if callable(getter):
+                company_industry = str(
+                    getter(
+                        contact_id=str(contact.get("id") or ""),
+                        deal_id=str(deal.get("id") or ""),
+                    )
+                    or ""
+                )
+            hs_industry = company_industry or fields["industry"]
             industry, _basis = infer_industry_resolved(
                 email=fields["email"],
                 company=company or fields["company"],
                 website_text="",
-                hs_industry=fields["industry"],
+                hs_industry=hs_industry,
             )
             candidates.append(
                 {
@@ -2448,7 +2472,7 @@ def sample_hubspot_nurture_cards(
                     "meeting_at": meeting_at,
                     "last_touch_snippet": snippet,
                     "industry": industry,
-                    "hs_industry": fields["industry"],
+                    "hs_industry": hs_industry,
                     NURTURE_THREAD_PROP: extra.get(NURTURE_THREAD_PROP) or "",
                     NURTURE_SUBJECT_PROP: extra.get(NURTURE_SUBJECT_PROP) or "",
                     "signal_at": (

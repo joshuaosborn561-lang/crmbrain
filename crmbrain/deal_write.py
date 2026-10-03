@@ -10,7 +10,15 @@ move_deal directly.
 
 from __future__ import annotations
 
-from crmbrain.config import is_archived_hs_row, is_deleted_stage, is_excluded_contact, NO_SHOW_HINT
+import re
+
+from crmbrain.config import (
+    STAGE,
+    is_archived_hs_row,
+    is_deleted_stage,
+    is_excluded_contact,
+    NO_SHOW_HINT,
+)
 from crmbrain.intelligence import deal_amount_to_write
 from crmbrain.models import CycleReport, Engagement, ProposedWrite
 from crmbrain.policy import (
@@ -32,6 +40,42 @@ if TYPE_CHECKING:
     from crmbrain.hubspot import HubSpot
 
 logger = logging.getLogger(__name__)
+
+_HELD_SOURCE_RE = re.compile(r"\b(fireflies|cube_acr)\b", re.I)
+_HELD_DATE_RE = re.compile(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b")
+_HELD_ID_RE = re.compile(r"\b(?:ff[-_][\w-]+|cube[-_][\w-]+|[A-Za-z0-9_-]{6,})\b")
+
+
+def held_evidence_reason(ev: Engagement | None, prefix: str = "") -> str:
+    """Reason text that cites the held-meeting source plus a meeting id or date."""
+    bits = [str(prefix or "").strip()]
+    if ev is not None:
+        bits.append(str(ev.source or "").strip())
+        bits.append(str(ev.external_id or "").strip())
+        when = ev.occurred_at
+        if when is not None:
+            try:
+                bits.append(when.date().isoformat())
+            except AttributeError:
+                bits.append(str(when)[:10])
+    return " ".join(b for b in bits if b)
+
+
+def discovery_held_reason_allowed(reason: str) -> bool:
+    """Discovery Held moves need a held source (fireflies/cube_acr) plus id or date."""
+    text = reason or ""
+    if not _HELD_SOURCE_RE.search(text):
+        return False
+    if _HELD_DATE_RE.search(text):
+        return True
+    leftover = _HELD_SOURCE_RE.sub(" ", text)
+    leftover = re.sub(
+        r"\b(held|meeting|beats|noshow|reextract|current|move|create|update|gmail|intro)\b",
+        " ",
+        leftover,
+        flags=re.I,
+    )
+    return bool(_HELD_ID_RE.search(leftover))
 
 
 def authorize_deal_lifecycle(
@@ -149,7 +193,10 @@ def authorize_deal_write(
         stage = choose_deal_action(None, requested_stage, ev, settings=settings) if requested_stage else None
         if not stage:
             return "", "", "create_blocked"
-        return stage, str(amount or ""), "create"
+        write_amount = ""
+        if amount:
+            write_amount = deal_amount_to_write(deal, str(amount), ev=ev) or ""
+        return stage, write_amount, "create"
     if not may_mutate_existing_deal(ev, deal, settings):
         return "", "", "frozen"
     current = str((deal.get("properties") or {}).get("dealstage") or "")
@@ -177,9 +224,19 @@ def propose_deal_write(
     contact_id: str = "",
     deal_id: str = "",
     reason: str = "",
+    ev: Engagement | None = None,
 ) -> None:
     if action in {"create", "restore"} and not stage:
         return
+    if stage == STAGE["discovery_held"]:
+        if ev is not None and ev.source in {"fireflies", "cube_acr"}:
+            reason = held_evidence_reason(ev, prefix=reason)
+        if not discovery_held_reason_allowed(reason):
+            return
+    if deal_id and stage:
+        for existing in report.proposed_writes:
+            if str(existing.get("deal_id") or "") == str(deal_id) and existing.get("stage") == stage:
+                return
     report.proposed_writes.append(
         ProposedWrite(
             action=action,
