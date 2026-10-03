@@ -440,12 +440,21 @@ class HubSpot:
                 deals.append(d.json())
         return deals
 
-    def _archive_duplicate_deals(self, deals: list[dict]) -> list[dict]:
+    def _archive_duplicate_deals(self, deals: list[dict], ev: Engagement | None = None) -> list[dict]:
         """Soft-archive same-stage, no-amount duplicates. Keep the richer deal."""
+        from crmbrain.deal_write import authorize_deal_lifecycle, record_lifecycle_refusal
+
         archived_ids: set[str] = set()
+        report = getattr(self, "report", None)
         for _keep, dup in policy.duplicate_open_deal_pairs(deals):
             dup_id = str(dup.get("id") or "")
             if not dup_id or dup_id in archived_ids:
+                continue
+            ok, reason = authorize_deal_lifecycle(
+                dup, ev=ev, settings=self.settings, action="archive"
+            )
+            if not ok:
+                record_lifecycle_refusal(dup, reason, "archive", report=report)
                 continue
             try:
                 self.archive_deal(dup_id)
@@ -540,13 +549,21 @@ class HubSpot:
         if policy.is_weak_deal_name(current_name) and wanted:
             cleaned = wanted
         if target:
-            self.move_deal(
-                deal["id"],
-                target,
-                evidence=f"{ev.source}:{ev.external_id}",
-                dealname=cleaned if cleaned and cleaned != current_name else "",
+            from crmbrain.deal_write import authorize_deal_lifecycle, record_lifecycle_refusal
+
+            ok, reason = authorize_deal_lifecycle(
+                deal, ev=ev, settings=self.settings, action="move"
             )
-            deal.setdefault("properties", {})["dealstage"] = target
+            if not ok:
+                record_lifecycle_refusal(deal, reason, "move", report=getattr(self, "report", None))
+            else:
+                self.move_deal(
+                    deal["id"],
+                    target,
+                    evidence=f"{ev.source}:{ev.external_id}",
+                    dealname=cleaned if cleaned and cleaned != current_name else "",
+                )
+                deal.setdefault("properties", {})["dealstage"] = target
         elif cleaned and cleaned != current_name:
             self.patch_deal(str(deal["id"]), {"dealname": cleaned})
         if cleaned and cleaned != current_name:
@@ -559,7 +576,7 @@ class HubSpot:
             logger.info("skip hubspot deal write for excluded person")
             return {}
         contact_id = contact["id"]
-        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id), ev=ev)
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)
@@ -577,7 +594,7 @@ class HubSpot:
         if not target:
             return {}
         # HubSpot workflows can create a deal between the first read and POST.
-        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id), ev=ev)
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)

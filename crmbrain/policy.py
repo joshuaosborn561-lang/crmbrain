@@ -608,7 +608,7 @@ def event_predates_manual_edit(ev: Engagement, deal: dict | None) -> bool:
 
 
 def deal_is_locked(deal: dict | None) -> bool:
-    """HubSpot crmbrain_locked checkbox — never change stage or amount."""
+    """HubSpot crmbrain_locked checkbox — never change stage, amount, or archive."""
     if not deal:
         return False
     raw = str((deal.get("properties") or {}).get("crmbrain_locked") or "").strip().lower()

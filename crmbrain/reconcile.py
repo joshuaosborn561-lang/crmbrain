@@ -23,7 +23,14 @@ from crmbrain.evidence import (
     KIND_SIGNED,
     PersonTimeline,
 )
-from crmbrain.deal_write import authorize_deal_write, commit_deal_write, propose_deal_write
+from crmbrain.deal_write import (
+    authorize_deal_lifecycle,
+    authorize_deal_write,
+    commit_deal_archive,
+    commit_deal_write,
+    propose_deal_write,
+    record_lifecycle_refusal,
+)
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement, IntentDecision
@@ -264,7 +271,12 @@ def _commit(
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} person_intent_no")
         return False
     if action == "archive":
-        pass
+        ok, gate_reason = authorize_deal_lifecycle(
+            deal, ev=ev, settings=settings, action="archive"
+        )
+        if not ok:
+            record_lifecycle_refusal(deal, gate_reason, "archive", report=report)
+            return False
     else:
         stage_out, amount_out, gate_reason = authorize_deal_write(
             ev,
@@ -309,7 +321,8 @@ def _commit(
     if dry_run:
         return True
     if action == "archive" and deal:
-        hs.archive_deal(str(deal.get("id") or ""))
+        if not commit_deal_archive(hs, deal, ev=ev, settings=settings, report=report):
+            return False
         report.deals_pruned.append(f"{label} {reason or 'archive'}")
         return True
     if not contact:

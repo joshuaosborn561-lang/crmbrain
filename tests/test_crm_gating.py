@@ -305,7 +305,13 @@ class FakeHubSpot:
         self.writes.append(("upsert_deal", ev.source, stage, amount))
         existing = self.open_deals_for_contact(contact["id"])
         for _keep, dup in policy.duplicate_open_deal_pairs(existing):
-            self.archive_deal(dup["id"])
+            from crmbrain.deal_write import authorize_deal_lifecycle
+
+            ok, _reason = authorize_deal_lifecycle(
+                dup, ev=ev, settings=getattr(self, "settings", None), action="archive"
+            )
+            if ok:
+                self.archive_deal(dup["id"])
         existing = self.open_deals_for_contact(contact["id"])
         live = policy.live_open_deals(existing)
         won = policy.closed_won_deals(existing)
