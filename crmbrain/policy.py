@@ -729,31 +729,44 @@ def _richest_deal_contact(hs, contacts: list[dict]) -> dict | None:
 
 
 def resolve_engagement_contact(hs, ev: Engagement) -> dict | None:
-    """Email/phone plus name. Any deal-holder wins; multiple no-deal names are review."""
+    """Exact email, then phone, then name. Richest-deal is name fallback only."""
     extra = dict(ev.extra or {})
     extra.pop("name_ambiguous", None)
     extra.pop("non_person", None)
+    extra.pop("attached_via", None)
     ev.extra = extra
     if is_non_person_engagement(ev):
         extra["non_person"] = True
         ev.extra = extra
         return None
-    identity = None
-    if hasattr(hs, "find_contact"):
+    finder = getattr(hs, "find_contact", None)
+    if callable(finder) and ev.email:
         try:
-            identity = hs.find_contact(email=ev.email, phone=ev.phone, name="")
+            by_email = finder(email=ev.email, phone="", name="")
         except Exception:
-            identity = None
+            by_email = None
+        if by_email:
+            extra["attached_via"] = "email"
+            ev.extra = extra
+            return by_email
+    if callable(finder) and ev.phone:
+        try:
+            by_phone = finder(email="", phone=ev.phone, name="")
+        except Exception:
+            by_phone = None
+        if by_phone:
+            extra["attached_via"] = "phone"
+            ev.extra = extra
+            return by_phone
     matches = _name_contact_matches(hs, ev.display_name() or ev.name, ev.company)
-    pooled = _dedupe_contacts(([identity] if identity else []) + matches)
-    richest = _richest_deal_contact(hs, pooled)
+    richest = _richest_deal_contact(hs, matches)
     if richest:
         extra["attached_via"] = "richest_deal"
         ev.extra = extra
         return richest
-    if identity:
-        return identity
     if len(matches) == 1:
+        extra["attached_via"] = "name"
+        ev.extra = extra
         return matches[0]
     if len(matches) > 1:
         extra["name_ambiguous"] = True

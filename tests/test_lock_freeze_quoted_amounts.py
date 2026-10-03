@@ -43,7 +43,12 @@ TYLER_SEP24_GENERIC = (
     "Tyler said he cannot commit yet."
 )
 TYLER_SEP29_OFFER = "5,000 a month for four months"
+TYLER_SEP29_RUNTOGETHER = (
+    "one of our roofers closed $100K in his first 3 months with us. "
+    "Tyler said 5,000amonth for four months."
+)
 EARL_SEP30_OFFER = "The retainer is $3,500 x 6."
+EARL_SEP30_RUNTOGETHER = "The retainer is $3,500x6."
 VECTOR_PACKAGE = "8500 for three months"
 
 
@@ -180,6 +185,10 @@ def test_quoted_term_positive_tyler_earl_vector():
         },
         f"Tyler agreed to {TYLER_SEP29_OFFER}.",
     ) == "20000"
+    tyler_run = heuristic_deal_terms(TYLER_SEP29_RUNTOGETHER)
+    assert tyler_run.get("monthly_fee") == "5000"
+    assert tyler_run.get("term_months") == "4"
+    assert tcv_from_terms(tyler_run) == "20000"
 
     earl = heuristic_deal_terms(EARL_SEP30_OFFER)
     assert tcv_from_terms(earl) == "21000"
@@ -194,6 +203,10 @@ def test_quoted_term_positive_tyler_earl_vector():
         },
         EARL_SEP30_OFFER,
     ) == "21000"
+    earl_run = heuristic_deal_terms(EARL_SEP30_RUNTOGETHER)
+    assert earl_run.get("monthly_fee") == "3500"
+    assert earl_run.get("term_months") == "6"
+    assert tcv_from_terms(earl_run) == "21000"
 
     vector = heuristic_deal_terms(VECTOR_PACKAGE)
     assert tcv_from_terms(vector) == "8500"
@@ -372,15 +385,29 @@ def test_ambiguous_dave_attaches_to_existing_goliath_deal(tmp_path):
     assert len(hs.deals) == 1
 
 
-def test_phone_match_on_deal_less_dave_still_attaches_to_goliath_deal():
+def test_phone_match_wins_over_richest_same_name_deal():
     goliath, goliathsec, deal = _dave_contacts_and_deal()
     hs = FakeHubSpot([goliath, goliathsec])
     hs.deals.append(deal)
     ev = _dave_cube_sep24(phone="+15551234001")
     attached = resolve_engagement_contact(hs, ev)
-    assert attached["id"] == "531508756184"
-    assert ev.extra.get("attached_via") == "richest_deal"
-    assert any(d["id"] == "340447563471" for d in hs.open_deals_for_contact(attached["id"]))
+    assert attached["id"] == "544365383381"
+    assert ev.extra.get("attached_via") == "phone"
+    assert hs.open_deals_for_contact(attached["id"]) == []
+    assert any(d["id"] == "340447563471" for d in hs.open_deals_for_contact("531508756184"))
+
+
+def test_email_match_wins_over_richest_same_name_deal():
+    goliath, goliathsec, deal = _dave_contacts_and_deal()
+    goliath["properties"]["email"] = "dave@goliath.com"
+    goliathsec["properties"]["email"] = "dave@goliathsec.com"
+    hs = FakeHubSpot([goliath, goliathsec])
+    hs.deals.append(deal)
+    ev = _dave_cube_sep24(email="dave@goliathsec.com", phone="")
+    attached = resolve_engagement_contact(hs, ev)
+    assert attached["id"] == "544365383381"
+    assert ev.extra.get("attached_via") == "email"
+    assert hs.open_deals_for_contact(attached["id"]) == []
 
 
 def test_ambiguous_name_with_no_deals_is_review_not_create(tmp_path):

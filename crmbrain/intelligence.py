@@ -122,15 +122,15 @@ _MONEY_RE = re.compile(
 )
 _RANGE_MO_RE = re.compile(
     r"\$?\s*(\d+(?:\.\d+)?)\s*([kK])?\s*[-–to]{1,3}\s*\$?\s*(\d+(?:\.\d+)?)\s*([kK])?"
-    r"\s*(?:k\b)?\s*(?:/\s*mo|/month|per month|a month|monthly)",
+    r"\s*(?:k\b)?\s*(?:/\s*mo|/month|per\s*month|a\s*month|monthly)",
     re.I,
 )
 _TIMES_RE = re.compile(
-    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:x|×)\s*(\d+)\b",
+    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:x|×)\s*(\d+)(?:\s*(?:month|mo)s?)?\b",
     re.I,
 )
 _MONTHLY_FEE_RE = re.compile(
-    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:/\s*mo|/month|per month|a month|monthly)",
+    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:/\s*mo|/month|per\s*month|a\s*month|monthly)",
     re.I,
 )
 _WORD_MONTHS = {
@@ -150,6 +150,10 @@ _WORD_MONTHS = {
 _TERM_RE = re.compile(
     r"(?<![\d,.])(?P<term>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"\s*[- ]?(?:month|mo)s?\s*(?:minimum|min\.?|term|commit|agreement|retainer)?",
+    re.I,
+)
+_PITCH_TERM_PREFIX_RE = re.compile(
+    r"(?:in\s+(?:his|her|their|the)\s+)?first\s+$",
     re.I,
 )
 _PACKAGE_FOR_RE = re.compile(
@@ -296,6 +300,35 @@ def _term_months_from_match(match: re.Match[str]) -> int | None:
     return val
 
 
+def _is_pitch_term(text: str, match: re.Match[str]) -> bool:
+    """Skip case-study language like 'first 3 months' / 'in his first 3 months'."""
+    prefix = text[max(0, match.start() - 24) : match.start()]
+    return bool(_PITCH_TERM_PREFIX_RE.search(prefix))
+
+
+def _term_near_offer(text: str, offer: re.Match[str] | None = None) -> int | None:
+    """Prefer a term next to the priced offer, not the first pitch mention."""
+    best = None
+    best_dist = None
+    for match in _TERM_RE.finditer(text):
+        if _is_pitch_term(text, match):
+            continue
+        months = _term_months_from_match(match)
+        if not months:
+            continue
+        if offer is None:
+            return months
+        # Terms just after the fee ('5,000 a month for four months') win.
+        if match.start() >= offer.start() - 8:
+            dist = match.start() - offer.start()
+        else:
+            dist = offer.start() - match.start() + 10_000
+        if best_dist is None or dist < best_dist:
+            best = months
+            best_dist = dist
+    return best
+
+
 def _money_from_quote(quote: str) -> str:
     hits: list[str] = []
     for match in _MONEY_RE.finditer(quote or ""):
@@ -404,10 +437,8 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
     if not text:
         return terms
     low = text.lower()
+    offer_match: re.Match[str] | None = None
     term = None
-    tm = _TERM_RE.search(text)
-    if tm:
-        term = _term_months_from_match(tm)
     times = _TIMES_RE.search(text)
     if times:
         val = _money_value(times.group(1), times.group(2) or "")
@@ -419,13 +450,13 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
             formatted = format_amount(val)
             if formatted:
                 terms["monthly_fee"] = formatted
-            if not term:
-                term = n
+            term = n
+            offer_match = times
             start = max(0, times.start() - 20)
             end = min(len(text), times.end() + 20)
             terms["quote"] = text[start:end].strip()
     rng = _RANGE_MO_RE.search(text)
-    if rng:
+    if rng and not terms["monthly_fee"]:
         low_v = _money_value(rng.group(1), rng.group(2) or "k" if "k" in rng.group(0).lower() else "")
         high_v = _money_value(rng.group(3), rng.group(4) or "k" if "k" in rng.group(0).lower() else "")
         # $3-4k/mo — the k often applies to both sides.
@@ -439,18 +470,21 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
             terms["monthly_fee"] = terms["monthly_fee"] or terms["range_low"]
         if high_v is not None:
             terms["range_high"] = format_amount(high_v) or terms["range_high"]
+        offer_match = offer_match or rng
         start = max(0, rng.start() - 12)
         end = min(len(text), rng.end() + 24)
         terms["quote"] = terms["quote"] or text[start:end].strip()
-    if not terms["monthly_fee"]:
-        monthly = _MONTHLY_FEE_RE.search(text)
-        if monthly:
-            val = _money_value(monthly.group(1), monthly.group(2) or "")
-            if val is not None:
-                terms["monthly_fee"] = format_amount(val) or ""
-                start = max(0, monthly.start() - 12)
-                end = min(len(text), monthly.end() + 16)
-                terms["quote"] = terms["quote"] or text[start:end].strip()
+    monthly = _MONTHLY_FEE_RE.search(text)
+    if monthly and not terms["monthly_fee"]:
+        val = _money_value(monthly.group(1), monthly.group(2) or "")
+        if val is not None:
+            terms["monthly_fee"] = format_amount(val) or ""
+            offer_match = monthly
+            start = max(0, monthly.start() - 12)
+            end = min(len(text), monthly.end() + 40)
+            terms["quote"] = terms["quote"] or text[start:end].strip()
+    if not term:
+        term = _term_near_offer(text, offer_match)
     pkg = _PACKAGE_FOR_RE.search(text)
     if pkg and not _MONTHLY_FEE_RE.search(pkg.group(0)):
         val = _money_value(pkg.group("amt"), pkg.group("k") or "")
