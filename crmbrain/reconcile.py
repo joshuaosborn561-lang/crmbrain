@@ -871,11 +871,20 @@ def reeval_discovery_scheduled(
             continue
         if reason == "past_grace_no_show":
             ev.stage_hint = "no_show"
-            kind = budget.classify("move", STAGE["meeting_booked"], STAGE["meeting_booked"])
+            kind = "archive_regression"
             if budget.aborted or not budget.allow(kind):
                 _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
                 continue
-            if not dry_run:
+            if dry_run:
+                propose_deal_write(
+                    report,
+                    action="move",
+                    label=label,
+                    stage=str((deal.get("properties") or {}).get("dealstage") or ""),
+                    deal_id=deal_id,
+                    reason="no_show_count",
+                )
+            else:
                 from crmbrain import ticker
                 from crmbrain.hubspot import increment_no_show_count
 
@@ -1033,6 +1042,9 @@ def _planned_change_count(
                     hs, timeline, deal, contact, upcoming_emails, held_events
                 )
                 ev = representative_engagement(timeline)
+                if reason == "past_grace_no_show":
+                    changed.add(deal_id)
+                    continue
                 if (
                     target
                     and reason != "unknown_scheduled_time"

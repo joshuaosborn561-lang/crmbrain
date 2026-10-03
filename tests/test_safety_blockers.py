@@ -307,7 +307,19 @@ def test_poc_hint_word_boundaries_and_no_gmail_query():
 
 
 def test_cold_sources_are_no_before_sales_hints():
-    for source in ("smartlead", "heyreach", "rvm", "gmail_person"):
+    for source in ("smartlead", "heyreach"):
+        ev = Engagement(
+            source=source,
+            external_id=source,
+            email="pat@acme.com",
+            first_name="Pat",
+            last_name="Lee",
+            raw_subject="SalesGlider discovery proposal pricing",
+            summary="Interested in a SalesGlider intro",
+        )
+        decision = heuristic_intent(ev)
+        assert decision.verdict == "yes", source
+    for source in ("rvm", "gmail_person"):
         ev = Engagement(
             source=source,
             external_id=source,

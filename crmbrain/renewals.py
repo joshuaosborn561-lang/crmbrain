@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from crmbrain.config import RENEWAL_PIPELINE, RENEWAL_STAGE, Settings, now_utc
+from crmbrain.deal_write import commit_deal_move
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.policy import CLOSED_WON_STAGES, canonicalize_stage, deal_is_locked, deal_pipeline
 
@@ -122,7 +123,8 @@ def apply_positive_replies(hs, deal: dict, count: int) -> str:
         and stage in {RENEWAL_STAGE["renewal_upcoming"], RENEWAL_STAGE["call_scheduled"]}
         and at_risk_needed(count)
     ):
-        hs.move_deal(str(deal["id"]), RENEWAL_STAGE["at_risk"], evidence="renewals:at_risk")
+        if not commit_deal_move(hs, deal, RENEWAL_STAGE["at_risk"], evidence="renewals:at_risk"):
+            return ""
         deal["properties"]["dealstage"] = RENEWAL_STAGE["at_risk"]
         return RENEWAL_STAGE["at_risk"]
     return ""
@@ -137,7 +139,8 @@ def move_to_call_scheduled(hs, deal: dict, ev: Engagement | None = None) -> bool
     if stage not in {RENEWAL_STAGE["renewal_upcoming"], RENEWAL_STAGE["at_risk"]}:
         return False
     evidence = f"{ev.source}:{ev.external_id}" if ev else "renewals:call_scheduled"
-    hs.move_deal(str(deal["id"]), RENEWAL_STAGE["call_scheduled"], evidence=evidence)
+    if not commit_deal_move(hs, deal, RENEWAL_STAGE["call_scheduled"], evidence=evidence, ev=ev):
+        return False
     deal.setdefault("properties", {})["dealstage"] = RENEWAL_STAGE["call_scheduled"]
     return True
 

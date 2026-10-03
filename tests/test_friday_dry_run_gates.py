@@ -263,8 +263,9 @@ def test_dry_run_gmail_person_and_smartlead_are_skip_not_create(tmp_path):
     _handle_engagement(person, settings, hs, memory, None, report)
     _handle_engagement(sl, settings, hs, memory, None, report)
     actions = [p.get("action") for p in report.proposed_writes]
-    assert "create" not in actions
     assert any("no meeting, skip HubSpot" in s for s in report.skipped)
+    assert "create" in actions
+    assert any(p.get("stage") == STAGE["initial_interest"] for p in report.proposed_writes)
     assert hs.writes == []
     assert hs.contacts == []
     assert hs.deals == []

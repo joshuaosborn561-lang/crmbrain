@@ -254,9 +254,16 @@ def call_supports_proposal_sent(ev: Engagement, facts: dict | None = None) -> bo
 
 
 def requires_josh_meeting_to_open_deal(ev: Engagement) -> bool:
-    """HeyReach / client-campaign prospects need a held or scheduled meeting with Josh."""
+    """Client-campaign leftovers need a held or scheduled meeting with Josh.
+
+    Smartlead / HeyReach / Allo positives open Initial Interest without a meeting.
+    """
     extra = ev.extra or {}
-    if ev.source in NEVER_OPEN_DEAL_SOURCES or extra.get("client_campaign") or extra.get("heyreach"):
+    if extra.get("client_campaign"):
+        return not (is_meeting_held(ev) or is_meeting_scheduled(ev))
+    if ev.source in INITIAL_INTEREST_SOURCES:
+        return False
+    if ev.source in NEVER_OPEN_DEAL_SOURCES:
         return not (is_meeting_held(ev) or is_meeting_scheduled(ev))
     return False
 
@@ -855,7 +862,11 @@ def may_open_new_deal(
         return False, "locked"
     if event_predates_freeze(ev, settings) and contact_has_any_deal(deals):
         return False, "manual_freeze"
-    if not contact and not (is_meeting_held(ev) or is_meeting_scheduled(ev)):
+    if (
+        not contact
+        and ev.source not in INITIAL_INTEREST_SOURCES
+        and not (is_meeting_held(ev) or is_meeting_scheduled(ev))
+    ):
         return False, "no_contact_no_meeting"
     if (
         is_client_context_ev(ev)
@@ -1481,6 +1492,11 @@ def live_open_deals(deals: list[dict] | None) -> list[dict]:
     for deal in deals or []:
         stage = (deal.get("properties") or {}).get("dealstage") or ""
         stage = canonicalize_stage(stage)
+        # Nurture is closed/lost-type for forecast, but we attach to it so a
+        # later call reopens the same deal instead of creating a duplicate.
+        if stage == STAGE["nurture"]:
+            live.append(deal)
+            continue
         if stage and stage not in CLOSED_STAGES and stage not in RENEWED_STAGES | CHURNED_STAGES:
             live.append(deal)
     return live

@@ -1120,11 +1120,9 @@ def test_smartlead_interested_leftover_does_not_leave_hubspot_contact(tmp_path):
         }
     )
     hs, memory, report = _handle(tmp_path, ev, hs=hs)
-    assert not any(w[0] == "upsert_contact" for w in hs.writes)
-    assert any(w[0] == "archive_contact" and w[1] == "mary-1" for w in hs.writes)
-    assert not any(c["id"] == "mary-1" for c in hs.contacts)
-    assert not any("never_booked" in t for t in report.ticker_enrolled)
-    assert any("no meeting, skip HubSpot" in s for s in report.skipped)
+    assert any(c["id"] == "mary-1" for c in hs.contacts)
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["initial_interest"]
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
     assert "smartlead:sl-mary" in memory._local["processed"]
 
 
