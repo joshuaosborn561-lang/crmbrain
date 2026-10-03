@@ -144,6 +144,58 @@ def is_client_context_ev(ev: Engagement) -> bool:
     return is_client_context(ev.display_name(), ev.company, ev.raw_subject)
 
 
+def is_silent_meeting(ev: Engagement) -> bool:
+    """Fireflies silent_meeting / no sentences is not a held call."""
+    extra = ev.extra or {}
+    if extra.get("silent_meeting") is True:
+        return True
+    status = str(extra.get("summary_status") or "").lower()
+    if "silent" in status:
+        return True
+    if extra.get("sentence_count") == 0 or extra.get("has_sentences") is False:
+        return True
+    return False
+
+
+def call_supports_proposal_sent(ev: Engagement, facts: dict | None = None) -> bool:
+    """Held, priced call with a proposal promised or sent."""
+    if ev.source not in {"fireflies", "cube_acr"}:
+        return False
+    if is_silent_meeting(ev) or not is_meeting_held(ev):
+        return False
+    facts = facts or {}
+    terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
+    from crmbrain.intelligence import tcv_from_terms
+
+    amount = (
+        str(facts.get("amount_hint") or facts.get("deal_amount") or "").strip()
+        or tcv_from_terms(terms)
+    )
+    if not amount:
+        return False
+    status = str(terms.get("status") or "").strip().lower()
+    if status in {"quoted", "accepted"}:
+        return True
+    blob = " ".join(
+        [
+            ev.summary or "",
+            ev.transcript or "",
+            ev.raw_subject or "",
+            str(terms.get("quote") or ""),
+            str(facts.get("stage_hint") or ""),
+        ]
+    ).lower()
+    return any(h in blob for h in ("proposal", "sow", "statement of work", "pricing", "quote"))
+
+
+def requires_josh_meeting_to_open_deal(ev: Engagement) -> bool:
+    """HeyReach / client-campaign prospects need a held or scheduled meeting with Josh."""
+    extra = ev.extra or {}
+    if ev.source in NEVER_OPEN_DEAL_SOURCES or extra.get("client_campaign") or extra.get("heyreach"):
+        return not (is_meeting_held(ev) or is_meeting_scheduled(ev))
+    return False
+
+
 def is_salesglider_intro(ev: Engagement) -> bool:
     blob = _blob(ev)
     return any(h in blob for h in SALESGLIDER_INTRO_HINTS)
@@ -346,7 +398,7 @@ def is_allo_discovery(ev: Engagement) -> bool:
 
 def is_meeting_held(ev: Engagement) -> bool:
     if ev.source == "fireflies":
-        return True
+        return not is_silent_meeting(ev)
     if ev.source == "cube_acr":
         return is_cube_business_discovery(ev)
     if ev.source == "allo":
@@ -429,12 +481,18 @@ def choose_deal_action(
     """Stage to write, or None to leave the deal / skip create."""
     if not requested:
         return None
+    if requires_josh_meeting_to_open_deal(ev) and not current:
+        return None
     held = is_meeting_held(ev)
     target = requested
     if held and target in {STAGE["nurture"], STAGE["no_show"]}:
-        target = STAGE["discovery_completed"]
+        if current not in {STAGE["nurture"], STAGE["closed_lost"]}:
+            target = STAGE["discovery_completed"]
     if current == STAGE["replied"] and held:
         target = STAGE["discovery_completed"]
+    if current in {STAGE["nurture"], STAGE["closed_lost"]}:
+        if target == STAGE["discovery_completed"] and not held:
+            return None
     if not current:
         if ev.source in NEVER_OPEN_DEAL_SOURCES:
             return None
@@ -468,8 +526,13 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
         return ""
     hint = facts.get("stage_hint") or ev.stage_hint
     stage = stage_id(hint) if hint else ""
+    if ev.source == "fireflies" and is_silent_meeting(ev):
+        return ""
     if ev.source != "gmail" and stage in MONEY_STAGES:
-        stage = ""
+        if stage == STAGE["proposal_sent"] and call_supports_proposal_sent(ev, facts):
+            pass
+        else:
+            stage = ""
     if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
         return STAGE["discovery_completed"]
     if stage:
@@ -479,6 +542,10 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     if ev.source == "calendly":
         return STAGE["discovery_scheduled"]
     if ev.source == "fireflies":
+        if is_silent_meeting(ev):
+            return ""
+        if call_supports_proposal_sent(ev, facts):
+            return STAGE["proposal_sent"]
         return STAGE["discovery_completed"]
     if ev.source == "cube_acr" and is_cube_business_discovery(ev):
         return STAGE["discovery_completed"]
@@ -908,6 +975,15 @@ def live_open_deals(deals: list[dict] | None) -> list[dict]:
         if stage not in {STAGE["closed_lost"], STAGE["paid"]}:
             live.append(deal)
     return live
+
+
+def closed_won_deals(deals: list[dict] | None) -> list[dict]:
+    won = []
+    for deal in deals or []:
+        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        if stage in CLOSED_WON_STAGES:
+            won.append(deal)
+    return won
 
 
 def deal_richness(deal: dict) -> tuple:

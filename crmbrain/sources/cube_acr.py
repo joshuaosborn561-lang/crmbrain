@@ -65,6 +65,8 @@ KIND_RANK = {
     "gdoc": 2,
     "text": 3,
 }
+EXTRACT_TEXT_CAP = 200_000
+AMR_MAX_BYTES = 12_000_000
 
 
 class CubeAuthError(Exception):
@@ -220,6 +222,7 @@ def list_transcript_candidates(
     dates: Iterable[str] | None = None,
     page_size: int = 100,
     backfill: bool = False,
+    folder_dates: set[str] | None = None,
 ) -> list[DriveFile]:
     """Recursive day-folder listing, newest first, lookback-bounded."""
     auth = auth or resolve_drive_auth(settings)
@@ -242,6 +245,8 @@ def list_transcript_candidates(
         if item.mime_type == FOLDER_MIME:
             m = DATE_FOLDER_RE.match(item.name.strip())
             item.folder_date = m.group(1) if m else ""
+            if item.folder_date and folder_dates is not None:
+                folder_dates.add(item.folder_date)
             if _in_window(item.modified_time, start, item.folder_date, allowed) or (
                 item.folder_date and item.folder_date in allowed
             ):
@@ -362,7 +367,84 @@ def _kind_for_file(item: DriveFile) -> str:
         return file_kind(item.name) or "docx"
     if item.name.lower().endswith((".txt", ".vtt", ".srt")):
         return "text"
+    if item.name.lower().endswith(".amr") or "audio/amr" in (item.mime_type or "").lower():
+        return "amr"
     return file_kind(item.name)
+
+
+def _warn(warnings: list[str] | None, message: str) -> None:
+    logger.warning(message)
+    if warnings is not None:
+        warnings.append(message)
+
+
+def report_cube_day_gaps(
+    files: list[DriveFile],
+    allowed_dates: set[str],
+    folder_dates: set[str],
+    warnings: list[str] | None = None,
+) -> None:
+    """Warn when a day has a .amr with no transcript, or a missing day-folder."""
+    amr_dates: set[str] = set()
+    transcript_dates: set[str] = set()
+    for item in files:
+        date = item.folder_date or ""
+        kind = _kind_for_file(item)
+        if kind == "amr":
+            if date:
+                amr_dates.add(date)
+        elif kind in {"docx_transcript", "docx", "gdoc", "text"}:
+            if date:
+                transcript_dates.add(date)
+    for day in sorted(allowed_dates):
+        if day not in folder_dates:
+            _warn(warnings, f"cube missing day-folder {day}")
+    for day in sorted(amr_dates):
+        if day not in transcript_dates:
+            _warn(warnings, f"cube day {day} has .amr with no transcript")
+
+
+def transcribe_amr_gemini(settings: Settings, content: bytes) -> str:
+    """Optional Gemini 2.5 Flash audio fallback for orphan .amr files."""
+    key = (getattr(settings, "gemini_key", "") or "").strip()
+    if not key or not content or len(content) > AMR_MAX_BYTES:
+        return ""
+    import base64
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
+    try:
+        resp = requests.post(
+            url,
+            params={"key": key},
+            json={
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": (
+                                    "Transcribe this sales call. Label speakers when possible. "
+                                    "Return plain text only."
+                                )
+                            },
+                            {
+                                "inline_data": {
+                                    "mime_type": "audio/amr",
+                                    "data": base64.b64encode(content).decode("ascii"),
+                                }
+                            },
+                        ]
+                    }
+                ],
+                "generationConfig": {"temperature": 0.1},
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        return str(body["candidates"][0]["content"]["parts"][0]["text"] or "").strip()
+    except Exception as exc:
+        logger.warning("gemini amr transcription failed: %s", exc)
+        return ""
 
 
 def _docx_via_python(content: bytes) -> str:
@@ -451,31 +533,38 @@ def scan(
     dates: Iterable[str] | None = None,
     *,
     backfill: bool = False,
+    warnings: list[str] | None = None,
 ) -> list[Engagement]:
     """Read Cube ACR via Drive API v3. Prefer .docx; export Google Docs as text."""
     auth = resolve_drive_auth(settings)
+    seen_folders: set[str] = set()
     try:
         candidates = list_transcript_candidates(
-            settings, auth, dates=dates, backfill=backfill
+            settings, auth, dates=dates, backfill=backfill, folder_dates=seen_folders
         )
     except PermissionError as exc:
         if auth.mode == "oauth" and (settings.google_api_key or "").strip():
             logger.warning("cube drive oauth denied (%s); falling back to GOOGLE_API_KEY", exc)
             auth = DriveAuth(mode="api_key", headers={}, key=settings.google_api_key.strip())
             candidates = list_transcript_candidates(
-                settings, auth, dates=dates, backfill=backfill
+                settings, auth, dates=dates, backfill=backfill, folder_dates=seen_folders
             )
         else:
             raise CubeAuthError(
                 f"{exc}; grant {DRIVE_READONLY} or set GOOGLE_API_KEY"
             ) from exc
 
+    allowed = set(dates or cube_listing_dates(settings, backfill=backfill))
+    report_cube_day_gaps(candidates, allowed, seen_folders, warnings)
+
     parsed: list[tuple[DriveFile, str, dict[str, str], str]] = []
     seen_ids: set[str] = set()
     seen_md5: set[str] = set()
     for item in candidates:
         kind = _kind_for_file(item)
-        if kind not in {"docx_transcript", "docx", "gdoc", "text"}:
+        if kind not in {"docx_transcript", "docx", "gdoc", "text", "amr"}:
+            continue
+        if kind == "amr":
             continue
         if item.file_id in seen_ids:
             continue
@@ -526,8 +615,8 @@ def scan(
                 first_name=first,
                 last_name=last.strip(),
                 phone=phone,
-                transcript=text[:20000],
-                summary=text[:800],
+                transcript=text[:EXTRACT_TEXT_CAP],
+                summary="",
                 raw_subject=item.name,
                 extra={
                     "folder_date": item.folder_date or meta.get("date") or "",
@@ -539,5 +628,52 @@ def scan(
                 },
             )
         )
+    covered_dates = {(ev.extra or {}).get("folder_date") or "" for ev in engagements}
+    seen_amr: set[str] = set()
+    for item in candidates:
+        if _kind_for_file(item) != "amr" or item.file_id in seen_amr:
+            continue
+        day = item.folder_date or ""
+        if day and day in covered_dates:
+            continue
+        seen_amr.add(item.file_id)
+        try:
+            raw = download_bytes(auth, item.file_id)
+        except Exception as exc:
+            logger.warning("cube amr download %s: %s", item.file_id, exc)
+            continue
+        text = transcribe_amr_gemini(settings, raw)
+        if looks_like_html(text) or len((text or "").strip()) < 20:
+            continue
+        meta = parse_cube_title(item.name)
+        name = meta.get("name") or ""
+        phone = meta.get("phone") or ""
+        if should_skip_cube_call(name=name, phone=phone, title=item.name):
+            continue
+        first, _, last = name.partition(" ")
+        engagements.append(
+            Engagement(
+                source="cube_acr",
+                external_id=item.file_id,
+                occurred_at=_occurred_at(meta, item),
+                name=name,
+                first_name=first,
+                last_name=last.strip(),
+                phone=phone,
+                transcript=text[:EXTRACT_TEXT_CAP],
+                summary="",
+                raw_subject=item.name,
+                extra={
+                    "folder_date": item.folder_date or meta.get("date") or "",
+                    "transcript_kind": "amr_gemini",
+                    "md5": item.md5,
+                    "call_time": meta.get("time") or "",
+                    "call_key": cube_call_key(meta),
+                    "drive_auth": auth.mode,
+                },
+            )
+        )
+        if item.folder_date:
+            covered_dates.add(item.folder_date)
     engagements.sort(key=lambda ev: ev.occurred_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return engagements

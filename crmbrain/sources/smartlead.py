@@ -8,7 +8,12 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
-from crmbrain.config import POSITIVE_SMARTLEAD_CATEGORIES, POSITIVE_SENTIMENTS, Settings
+from crmbrain.config import (
+    POSITIVE_SMARTLEAD_CATEGORIES,
+    POSITIVE_SENTIMENTS,
+    Settings,
+    is_client_context,
+)
 from crmbrain.models import Engagement
 
 logger = logging.getLogger(__name__)
@@ -155,6 +160,7 @@ def _engagement_from_row(
             "campaign_id": cid,
             "campaign_name": camp.get("name"),
             "lead_category_id": cat_id,
+            "client_campaign": is_client_context(title=str(camp.get("name") or ""), company=str(camp.get("name") or "")),
         },
     )
 

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import re
 
-from crmbrain.config import STAGE
-from crmbrain.intelligence import parse_deal_amount
+from crmbrain.config import JOSH_EMAILS, STAGE, is_josh_address
+from crmbrain.intelligence import format_amount, parse_deal_amount, _money_value, _MONEY_RE
 
 FREE_DOC_HINTS = (
     "free sow",
@@ -77,13 +77,88 @@ PAYMENT_FROM_RE = re.compile(
     r"(?:you received a payment|payment received).{0,80}?\bfrom\s+([^.\n]{3,80})",
     re.I,
 )
+PAYER_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+TOTAL_HINT_RE = re.compile(
+    r"(?:total|in full|full amount|contract (?:value|total)|agreement total)",
+    re.I,
+)
+INSTALMENT_HINT_RE = re.compile(r"install?ment|this payment|partial payment", re.I)
+_PAYMENT_SKIP_EMAIL = (
+    "hubspot",
+    "salesglider",
+    "stripe.com",
+    "quickbooks",
+    "intuit.com",
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "pandadoc",
+    "docusign",
+)
 _COMPANY_TOKENS = (" group", " llc", " inc", " ltd", " energy", " partners", " company", " co.")
+
+
+def _skip_payer_email(email: str) -> bool:
+    low = (email or "").strip().lower()
+    if not low or low in JOSH_EMAILS or is_josh_address(low):
+        return True
+    return any(h in low for h in _PAYMENT_SKIP_EMAIL)
+
+
+def payer_emails_from_body(body: str) -> list[str]:
+    """Payer emails live in the payment BODY; headers are HubSpot/Josh."""
+    out: list[str] = []
+    for match in PAYER_EMAIL_RE.finditer(body or ""):
+        email = match.group(0).strip().lower()
+        if _skip_payer_email(email) or email in out:
+            continue
+        out.append(email)
+    return out
+
+
+def payment_amount_from_text(text: str) -> tuple[str, bool]:
+    """Return (amount, is_instalment). Prefer a stated total over one instalment."""
+    blob = text or ""
+    totals: list[str] = []
+    others: list[str] = []
+    for match in _MONEY_RE.finditer(blob):
+        num = match.group(1) or match.group(3) or match.group(5)
+        suffix = match.group(2) or match.group(4) or match.group(6) or ""
+        val = _money_value(num, suffix)
+        if val is None:
+            continue
+        formatted = format_amount(val)
+        if not formatted:
+            continue
+        start = max(0, match.start() - 40)
+        window = blob[start:match.end() + 8]
+        if TOTAL_HINT_RE.search(window):
+            totals.append(formatted)
+        else:
+            others.append(formatted)
+    is_instalment = bool(INSTALMENT_HINT_RE.search(blob))
+    if totals:
+        try:
+            return max(totals, key=lambda x: float(x)), False
+        except ValueError:
+            return totals[0], False
+    parsed = parse_deal_amount(blob)
+    if parsed:
+        return parsed, is_instalment and len(set(others)) == 1
+    if others:
+        try:
+            pick = max(others, key=lambda x: float(x))
+        except ValueError:
+            pick = others[0]
+        return pick, is_instalment
+    return "", is_instalment
 
 
 def commerce_match_fields(subject: str, snippet: str = "", body: str = "") -> tuple[str, str, str]:
     """Payer name, company, amount from a payment or agreement mail."""
     text = f"{subject}\n{snippet}\n{body}"
-    amount = parse_deal_amount(text)
+    pay_amount, _instalment = payment_amount_from_text(text)
+    amount = pay_amount or parse_deal_amount(text)
     company = ""
     party = AGREEMENT_PARTY_RE.search(text)
     if party:

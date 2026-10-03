@@ -9,7 +9,7 @@ from crmbrain.briefing import (
     render,
 )
 from crmbrain.enrichment import _apply_row, _rows_from_result
-from crmbrain.config import CDT, is_client_context, is_internal_meeting, is_personal
+from crmbrain.config import CDT, STAGE, is_client_context, is_internal_meeting, is_personal
 from crmbrain.http_mcp import clean_drive_id, extract_drive_ids
 from crmbrain.intelligence import (
     amount_to_write,
@@ -106,15 +106,22 @@ def test_amount_extract_never_hallucinates_pitch_or_vague():
     assert parse_deal_amount("Happy to run a free 10K lead campaign.") == ""
     assert parse_deal_amount("Maybe around a few thousand if it makes sense.") == ""
     assert parse_deal_amount("There were 14+ replies per month.") == ""
-    # Two different stated prices — do not pick one.
+    # Alternative packages without a term stay empty; ranges / monthly*term do not bail.
     assert parse_deal_amount("Monthly retainer of $3,000 or the $8,500 package.") == ""
     # Gemini invents a number that is not in the transcript.
     text = "Great discovery. They liked the roofing case study and the $2M pipeline."
     assert normalize_amount_hint("4500", text) == ""
     assert normalize_amount_hint("3000", "Monthly retainer is $3,000.") == "3000"
+    assert normalize_amount_hint(
+        "9000",
+        "Looking at $3-4k/mo with a 3-month minimum.",
+        quote="$3-4k/mo with a 3-month minimum",
+    ) == "9000"
     assert amount_to_write("", "3000") == "3000"
     assert amount_to_write("0", "3000") == "3000"
     assert amount_to_write("8500", "3000") == ""
+    assert amount_to_write("8500", "20000", incoming_source="proposal_email", existing_source="call") == "20000"
+    assert amount_to_write("8500", "2875.50", stage=STAGE["paid"], incoming_source="payment") == ""
 
 
 def test_empty_gemini_does_not_wipe_heuristic_notes():

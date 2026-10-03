@@ -96,7 +96,7 @@ def _reserve_budget(
     report: CycleReport,
     ev: Engagement,
 ) -> bool:
-    """Reserve one create or stage_move. Overflow → review_queue reason cap."""
+    """Reserve one create, stage_move, or amount write. Overflow → review_queue reason cap."""
     if not kind:
         return True
     if budget is None:
@@ -164,6 +164,18 @@ def _event_unprocessed(ev: Engagement, memory: Memory | None) -> bool:
     if memory is None or not hasattr(memory, "already_processed"):
         return True
     return not memory.already_processed(ev.source, ev.external_id)
+
+
+def should_reextract(settings: Settings, ev: Engagement) -> bool:
+    """Rerun deal_terms on already-processed Fireflies/Cube events."""
+    since = getattr(settings, "reextract_since", None)
+    if since is None:
+        return False
+    if ev.source not in {"fireflies", "cube_acr"}:
+        return False
+    if ev.occurred_at and ev.occurred_at < since:
+        return False
+    return True
 
 
 def _handle_would_write(ev: Engagement, hs: HubSpot, memory: Memory | None) -> bool:
@@ -407,10 +419,32 @@ def _handle_engagement(
         return
 
     if memory.already_processed(ev.source, ev.external_id):
-        if settings.dry_run:
+        reextract = should_reextract(settings, ev)
+        if settings.dry_run and not reextract:
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
             return
         if ev.source in {"fireflies", "cube_acr"} and already:
+            if settings.dry_run and reextract:
+                facts = intelligence.extract(settings, ev)
+                stage = policy.resolve_stage(ev, facts)
+                amount = facts.get("amount_hint") or facts.get("deal_amount") or ""
+                kind = _handle_budget_kind(ev, already, hs)
+                if not _reserve_budget(budget, kind, memory, report, ev):
+                    return
+                if amount and not _reserve_budget(budget, "amount", memory, report, ev):
+                    return
+                report.proposed_writes.append(
+                    ProposedWrite(
+                        action="update",
+                        label=ev.display_name() or ev.email or ev.phone,
+                        stage=stage,
+                        amount=str(amount or ""),
+                        contact_id=str(already.get("id") or ""),
+                        reason="reextract",
+                    ).as_dict()
+                )
+                report.skipped.append(f"{ev.source}:{ev.external_id} reextract dry-run")
+                return
             _apply_transcript_intelligence(
                 ev,
                 settings,
@@ -556,10 +590,19 @@ def _apply_transcript_intelligence(
         report.skipped.append(f"{ev.display_name() or ev.email} signed/paid notes only")
         return facts
     amount = facts.get("amount_hint") or facts.get("deal_amount") or ""
+    if isinstance(facts.get("deal_terms"), dict):
+        ev.extra = dict(ev.extra or {})
+        ev.extra.setdefault("deal_terms", facts["deal_terms"])
+        ev.extra.setdefault("amount_source", intelligence.amount_source_kind(ev))
     if stage or amount:
         live = policy.live_open_deals(deals)
         if ev.source in {"cube_acr", "fireflies"} and not live and not policy.held_call_may_open_deal(ev):
             return facts
+        if policy.requires_josh_meeting_to_open_deal(ev) and not live:
+            return facts
+        prev_amount = ""
+        if live:
+            prev_amount = str((max(live, key=policy.deal_richness).get("properties") or {}).get("amount") or "")
         if reserved is None:
             extra_kind = None
             if stage and not live:
@@ -570,6 +613,15 @@ def _apply_transcript_intelligence(
                     extra_kind = "stage_move"
             if extra_kind and not _reserve_budget(budget, extra_kind, memory, report, ev):
                 return facts
+        want_amount = bool(amount) and not intelligence.amounts_equal(prev_amount, amount)
+        if want_amount:
+            probe = {"properties": {"amount": prev_amount, "dealstage": ""}}
+            if live:
+                probe = max(live, key=policy.deal_richness)
+            if not intelligence.deal_amount_to_write(probe, amount, ev=ev):
+                want_amount = False
+        if want_amount and not _reserve_budget(budget, "amount", memory, report, ev):
+            return facts
         try:
             deal = hs.upsert_deal(contact, ev, stage, amount=amount)
         except Exception as exc:
@@ -581,9 +633,12 @@ def _apply_transcript_intelligence(
             if stage in {STAGE["discovery_scheduled"], STAGE["discovery_completed"], STAGE["paid"], STAGE["signed"]}:
                 memory.stop_ticker(email=ev.email, hs_contact_id=contact["id"])
         live_amount = (deal.get("properties") or {}).get("amount")
-        wrote_amount = bool(deal.get("id") and amount and intelligence.amounts_equal(live_amount, amount))
-        if deal.get("id") and amount and not wrote_amount:
-            wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
+        wrote_amount = False
+        if deal.get("id") and amount:
+            if not intelligence.amounts_equal(prev_amount, amount) and intelligence.amounts_equal(live_amount, amount):
+                wrote_amount = True
+            elif not intelligence.amounts_equal(live_amount, amount):
+                wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
         if wrote_amount:
             report.amounts_set.append(f"{ev.display_name() or ev.email} {amount}")
             logger.info("amounts_set %s %s", ev.display_name() or ev.email, amount)
@@ -1006,6 +1061,11 @@ def apply_gmail_stage_update(
         if live:
             deal_row = max(live, key=policy.deal_richness)
             current = (deal_row.get("properties") or {}).get("dealstage") or ""
+        elif ev.stage_hint == STAGE["paid"]:
+            won = policy.closed_won_deals(deals)
+            if won:
+                deal_row = max(won, key=policy.deal_richness)
+                current = (deal_row.get("properties") or {}).get("dealstage") or ""
         write_stage = policy.choose_deal_action(current or None, ev.stage_hint, ev, deal=deal_row)
         if not write_stage:
             report.skipped.append(
@@ -1034,9 +1094,26 @@ def apply_gmail_stage_update(
         if not _reserve_budget(budget, gmail_kind, memory, report, ev):
             return
         amount = str((ev.extra or {}).get("amount") or "")
+        prev_amount = str((deal_row.get("properties") or {}).get("amount") or "") if deal_row else ""
+        want_amount = bool(amount) and not intelligence.amounts_equal(prev_amount, amount)
+        if want_amount:
+            probe = deal_row or {"properties": {"amount": prev_amount, "dealstage": current}}
+            if not intelligence.deal_amount_to_write(probe, amount, ev=ev):
+                want_amount = False
+        if want_amount and not _reserve_budget(budget, "amount", memory, report, ev):
+            return
         deal = hs.upsert_deal(contact or {"id": contact_id, "properties": {}}, ev, write_stage, amount=amount)
         report.deals_moved.append(f"{ev.email} gmail -> {ev.stage_hint} ({deal.get('id')})")
-        if amount and deal.get("id"):
+        live_amount = (deal.get("properties") or {}).get("amount")
+        wrote_amount = bool(
+            deal.get("id")
+            and amount
+            and not intelligence.amounts_equal(prev_amount, amount)
+            and intelligence.amounts_equal(live_amount, amount)
+        )
+        if deal.get("id") and amount and not wrote_amount:
+            wrote_amount = hs.fill_deal_amount(deal, amount, ev=ev, contact=contact)
+        if wrote_amount:
             report.amounts_set.append(f"{ev.email} {amount}")
         if ev.stage_hint == STAGE["no_show"]:
             ticker.enroll(memory, ev, "no_show", hs_contact_id=contact_id)
@@ -1077,7 +1154,15 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         return report
 
     last_started = memory.last_finished_run_started_at()
-    settings = replace(settings, lookback_start_at=compute_lookback_start(settings, last_started))
+    lookback = compute_lookback_start(settings, last_started)
+    reextract_since = getattr(settings, "reextract_since", None)
+    if reextract_since is not None:
+        if reextract_since.tzinfo is None:
+            reextract_since = reextract_since.replace(tzinfo=lookback.tzinfo)
+        lookback = min(lookback, reextract_since)
+        settings = replace(settings, lookback_start_at=lookback, lookback_override=True, reextract_since=reextract_since)
+    else:
+        settings = replace(settings, lookback_start_at=lookback)
     budget = WriteBudget.from_settings(settings)
     hs = HubSpot(settings)
     if not briefs_only and not settings.dry_run:
@@ -1144,7 +1229,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             skip_cube_freshness = True
     if has_drive_access(settings):
         try:
-            cube_events = cube_acr.scan(settings, backfill=cube_backfill)
+            cube_events = cube_acr.scan(settings, backfill=cube_backfill, warnings=report.warnings)
             if cube_backfill:
                 report.warnings.append(
                     f"cube_acr: one-time backfill ({getattr(settings, 'cube_lookback_days', 14)}d)"

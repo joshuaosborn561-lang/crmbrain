@@ -457,8 +457,19 @@ class HubSpot:
                 return hits[0]
         return None
 
-    def find_contact_for_commerce(self, name: str = "", company: str = "", amount: str = "") -> dict | None:
+    def find_contact_for_commerce(
+        self, name: str = "", company: str = "", amount: str = "", email: str = ""
+    ) -> dict | None:
         """Match a payment or agreement mail to one CRM contact."""
+        if email:
+            found = self.find_contact(email=email)
+            if found:
+                return found
+            token = email.split("@", 1)[0]
+            if token and hasattr(self, "search_contacts_by_email_token"):
+                rows = self.search_contacts_by_email_token(email) or self.search_contacts_by_email_token(token)
+                if len(rows) == 1:
+                    return rows[0]
         if name:
             found = self._find_contact_by_name(name)
             if found:
@@ -511,6 +522,10 @@ class HubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        won = policy.closed_won_deals(existing)
+        if won and stage == STAGE["paid"]:
+            deal = max(won, key=policy.deal_richness)
+            return self._apply_live_deal(deal, ev, stage, amount, contact)
         if policy.blocks_no_show_create(existing, stage):
             return {}
         target = policy.choose_deal_action(None, stage, ev) if stage else None
@@ -521,6 +536,10 @@ class HubSpot:
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)
+            return self._apply_live_deal(deal, ev, stage, amount, contact)
+        won = policy.closed_won_deals(existing)
+        if won and stage == STAGE["paid"]:
+            deal = max(won, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
         if policy.blocks_no_show_create(existing, stage):
             return {}
@@ -546,6 +565,14 @@ class HubSpot:
         created = resp.json()
         if amount:
             created.setdefault("properties", {})["amount"] = amount
+            extra = ev.extra or {}
+            note = intelligence.amount_citation_note(
+                ev, amount, extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else None
+            )
+            try:
+                self.add_note(str(contact_id), note, ev=ev, contact=contact)
+            except Exception as exc:
+                logger.warning("amount note failed %s: %s", contact_id, exc)
         return created
 
     def fill_deal_amount(
@@ -555,15 +582,26 @@ class HubSpot:
         ev: Engagement | None = None,
         contact: dict | None = None,
     ) -> bool:
-        """PATCH amount only when the live deal amount is empty. Never invent."""
+        """PATCH amount by source priority. Paid only from doc/payment evidence."""
         if self._is_excluded(ev, contact):
             logger.info("skip hubspot amount write for excluded person")
             return False
-        hint = intelligence.amount_to_write((deal.get("properties") or {}).get("amount"), amount)
+        hint = intelligence.deal_amount_to_write(deal, amount, ev=ev)
         if not hint or not deal.get("id"):
+            return False
+        if intelligence.amounts_equal((deal.get("properties") or {}).get("amount"), hint):
             return False
         self.patch_deal(str(deal["id"]), {"amount": hint})
         deal.setdefault("properties", {})["amount"] = hint
+        if contact and contact.get("id"):
+            extra = (ev.extra if ev else {}) or {}
+            note = intelligence.amount_citation_note(
+                ev, hint, extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else None
+            )
+            try:
+                self.add_note(str(contact["id"]), note, ev=ev, contact=contact)
+            except Exception as exc:
+                logger.warning("amount note failed %s: %s", contact.get("id"), exc)
         return True
 
     def patch_deal(self, deal_id: str, properties: dict[str, Any]) -> None:

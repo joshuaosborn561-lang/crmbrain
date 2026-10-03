@@ -679,7 +679,9 @@ def test_gmail_scan_ignores_body_emails_on_pandadoc_and_stripe():
         ]
     )
     events = scan_gmail(make_settings(), gmail, hs, report)
-    assert events == []
+    assert len(events) == 1
+    assert events[0].email == "paid@acme.com"
+    assert events[0].stage_hint == STAGE["paid"]
     assert any("not in CRM" in x for x in report.junk_blocked)
     assert not any(w[0] == "upsert_contact" for w in hs.writes)
 

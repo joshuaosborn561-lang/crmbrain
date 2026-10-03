@@ -159,7 +159,16 @@ class FakeHubSpot:
                 hits.append(deal)
         return hits[0] if len(hits) == 1 else None
 
-    def find_contact_for_commerce(self, name="", company="", amount=""):
+    def find_contact_for_commerce(self, name="", company="", amount="", email=""):
+        if email:
+            found = self.find_contact(email=email)
+            if found:
+                return found
+            token = (email or "").split("@", 1)[0]
+            if token:
+                rows = self.search_contacts_by_email_token(email) or self.search_contacts_by_email_token(token)
+                if len(rows) == 1:
+                    return rows[0]
         if name:
             found = self.find_contact(name=name)
             if found:
@@ -266,13 +275,15 @@ class FakeHubSpot:
                 deal.setdefault("properties", {}).update(properties)
 
     def fill_deal_amount(self, deal, amount, ev=None, contact=None):
-        from crmbrain.intelligence import amount_to_write
+        from crmbrain.intelligence import amount_citation_note, deal_amount_to_write
 
-        hint = amount_to_write((deal.get("properties") or {}).get("amount"), amount)
+        hint = deal_amount_to_write(deal, amount, ev=ev)
         if not hint or not deal.get("id"):
             return False
         self.patch_deal(str(deal["id"]), {"amount": hint})
         deal.setdefault("properties", {})["amount"] = hint
+        if ev and contact and contact.get("id"):
+            self.add_note(contact["id"], amount_citation_note(ev, hint), ev=ev, contact=contact)
         return True
 
     def upsert_deal(self, contact, ev, stage, amount=""):
@@ -284,6 +295,11 @@ class FakeHubSpot:
             self.archive_deal(dup["id"])
         existing = self.open_deals_for_contact(contact["id"])
         live = policy.live_open_deals(existing)
+        won = policy.closed_won_deals(existing)
+        if not live and won and stage == STAGE["paid"]:
+            deal = max(won, key=policy.deal_richness)
+            self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
+            return deal
         if not live and policy.blocks_no_show_create(existing, stage):
             return {}
         wanted = policy.deal_name_for(ev, contact)
@@ -303,7 +319,7 @@ class FakeHubSpot:
             if cleaned and cleaned != current_name:
                 deal["properties"]["dealname"] = cleaned
                 self.patch_deal(deal["id"], {"dealname": cleaned})
-            self.fill_deal_amount(deal, amount)
+            self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
             return deal
         target = choose_deal_action(None, stage, ev) if stage else None
         if not target:
@@ -317,6 +333,10 @@ class FakeHubSpot:
             "properties": props,
         }
         self.deals.append(deal)
+        if amount and contact and contact.get("id"):
+            from crmbrain.intelligence import amount_citation_note
+
+            self.add_note(contact["id"], amount_citation_note(ev, amount), ev=ev, contact=contact)
         return deal
 
 
@@ -785,7 +805,7 @@ def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
     assert hs.deals[0]["properties"]["dealname"] == "Laura Klein"
     assert report.notes_updated
     assert any("4500" in a for a in report.amounts_set)
-    assert hs.notes == []
+    assert any("4500" in (n[1] or "") for n in hs.notes)
     assert len(hs.contacts) == 1
 
 
@@ -826,7 +846,7 @@ def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
     assert any("refreshed notes/amount" in s for s in report.skipped)
     assert any(p[1].get("family_notes") for p in hs.patches)
     assert hs.deals[0]["properties"]["amount"] == "4500"
-    assert hs.notes == []
+    assert any("4500" in (n[1] or "") for n in hs.notes)
 
 
 def test_notes_amount_backfill_dry_run_does_not_write():

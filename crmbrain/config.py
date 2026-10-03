@@ -163,7 +163,9 @@ class Settings:
     max_archives_regressions: int = 10
     max_creates: int = 10
     max_stage_moves: int = 20
+    max_amount_writes: int = 20
     max_change_fraction: float = 0.15
+    reextract_since: datetime | None = None
     google_api_key: str = ""
     cube_lookback_days: int = 14
 
@@ -205,7 +207,9 @@ class Settings:
             max_archives_regressions=int(os.getenv("MAX_ARCHIVES_REGRESSIONS", "10")),
             max_creates=int(os.getenv("MAX_CREATES", "10")),
             max_stage_moves=int(os.getenv("MAX_STAGE_MOVES", "20")),
+            max_amount_writes=int(os.getenv("MAX_AMOUNT_WRITES", "20")),
             max_change_fraction=float(os.getenv("MAX_CHANGE_FRACTION", "0.15")),
+            reextract_since=_parse_lookback_start(os.getenv("CRMBRAIN_REEXTRACT_SINCE", "")),
             google_api_key=os.getenv("GOOGLE_API_KEY", ""),
             cube_lookback_days=int(os.getenv("CUBE_LOOKBACK_DAYS", "14")),
         )
