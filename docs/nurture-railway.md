@@ -11,7 +11,21 @@ in the same Railway project (`crmbrain`) and the same environment (`production`)
 - Channel: `#nurture` `C0BHBDTMRFY`
 - Reuse the existing bot token (`SLACK_BOT_TOKEN`)
 
-Interactivity Request URL:
+Slack allows **one** Interactivity Request URL per app. App `A0AS2JUNFM3`
+previously pointed at the legacy Fireflies/HubSpot card service:
+
+```
+https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions
+```
+
+Point Interactivity at this nurture service. `/slack/interactions` handles only
+`nurture_*` `action_id` / `callback_id` values. Everything else (older
+Approve / Edit / Reject buttons) is forwarded unchanged — raw body plus
+`X-Slack-Signature`, `X-Slack-Request-Timestamp`, and `Content-Type` — to
+`LEGACY_SLACK_INTERACTIONS_URL` (that URL by default). Nurture actions verify
+the Slack signing secret here; the legacy hop may pass through because that
+service verifies the signature itself. Slack is always acked within 3s; a
+legacy `view_submission` body is relayed when it returns in time.
 
 ```
 https://<this-service-public-domain>/slack/interactions
@@ -37,7 +51,8 @@ uvicorn crmbrain.nurture_app:app --host 0.0.0.0 --port $PORT
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SLACK_SIGNING_SECRET` | (required) | HMAC-SHA256 `v0` verification |
+| `SLACK_SIGNING_SECRET` | (required) | HMAC-SHA256 `v0` verification for `nurture_*` actions |
+| `LEGACY_SLACK_INTERACTIONS_URL` | `https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions` | Non-nurture clicks (old Fireflies/HubSpot cards) |
 | `SLACK_BOT_TOKEN` | existing | `chat.postMessage` / `chat.update` / `views.open` |
 | `SLACK_NURTURE_CHANNEL` | `C0BHBDTMRFY` | #nurture |
 | `NURTURE_POST_ENABLED` | off | Cron posts Block Kit cards when `1` |

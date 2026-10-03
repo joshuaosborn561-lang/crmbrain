@@ -226,6 +226,11 @@ CLIENT_HINTS = (
 )
 
 
+DEFAULT_LEGACY_SLACK_INTERACTIONS_URL = (
+    "https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions"
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     hubspot_token: str
@@ -270,6 +275,7 @@ class Settings:
     nurture_post_enabled: bool = False
     slack_signing_secret: str = ""
     nurture_max_per_weekday: int = 5
+    legacy_slack_interactions_url: str = DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -319,6 +325,10 @@ class Settings:
             nurture_post_enabled=os.getenv("NURTURE_POST_ENABLED", "").strip().lower() in {"1", "true", "yes"},
             slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET", ""),
             nurture_max_per_weekday=int(os.getenv("NURTURE_MAX_PER_WEEKDAY", "5")),
+            legacy_slack_interactions_url=(
+                os.getenv("LEGACY_SLACK_INTERACTIONS_URL", "").strip()
+                or DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
+            ),
         )
 
 

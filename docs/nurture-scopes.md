@@ -30,3 +30,6 @@ be inspected here. Check production with `python -m crmbrain google-scopes`.
 
 Also set the Interactivity Request URL to the Railway nurture service
 `POST /slack/interactions` and keep `SLACK_SIGNING_SECRET` on that service.
+Non-`nurture_*` clicks are forwarded to `LEGACY_SLACK_INTERACTIONS_URL`
+(the previous Fireflies webhook) so the one-URL Slack limit does not break
+legacy Approve / Edit / Reject cards.
