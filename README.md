@@ -84,7 +84,10 @@ To enroll historical 90-day nurture ticker rows (dry-run by default; never email
 ```bash
 python scripts/backfill_nurture_ticker.py
 python scripts/backfill_nurture_ticker.py --apply
+python scripts/nurture_dry_run_samples.py
 ```
+
+Josh rule: enroll only people who met or booked a real meeting. A positive reply alone does not qualify. Cards post to `#nurture` (`C0BHBDTMRFY`) as Block Kit with Approve / Edit / Remove. Approve and Edit send a 1:1 Gmail thread reply from `joshua@salesglidergrowth.com` only when `NURTURE_SEND_ENABLED=1`. Posting cards requires `NURTURE_POST_ENABLED=1`. Slack interactivity is a **separate** Railway service (`POST /slack/interactions`) — see `docs/nurture-railway.md`. The cron start command stays `python -m crmbrain cycle`.
 
 ## Railway
 
@@ -108,7 +111,7 @@ Full cycle:
 8. Extracts relational notes onto the contact (Fireflies / Cube every cycle, including a notes refresh if the transcript was already processed)
 9. Fills empty deal `amount` when the transcript states a retainer / proposal / package price
 10. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
-11. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
+11. Enrolls **met/booked** contacts on a repeating 90-day ticker; Slack gets a Block Kit card (when `NURTURE_POST_ENABLED`), nothing sends unless Josh clicks Approve/Edit and `NURTURE_SEND_ENABLED` is on
 12. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 13. Reconciles HubSpot to the per-person evidence timeline (create / restore / advance / regress). Upcoming Calendar events are always scanned (next 30 days), not just the email lookback. Low-confidence meetings go to `crmbrain.review_queue`.
 14. Alarms in the cycle report when Gmail, Fireflies, Calendar, Cube ACR, or Smartlead has not produced data in more than two business days. Allo is not in the cycle (calls live in Cube).
@@ -139,6 +142,6 @@ Gemini 2.5 Flash when `GEMINI_API_KEY` is set. Heuristics still run without it.
 
 ## Not this job
 
-- Emailing prospects
+- Emailing prospects except Josh-approved #nurture thread replies (gated, never Smartlead)
 - Creating HubSpot tasks
 - Using the master SmartLead key

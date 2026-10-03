@@ -69,8 +69,8 @@ def test_memory_records_supabase_errors_on_report(tmp_path: Path):
     assert memory.start_run() is None
     memory.finish_run(9, "ok", {"errors": []})
     due = memory.due_ticker("2026-01-01T00:00:00+00:00")
-    assert due
-    assert any(row.get("email") == "pat@example.com" for row in due)
+    assert due == []
+    assert any("ticker_supabase_unavailable" in e or "due_ticker" in e for e in memory.errors)
 
     report = CycleReport()
     report.errors.extend(memory.drain_errors())
@@ -261,18 +261,20 @@ def test_fire_ticker_posts_subject_and_body_for_approval(tmp_path: Path, monkeyp
             "reason": "kicked_can",
             "status": "active",
             "next_fire_at": "2020-01-01T00:00:00+00:00",
+            "last_touch_snippet": "Check back after our busy season.",
         }
     ]
     report = CycleReport()
     _fire_ticker(settings, memory, report)
-    assert posted
-    text = posted[0]
-    assert "90-day ticker (approve before send)" in text
-    assert "To: jackie@kellyroofing.com" in text
-    assert "Why: kicked_can" in text
-    assert "Subject: Roofing?" in text
-    assert "Josh Osborn" in text
-    assert "$100K" in text
+    assert posted == []
+    assert report.nurture_cards
+    card = report.nurture_cards[0]
+    assert "90-day ticker (approve before send)" in card["text"]
+    assert "To: jackie@kellyroofing.com" in card["text"]
+    assert "Why: kicked_can" in card["text"]
+    assert card["subject"] == "Roofing?"
+    assert "Josh Osborn" in card["body"]
+    assert "$100K" in card["body"]
     assert report.ticker_drafts == ["jackie@kellyroofing.com"]
 
 

@@ -295,17 +295,40 @@ class Gmail:
         resp.raise_for_status()
         return resp.json().get("items") or []
 
-    def send(self, to: str, subject: str, body: str) -> None:
+    def send(self, to: str, subject: str, body: str) -> dict[str, Any]:
+        return self.send_thread_reply(to, subject, body, thread_id="")
+
+    def send_thread_reply(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        thread_id: str,
+        in_reply_to: str = "",
+        references: str = "",
+    ) -> dict[str, Any]:
+        """Send a 1:1 reply in the original Gmail thread. Needs gmail.send."""
+        from crmbrain.nurture import thread_reply_headers
+
+        headers = thread_reply_headers(subject, in_reply_to=in_reply_to, references=references)
         msg = MIMEText(body)
         msg["to"] = to
         msg["from"] = "joshua@salesglidergrowth.com"
-        msg["subject"] = subject
+        msg["subject"] = headers["Subject"]
+        if headers.get("In-Reply-To"):
+            msg["In-Reply-To"] = headers["In-Reply-To"]
+        if headers.get("References"):
+            msg["References"] = headers["References"]
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        payload: dict[str, Any] = {"raw": raw}
+        if thread_id:
+            payload["threadId"] = thread_id
         resp = self._request(
             "POST",
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
             headers={**self._headers(), "Content-Type": "application/json"},
-            json={"raw": raw},
+            json=payload,
             timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
+        return resp.json() if resp.content else {}

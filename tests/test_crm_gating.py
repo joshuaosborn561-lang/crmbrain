@@ -453,7 +453,7 @@ def test_smartlead_without_meeting_skips_hubspot(tmp_path):
     assert hs.contacts == []
     assert hs.deals == []
     assert any("no meeting, skip HubSpot" in s for s in report.skipped)
-    assert any("never_booked" in t for t in report.ticker_enrolled)
+    assert not any("never_booked" in t for t in report.ticker_enrolled)
     assert "smartlead:sl-1" in memory._local["processed"]
 
 
@@ -1114,7 +1114,7 @@ def test_smartlead_interested_leftover_does_not_leave_hubspot_contact(tmp_path):
     assert not any(w[0] == "upsert_contact" for w in hs.writes)
     assert any(w[0] == "archive_contact" and w[1] == "mary-1" for w in hs.writes)
     assert not any(c["id"] == "mary-1" for c in hs.contacts)
-    assert any("never_booked" in t for t in report.ticker_enrolled)
+    assert not any("never_booked" in t for t in report.ticker_enrolled)
     assert any("no meeting, skip HubSpot" in s for s in report.skipped)
     assert "smartlead:sl-mary" in memory._local["processed"]
 

@@ -1,0 +1,733 @@
+{
+  "generated_from": "fixtures/nurture_fixtures.json real_sample + synthetics",
+  "note": "No live HubSpot/Gmail tokens in this environment. Cards match compose_nurture_draft + build_nurture_card.",
+  "count": 10,
+  "mix": {
+    "industry": 7,
+    "general": 3,
+    "hubspot": 7,
+    "gmail": 1
+  },
+  "cards": [
+    {
+      "name": "Jackie Darkazalli",
+      "email": "jackie@kellyroofing.com",
+      "source": "hubspot",
+      "industry": "roofing",
+      "subject": "Roofing?",
+      "body": "Hey Jackie, you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* jackie@kellyroofing.com\n*Why:* kicked_can\n*Source:* hubspot / -\n*Signal:* Jul 1, 2026\n*They said:* \"Check back after our busy season. Roofing crews are slammed until fall.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Roofing?\n\n```Hey Jackie, you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-jackie",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-jackie"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-jackie"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-jackie"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: jackie@kellyroofing.com\nWhy: kicked_can\nSource: hubspot / \nSignal: Jul 1, 2026\nThey said: \"Check back after our busy season. Roofing crews are slammed until fall.\"\nSubject: Roofing?\n\nHey Jackie, you mentioned check back after our busy season. Roofing crews are slammed until fall.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Joel Stewart",
+      "email": "joel@thechillbrothers.com",
+      "source": "hubspot",
+      "industry": "hvac",
+      "subject": "HVAC update",
+      "body": "Hey Joel, you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* joel@thechillbrothers.com\n*Why:* kicked_can\n*Source:* hubspot / -\n*Signal:* Jul 10, 2026\n*They said:* \"We are slammed through summer, check back in the fall about filling shoulder season.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* HVAC update\n\n```Hey Joel, you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-joel",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-joel"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-joel"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-joel"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: joel@thechillbrothers.com\nWhy: kicked_can\nSource: hubspot / \nSignal: Jul 10, 2026\nThey said: \"We are slammed through summer, check back in the fall about filling shoulder season.\"\nSubject: HVAC update\n\nHey Joel, you mentioned we are slammed through summer, check back in the fall about filling shoulder season.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Dana Ortiz",
+      "email": "dana@brightcool.test",
+      "source": "hubspot",
+      "industry": "hvac",
+      "subject": "HVAC update",
+      "body": "Hey Dana, you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* dana@brightcool.test\n*Why:* kicked_can\n*Source:* hubspot / SalesGlider HVAC Sports Offer\n*Signal:* Jul 10, 2026\n*They said:* \"Dana said they are slammed through summer, check back in the fall.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* HVAC update\n\n```Hey Dana, you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-dana",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-dana"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-dana"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-dana"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: dana@brightcool.test\nWhy: kicked_can\nSource: hubspot / SalesGlider HVAC Sports Offer\nSignal: Jul 10, 2026\nThey said: \"Dana said they are slammed through summer, check back in the fall.\"\nSubject: HVAC update\n\nHey Dana, you mentioned dana said they are slammed through summer, check back in the fall.\n\n$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Pat Reyes",
+      "email": "pat@summitroofs.test",
+      "source": "smartlead",
+      "industry": "roofing",
+      "subject": "Roofing?",
+      "body": "Hey Pat, you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* pat@summitroofs.test\n*Why:* never_booked\n*Source:* smartlead / SalesGlider Roofers\n*Signal:* Jun 3, 2026\n*They said:* \"Yes, send me info. Spring is our slow season.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Roofing?\n\n```Hey Pat, you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-pat",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-pat"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-pat"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-pat"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: pat@summitroofs.test\nWhy: never_booked\nSource: smartlead / SalesGlider Roofers\nSignal: Jun 3, 2026\nThey said: \"Yes, send me info. Spring is our slow season.\"\nSubject: Roofing?\n\nHey Pat, you mentioned yes, send me info. Spring is our slow season.\n\none of our roofers closed $100K in his first 3 months with us\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Casey Lin",
+      "email": "casey@linholdings.test",
+      "source": "hubspot",
+      "industry": null,
+      "subject": "Casey?",
+      "body": "Hey Casey, you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* casey@linholdings.test\n*Why:* kicked_can\n*Source:* hubspot / -\n*Signal:* Aug 1, 2026\n*They said:* \"Maybe later this year.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Casey?\n\n```Hey Casey, you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-casey",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-casey"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-casey"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-casey"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: casey@linholdings.test\nWhy: kicked_can\nSource: hubspot / \nSignal: Aug 1, 2026\nThey said: \"Maybe later this year.\"\nSubject: Casey?\n\nHey Casey, you mentioned maybe later this year.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Morgan Pike",
+      "email": "morgan@peakplumb.test",
+      "source": "gmail",
+      "industry": null,
+      "subject": "Plumbing update",
+      "body": "Hey Morgan, you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* morgan@peakplumb.test\n*Why:* kicked_can\n*Source:* gmail / -\n*Signal:* Jun 21, 2026\n*They said:* \"Interested but timing is bad until Q4. Ping me then.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Plumbing update\n\n```Hey Morgan, you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-morgan",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-morgan"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-morgan"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-morgan"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: morgan@peakplumb.test\nWhy: kicked_can\nSource: gmail / \nSignal: Jun 21, 2026\nThey said: \"Interested but timing is bad until Q4. Ping me then.\"\nSubject: Plumbing update\n\nHey Morgan, you mentioned interested but timing is bad until Q4. Ping me then.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Lee Ng",
+      "email": "lee@bytewise.test",
+      "source": "smartlead",
+      "industry": "msp",
+      "subject": "MSP update",
+      "body": "Hey Lee, you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* lee@bytewise.test\n*Why:* never_booked\n*Source:* smartlead / SalesGlider MSPs\n*Signal:* Jun 15, 2026\n*They said:* \"We just lost our SDR, maybe now.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* MSP update\n\n```Hey Lee, you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-lee",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-lee"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-lee"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-lee"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: lee@bytewise.test\nWhy: never_booked\nSource: smartlead / SalesGlider MSPs\nSignal: Jun 15, 2026\nThey said: \"We just lost our SDR, maybe now.\"\nSubject: MSP update\n\nHey Lee, you mentioned we just lost our SDR, maybe now.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Ari Stone",
+      "email": "stalled@fastpipe.test",
+      "source": "hubspot",
+      "industry": null,
+      "subject": "Ari?",
+      "body": "Hey Ari, you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* stalled@fastpipe.test\n*Why:* kicked_can\n*Source:* hubspot / -\n*Signal:* Aug 18, 2026\n*They said:* \"Proposal is sitting. No activity since mid-August.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Ari?\n\n```Hey Ari, you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-ari",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-ari"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-ari"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-ari"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: stalled@fastpipe.test\nWhy: kicked_can\nSource: hubspot / \nSignal: Aug 18, 2026\nThey said: \"Proposal is sitting. No activity since mid-August.\"\nSubject: Ari?\n\nHey Ari, you mentioned proposal is sitting. No activity since mid-August.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Earl Jackson",
+      "email": "ej@accg-inc.com",
+      "source": "hubspot",
+      "industry": "construction",
+      "subject": "Construction update",
+      "body": "Hey Earl, you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* ej@accg-inc.com\n*Why:* kicked_can\n*Source:* hubspot / -\n*Signal:* Jul 20, 2026\n*They said:* \"Concrete season is busy. Let's talk after this pour.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Construction update\n\n```Hey Earl, you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-earl",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-earl"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-earl"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-earl"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: ej@accg-inc.com\nWhy: kicked_can\nSource: hubspot / \nSignal: Jul 20, 2026\nThey said: \"Concrete season is busy. Let's talk after this pour.\"\nSubject: Construction update\n\nHey Earl, you mentioned concrete season is busy. Let's talk after this pour.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    },
+    {
+      "name": "Sam Cole",
+      "email": "sam@hireright.test",
+      "source": "hubspot",
+      "industry": "staffing",
+      "subject": "Staffing update",
+      "body": "Hey Sam, you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn",
+      "valid": true,
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "90-day ticker (approve before send)",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*To:* sam@hireright.test\n*Why:* never_booked\n*Source:* hubspot / SalesGlider Staffing\n*Signal:* Jun 10, 2026\n*They said:* \"Need to fill two AE seats before Q4.\""
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Subject:* Staffing update\n\n```Hey Sam, you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn```"
+          }
+        },
+        {
+          "type": "actions",
+          "block_id": "nurture_actions_sample-sam",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Approve & send",
+                "emoji": true
+              },
+              "style": "primary",
+              "action_id": "nurture_approve_send",
+              "value": "sample-sam"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Edit & send",
+                "emoji": true
+              },
+              "action_id": "nurture_edit_send",
+              "value": "sample-sam"
+            },
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "Remove from nurture",
+                "emoji": true
+              },
+              "style": "danger",
+              "action_id": "nurture_remove",
+              "value": "sample-sam"
+            }
+          ]
+        }
+      ],
+      "fallback_text": "90-day ticker (approve before send)\nTo: sam@hireright.test\nWhy: never_booked\nSource: hubspot / SalesGlider Staffing\nSignal: Jun 10, 2026\nThey said: \"Need to fill two AE seats before Q4.\"\nSubject: Staffing update\n\nHey Sam, you mentioned need to fill two AE seats before Q4.\n\n$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month.\n\nWe guarantee meetings, or we keep working until you hit them. I can also send you a pair of AirPods just for chatting 15 minutes to see if this makes sense.\n\nWorth a look?\n\nJosh Osborn"
+    }
+  ]
+}

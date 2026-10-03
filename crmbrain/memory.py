@@ -306,10 +306,11 @@ class Memory:
         if self.use_supabase:
             try:
                 rows = self._sb_schema("GET", "ticker", params={"select": "*"})
-                return rows if rows is not None else local
+                return list(rows or [])
             except Exception as exc:
                 self._record_error("list_ticker", exc)
-                return local
+                self._record_error("ticker_supabase_unavailable", exc)
+                return []
         return local
 
     def due_ticker(self, now_iso: str) -> list[dict]:
@@ -329,10 +330,11 @@ class Memory:
                         "select": "*",
                     },
                 )
-                return rows or local
+                return list(rows or [])
             except Exception as exc:
                 self._record_error("due_ticker", exc)
-                return local
+                self._record_error("ticker_supabase_unavailable", exc)
+                return []
         return local
 
     def bump_ticker(self, ticker_id: str, next_fire_at: str, last_fired_at: str) -> None:
@@ -356,33 +358,103 @@ class Memory:
             except Exception as exc:
                 self._record_error("bump_ticker", exc)
 
-    def stop_ticker(self, email: str | None = None, hs_contact_id: str | None = None) -> None:
+    def stop_ticker(
+        self,
+        email: str | None = None,
+        hs_contact_id: str | None = None,
+        stop_reason: str | None = None,
+        ticker_id: str | None = None,
+    ) -> None:
         if self._skip_side_write("ticker"):
             return
+        from crmbrain.config import now_utc
+
+        stamp = now_utc().isoformat()
         for t in self._local.get("ticker", []):
+            hit = False
+            if ticker_id and str(t.get("id")) == str(ticker_id):
+                hit = True
             if email and t.get("email") == email:
-                t["status"] = "stopped"
+                hit = True
             if hs_contact_id and t.get("hs_contact_id") == hs_contact_id:
+                hit = True
+            if hit:
                 t["status"] = "stopped"
+                if stop_reason:
+                    t["stop_reason"] = stop_reason
+                    t["stopped_at"] = stamp
         self.save_local()
+        body = {"status": "stopped"}
+        if stop_reason:
+            body["stop_reason"] = stop_reason
+            body["stopped_at"] = stamp
         if self.use_supabase:
             try:
+                if ticker_id:
+                    self._sb_schema("PATCH", "ticker", json_body=body, params={"id": f"eq.{ticker_id}"})
                 if email:
                     self._sb_schema(
                         "PATCH",
                         "ticker",
-                        json_body={"status": "stopped"},
+                        json_body=body,
                         params={"email": f"eq.{email}", "status": "eq.active"},
                     )
                 if hs_contact_id:
                     self._sb_schema(
                         "PATCH",
                         "ticker",
-                        json_body={"status": "stopped"},
+                        json_body=body,
                         params={"hs_contact_id": f"eq.{hs_contact_id}", "status": "eq.active"},
                     )
             except Exception as exc:
                 self._record_error("stop_ticker", exc)
+
+    def get_ticker(self, ticker_id: str) -> dict | None:
+        tid = str(ticker_id or "")
+        for t in self.list_ticker():
+            if str(t.get("id") or "") == tid:
+                return t
+        for t in self._local.get("ticker", []):
+            if str(t.get("id") or "") == tid:
+                return t
+        return None
+
+    def patch_ticker(self, ticker_id: str, fields: dict) -> dict | None:
+        if self._skip_side_write("ticker"):
+            row = self.get_ticker(ticker_id)
+            if row:
+                row.update(fields)
+            return row
+        found = None
+        for t in self._local.get("ticker", []):
+            if str(t.get("id")) == str(ticker_id):
+                t.update(fields)
+                found = t
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema(
+                    "PATCH",
+                    "ticker",
+                    json_body=fields,
+                    params={"id": f"eq.{ticker_id}"},
+                )
+            except Exception as exc:
+                self._record_error("patch_ticker", exc)
+        return found
+
+    def claim_nurture_action(self, ticker_id: str, action: str) -> str:
+        """Idempotent claim. Returns claimed | already_sent | already_removed | in_progress."""
+        row = self.get_ticker(ticker_id) or {}
+        state = str(row.get("nurture_state") or "")
+        if state in {"sent", "already_sent"}:
+            return "already_sent"
+        if state in {"removed", "already_removed"}:
+            return "already_removed"
+        if state == "in_progress":
+            return "in_progress"
+        self.patch_ticker(ticker_id, {"nurture_state": "in_progress", "nurture_action": action})
+        return "claimed"
 
     def _sb_named(self, schema: str, method: str, table: str, json_body: Any = None, params: dict | None = None) -> Any:
         url = f"{self.settings.supabase_url.rstrip('/')}/rest/v1/{table}"

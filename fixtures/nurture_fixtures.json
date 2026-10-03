@@ -1,0 +1,829 @@
+{
+ "_meta": {
+  "spec": "../NURTURE_SPEC.md",
+  "now_default": "2026-10-02T23:00:00+00:00",
+  "tz": "America/Chicago",
+  "real_samples": "cases with real_sample=true (5 people: Jackie Darkazalli, Joel Stewart, Zach Walls, Roger Nutter, Earl Jackson); all others synthetic (.test domains)",
+  "constants": {
+   "TICKER_DAYS": 90,
+   "NURTURE_MAX_PER_WEEKDAY": 5,
+   "EMAILED_RECENTLY_DAYS": 60,
+   "STALLED_DAYS": 30,
+   "SNIPPET_MAX": 280,
+   "MAX_BODY_WORDS": 110,
+   "MEETING_GUARANTEE": "We guarantee meetings, or we keep working until you hit them.",
+   "SMARTLEAD_CLIENT_ID": 345263,
+   "POSITIVE_CATEGORY_IDS": [
+    1,
+    2,
+    5,
+    131482
+   ],
+   "STAGES": {
+    "nurture": "3486952153",
+    "no_show": "3557889773",
+    "discovery_scheduled": "qualifiedtobuy",
+    "discovery_completed": "presentationscheduled",
+    "proposal_sent": "decisionmakerboughtin",
+    "signed": "closedwon",
+    "paid": "3482933986"
+   },
+   "SOFT_STOPS": [
+    "booked",
+    "emailed_recently",
+    "deal_archived",
+    "legacy_reset",
+    "manual_snooze"
+   ],
+   "HARD_STOPS": [
+    "client",
+    "non_deal",
+    "unsubscribed",
+    "won",
+    "do_not_contact",
+    "no_identity"
+   ]
+  }
+ },
+ "cases": [
+  {
+   "id": "T-01",
+   "area": "S1 all statuses",
+   "input": {
+    "client_id": 345263,
+    "campaigns": [
+     {
+      "id": 101,
+      "name": "SalesGlider Roofers",
+      "status": "PAUSED",
+      "client_id": 345263
+     },
+     {
+      "id": 102,
+      "name": "SalesGlider MSPs",
+      "status": "COMPLETED",
+      "client_id": 345263
+     },
+     {
+      "id": 103,
+      "name": "SalesGlider Staffing",
+      "status": "ACTIVE",
+      "client_id": 345263
+     }
+    ],
+    "leads": [
+     {
+      "campaign_id": 101,
+      "lead_id": 1,
+      "email": "pat@summitroofs.test",
+      "first_name": "Pat",
+      "last_name": "Reyes",
+      "category_id": 1
+     },
+     {
+      "campaign_id": 102,
+      "lead_id": 2,
+      "email": "lee@bytewise.test",
+      "first_name": "Lee",
+      "last_name": "Ng",
+      "category_id": 131482
+     },
+     {
+      "campaign_id": 103,
+      "lead_id": 3,
+      "email": "sam@hireright.test",
+      "first_name": "Sam",
+      "last_name": "Cole",
+      "category_id": 2
+     }
+    ]
+   },
+   "expect": {
+    "collected_emails": [
+     "pat@summitroofs.test",
+     "lee@bytewise.test",
+     "sam@hireright.test"
+    ]
+   }
+  },
+  {
+   "id": "T-02",
+   "area": "S1 signal date",
+   "input": {
+    "lead": {
+     "email": "pat@summitroofs.test",
+     "campaign_id": 101,
+     "lead_id": 1
+    },
+    "message_history": [
+     {
+      "type": "SENT",
+      "time": "2026-06-01T15:00:00Z"
+     },
+     {
+      "type": "REPLY",
+      "time": "2026-06-03T17:20:00Z",
+      "email_body": "Yes, send me info. Spring is our slow season."
+     },
+     {
+      "type": "SENT",
+      "time": "2026-06-04T15:00:00Z"
+     }
+    ]
+   },
+   "expect": {
+    "signal_at": "2026-06-03T17:20:00+00:00",
+    "next_fire_at": "2026-09-01T17:20:00+00:00",
+    "source_ref": "smartlead:101:1",
+    "last_touch_snippet": "Yes, send me info. Spring is our slow season."
+   }
+  },
+  {
+   "id": "T-03",
+   "area": "S1 no date",
+   "input": {
+    "lead": {
+     "email": "nodate@example.test",
+     "campaign_id": 103,
+     "lead_id": 9
+    },
+    "message_history": [
+     {
+      "type": "SENT",
+      "time": "2026-05-01T15:00:00Z"
+     }
+    ]
+   },
+   "expect": {
+    "enrolled": false,
+    "skip_reason": "no_signal_date",
+    "signal_at_not": "1970-01-01T00:00:00+00:00"
+   }
+  },
+  {
+   "id": "T-04",
+   "area": "S1 client campaign",
+   "real_sample": true,
+   "input": {
+    "email": "zwalls@elevate-usa.com",
+    "name": "Zach Walls",
+    "company": "Elevate IT",
+    "campaign": "SalesGlider Acquire MSPOwner Infonaligy",
+    "campaign_status": "COMPLETED",
+    "category": "Interested",
+    "client_campaign": true
+   },
+   "expect": {
+    "enrolled": false,
+    "skip_reason": "client_campaign"
+   }
+  },
+  {
+   "id": "T-04b",
+   "area": "S1 candidate campaign",
+   "input": {
+    "email": "jobseeker@mail.test",
+    "name": "Jo Seeker",
+    "campaign": "SG - A Staffing Owners Role - CANDIDATES",
+    "category": "Interested"
+   },
+   "expect": {
+    "enrolled": false,
+    "skip_reason": "non_deal"
+   }
+  },
+  {
+   "id": "T-05",
+   "area": "S2 Nurture",
+   "input": {
+    "deal": {
+     "id": "9001",
+     "dealstage": "3486952153",
+     "amount": "1500",
+     "hs_lastmodifieddate": "2026-10-02T22:00:00Z"
+    },
+    "contact": {
+     "id": "5001",
+     "email": "dana@brightcool.test",
+     "firstname": "Dana",
+     "lastname": "Ortiz",
+     "company": "BrightCool Heating & Air"
+    },
+    "source_note": {
+     "created": "2026-07-10T16:00:00Z",
+     "body": "Source: SalesGlider HVAC Sports Offer. Dana said they are slammed through summer, check back in the fall about filling shoulder season."
+    }
+   },
+   "expect": {
+    "enrolled": true,
+    "source": "hubspot",
+    "signal_at": "2026-07-10T16:00:00+00:00",
+    "next_fire_at": "2026-10-08T16:00:00+00:00",
+    "industry": "hvac",
+    "industry_basis": "campaign",
+    "snippet_startswith": "Source: SalesGlider HVAC Sports Offer. Dana said",
+    "signal_not_from": "hs_lastmodifieddate"
+   }
+  },
+  {
+   "id": "T-06",
+   "area": "S2 stalled",
+   "input": {
+    "now": "2026-10-02T23:00:00+00:00",
+    "deals": [
+     {
+      "id": "9002",
+      "dealstage": "decisionmakerboughtin",
+      "last_activity": "2026-08-18T15:00:00Z",
+      "contact_email": "stalled@fastpipe.test",
+      "contact_name": "Ari Stone"
+     },
+     {
+      "id": "9003",
+      "dealstage": "decisionmakerboughtin",
+      "last_activity": "2026-09-22T15:00:00Z",
+      "contact_email": "fresh@fastpipe.test",
+      "contact_name": "Bo Kim"
+     }
+    ]
+   },
+   "expect": {
+    "enrolled_emails": [
+     "stalled@fastpipe.test"
+    ],
+    "not_enrolled": [
+     "fresh@fastpipe.test"
+    ]
+   }
+  },
+  {
+   "id": "T-07",
+   "area": "S3 Gmail",
+   "input": {
+    "thread_id": "t-777",
+    "messages": [
+     {
+      "from": "josh@salesglidergrowth.com",
+      "date": "2026-06-20T14:00:00Z",
+      "body": "Hey Morgan, worth a quick chat?"
+     },
+     {
+      "from": "morgan@peakplumb.test",
+      "date": "2026-06-21T18:30:00Z",
+      "body": "Interested but timing is bad until Q4. Ping me then.\n\nOn Jun 20, Josh wrote:\n> Hey Morgan, worth a quick chat?"
+     }
+    ],
+    "intent": "timing_later",
+    "name": "Morgan Pike"
+   },
+   "expect": {
+    "enrolled": true,
+    "source": "gmail",
+    "signal_at": "2026-06-21T18:30:00+00:00",
+    "last_touch_snippet": "Interested but timing is bad until Q4. Ping me then.",
+    "source_ref": "gmail:t-777"
+   }
+  },
+  {
+   "id": "T-08",
+   "area": "Merge",
+   "input": {
+    "candidates": [
+     {
+      "source": "smartlead",
+      "email": "Dana@BrightCool.test",
+      "name": "Dana Ortiz",
+      "signal_at": "2026-05-02T12:00:00Z",
+      "campaign": "SalesGlider HVAC Sports Offer",
+      "last_touch_snippet": "Send me pricing."
+     },
+     {
+      "source": "hubspot",
+      "email": "dana@brightcool.test",
+      "name": "Dana Ortiz",
+      "signal_at": "2026-07-10T16:00:00Z",
+      "campaign": null,
+      "last_touch_snippet": "check back in the fall"
+     }
+    ]
+   },
+   "expect": {
+    "count": 1,
+    "signal_at": "2026-07-10T16:00:00+00:00",
+    "last_touch_snippet": "check back in the fall",
+    "campaign": "SalesGlider HVAC Sports Offer",
+    "source": "hubspot"
+   }
+  },
+  {
+   "id": "T-09",
+   "area": "Re-enroll soft",
+   "input": {
+    "existing": [
+     {
+      "email": "pat@summitroofs.test",
+      "status": "stopped",
+      "stop_reason": "booked",
+      "signal_at": "2026-03-01T00:00:00Z"
+     }
+    ],
+    "candidate": {
+     "email": "pat@summitroofs.test",
+     "name": "Pat Reyes",
+     "signal_at": "2026-08-01T00:00:00Z"
+    }
+   },
+   "expect": {
+    "new_active_row": true,
+    "next_fire_at": "2026-10-30T00:00:00+00:00"
+   }
+  },
+  {
+   "id": "T-10",
+   "area": "Re-enroll hard",
+   "real_sample": true,
+   "input": {
+    "existing": [
+     {
+      "email": "roger@nuttergroup.com",
+      "name": "Roger Nutter",
+      "status": "stopped",
+      "stop_reason": "client"
+     }
+    ],
+    "candidate": {
+     "email": "roger@nuttergroup.com",
+     "name": "Roger Nutter",
+     "signal_at": "2026-09-20T00:00:00Z",
+     "campaign": "SalesGlider Staffing"
+    }
+   },
+   "expect": {
+    "new_active_row": false,
+    "skip_reason": "hard_stopped"
+   }
+  },
+  {
+   "id": "T-11",
+   "area": "Active refresh",
+   "input": {
+    "existing": [
+     {
+      "email": "lee@bytewise.test",
+      "status": "active",
+      "signal_at": "2026-04-01T00:00:00Z",
+      "next_fire_at": "2026-06-30T00:00:00Z",
+      "last_touch_snippet": "old"
+     }
+    ],
+    "candidate": {
+     "email": "lee@bytewise.test",
+     "name": "Lee Ng",
+     "signal_at": "2026-09-01T00:00:00Z",
+     "last_touch_snippet": "We just lost our SDR, maybe now."
+    }
+   },
+   "expect": {
+    "rows": 1,
+    "signal_at": "2026-09-01T00:00:00+00:00",
+    "next_fire_at": "2026-11-30T00:00:00+00:00",
+    "last_touch_snippet": "We just lost our SDR, maybe now."
+   }
+  },
+  {
+   "id": "T-12",
+   "area": "Industry campaign",
+   "input": {
+    "company": "Summit",
+    "email": "pat@summitroofs.test",
+    "campaign": "SalesGlider Roofers"
+   },
+   "expect": {
+    "industry": "roofing",
+    "industry_basis": "campaign"
+   }
+  },
+  {
+   "id": "T-13",
+   "area": "Industry domain",
+   "real_sample": true,
+   "input": {
+    "name": "Jackie Darkazalli",
+    "company": null,
+    "email": "jackie@kellyroofing.com",
+    "campaign": null
+   },
+   "expect": {
+    "industry": "roofing",
+    "industry_basis": "domain",
+    "subject": "Roofing?",
+    "subject_not": "Quick update"
+   }
+  },
+  {
+   "id": "T-14",
+   "area": "Industry website",
+   "real_sample": true,
+   "input": {
+    "name": "Joel Stewart",
+    "company": "The Chill Brothers",
+    "email": "joel@thechillbrothers.com",
+    "campaign": null,
+    "website_text": "The Chill Brothers | HVAC, heating and cooling repair"
+   },
+   "expect": {
+    "industry": "hvac",
+    "industry_basis": "website",
+    "subject": "HVAC update"
+   }
+  },
+  {
+   "id": "T-15",
+   "area": "Industry none",
+   "input": {
+    "name": "Casey Lin",
+    "company": "Lin Holdings",
+    "email": "casey@linholdings.test",
+    "campaign": null,
+    "website_text": ""
+   },
+   "expect": {
+    "industry": null,
+    "copy": "general"
+   }
+  },
+  {
+   "id": "T-16",
+   "area": "G1 Gmail Sent",
+   "input": {
+    "now": "2026-10-02T23:00:00+00:00",
+    "row": {
+     "email": "pat@summitroofs.test",
+     "name": "Pat Reyes",
+     "status": "active"
+    },
+    "gmail_sent": [
+     {
+      "to": "pat@summitroofs.test",
+      "date": "2026-09-12T15:00:00Z"
+     }
+    ],
+    "smartlead_sent": []
+   },
+   "expect": {
+    "posted": false,
+    "skip_reason": "emailed_recently",
+    "status": "active",
+    "next_fire_at": "2026-12-11T15:00:00+00:00"
+   }
+  },
+  {
+   "id": "T-17",
+   "area": "G1 Smartlead sent",
+   "input": {
+    "now": "2026-10-02T23:00:00+00:00",
+    "row": {
+     "email": "lee@bytewise.test",
+     "name": "Lee Ng",
+     "status": "active"
+    },
+    "gmail_sent": [],
+    "smartlead_sent": [
+     {
+      "campaign_id": 102,
+      "time": "2026-09-02T15:00:00Z"
+     }
+    ]
+   },
+   "expect": {
+    "posted": false,
+    "skip_reason": "emailed_recently"
+   }
+  },
+  {
+   "id": "T-18",
+   "area": "G2 Paid/NON_DEAL",
+   "input": {
+    "rows": [
+     {
+      "email": "owner@paidclient.test",
+      "name": "Paid Owner",
+      "deals": [
+       {
+        "dealstage": "3482933986"
+       }
+      ]
+     },
+     {
+      "email": "partner@nondeal.test",
+      "name": "Seth Partner",
+      "non_deal_emails": [
+       "partner@nondeal.test"
+      ]
+     }
+    ]
+   },
+   "expect": {
+    "posted": 0,
+    "stop_reasons": [
+     "client",
+     "non_deal"
+    ]
+   }
+  },
+  {
+   "id": "T-19",
+   "area": "G3 deleted deal",
+   "real_sample": true,
+   "input": {
+    "row": {
+     "email": "joel@thechillbrothers.com",
+     "name": "Joel Stewart",
+     "hs_deal_id": "320872601304",
+     "status": "active",
+     "source": null
+    },
+    "hubspot_deal_response": {
+     "status": 404
+    }
+   },
+   "expect": {
+    "posted": false,
+    "status": "stopped",
+    "stop_reason": "deal_archived"
+   }
+  },
+  {
+   "id": "T-20",
+   "area": "G4 booked",
+   "real_sample": true,
+   "input": {
+    "row": {
+     "email": "ej@accg-inc.com",
+     "name": "Earl Jackson",
+     "company": "Accg Inc - Concrete Contractor Orlando",
+     "status": "active"
+    },
+    "open_deals": [
+     {
+      "dealstage": "decisionmakerboughtin",
+      "last_activity": "2026-09-29T15:00:00Z",
+      "amount": "20000"
+     }
+    ],
+    "future_meetings": []
+   },
+   "expect": {
+    "posted": false,
+    "stop_reason": "booked",
+    "amount_untouched": "20000"
+   }
+  },
+  {
+   "id": "T-21",
+   "area": "G5 legacy no identity",
+   "input": {
+    "row": {
+     "name": "",
+     "email": null,
+     "phone": "+15125550100",
+     "reason": "never_booked",
+     "status": "active",
+     "source": null
+    }
+   },
+   "expect": {
+    "posted": false,
+    "status": "stopped",
+    "stop_reason": "no_identity"
+   }
+  },
+  {
+   "id": "T-22",
+   "area": "Draft opener",
+   "input": {
+    "row": {
+     "name": "Morgan Pike",
+     "email": "morgan@peakplumb.test",
+     "industry": null,
+     "campaign": null,
+     "last_touch_snippet": "Interested but timing is bad until Q4. Ping me then.",
+     "source": "gmail"
+    }
+   },
+   "expect": {
+    "first_sentence_mentions_any": [
+     "Q4",
+     "timing"
+    ],
+    "no_new_numbers": true
+   }
+  },
+  {
+   "id": "T-23",
+   "area": "Draft industry",
+   "input": {
+    "row": {
+     "name": "Pat Reyes",
+     "email": "pat@summitroofs.test",
+     "industry": "roofing",
+     "campaign": "SalesGlider Roofers",
+     "last_touch_snippet": "Yes, send me info. Spring is our slow season."
+    }
+   },
+   "expect": {
+    "subject": "Roofing?",
+    "contains": [
+     "$100K",
+     "We guarantee meetings, or we keep working until you hit them."
+    ],
+    "ends_with": "Josh Osborn"
+   }
+  },
+  {
+   "id": "T-24",
+   "area": "Draft general",
+   "input": {
+    "row": {
+     "name": "Casey Lin",
+     "email": "casey@linholdings.test",
+     "industry": null,
+     "campaign": null,
+     "last_touch_snippet": "Maybe later this year."
+    }
+   },
+   "expect": {
+    "subject": "Casey?",
+    "contains": [
+     "$2M",
+     "$100K",
+     "14+"
+    ],
+    "not_contains": [
+     "Quick update"
+    ]
+   }
+  },
+  {
+   "id": "T-25",
+   "area": "Draft validator",
+   "input": {
+    "row": {
+     "name": "Lee Ng",
+     "email": "lee@bytewise.test",
+     "industry": "msp",
+     "last_touch_snippet": "Can you do the free 10K test list first — like last time?"
+    },
+    "model_output_bad": "Hey Lee, happy to run a free POC — no strings."
+   },
+   "expect": {
+    "draft_has_poc_phrase": false,
+    "draft_has_dash_chars": false,
+    "bad_model_output": "rejected_G7"
+   }
+  },
+  {
+   "id": "T-26",
+   "area": "Draft shape",
+   "input": {
+    "row": {
+     "name": "Dana Ortiz",
+     "email": "dana@brightcool.test",
+     "industry": "hvac",
+     "last_touch_snippet": "check back in the fall"
+    },
+    "AIRPODS_OFFER_LIVE": [
+     true,
+     false
+    ]
+   },
+   "expect": {
+    "max_words": 110,
+    "ends_with": "Josh Osborn",
+    "no_placeholders": true,
+    "airpods_present": [
+     true,
+     false
+    ]
+   }
+  },
+  {
+   "id": "T-27",
+   "area": "Cadence spread",
+   "input": {
+    "now": "2026-10-09T12:00:00-05:00",
+    "approval_date": "2026-10-09",
+    "max_per_weekday": 5,
+    "past_due_signals": [
+     "2026-03-01",
+     "2026-03-05",
+     "2026-03-10",
+     "2026-03-15",
+     "2026-03-20",
+     "2026-03-25",
+     "2026-04-01",
+     "2026-04-05",
+     "2026-04-10",
+     "2026-04-15",
+     "2026-04-20",
+     "2026-04-25"
+    ]
+   },
+   "expect": {
+    "slots": {
+     "2026-10-12": 5,
+     "2026-10-13": 5,
+     "2026-10-14": 2
+    },
+    "weekend_slots": 0,
+    "first_slot_signal": "2026-03-01"
+   }
+  },
+  {
+   "id": "T-28",
+   "area": "Cadence future",
+   "input": {
+    "now": "2026-10-02T12:00:00-05:00",
+    "signal_at": "2026-09-19T15:00:00Z"
+   },
+   "expect": {
+    "next_fire_date_chicago": "2026-12-18",
+    "weekday": true
+   }
+  },
+  {
+   "id": "T-29",
+   "area": "Empty means empty",
+   "input": {
+    "supabase_due": [],
+    "local_ticker": [
+     {
+      "id": "x",
+      "status": "active",
+      "next_fire_at": "2026-01-01T00:00:00+00:00",
+      "name": "Stale Local"
+     }
+    ]
+   },
+   "expect": {
+    "due": []
+   }
+  },
+  {
+   "id": "T-30",
+   "area": "Supabase error",
+   "input": {
+    "supabase_raises": "RuntimeError",
+    "local_ticker": [
+     {
+      "id": "x",
+      "status": "active",
+      "next_fire_at": "2026-01-01T00:00:00+00:00",
+      "name": "Stale Local"
+     }
+    ]
+   },
+   "expect": {
+    "posted": 0,
+    "error": "ticker_supabase_unavailable"
+   }
+  },
+  {
+   "id": "T-31",
+   "area": "Dry-run report",
+   "input": {
+    "dry_run": true,
+    "candidates_by_source": {
+     "smartlead": 4,
+     "hubspot": 3,
+     "gmail": 2
+    }
+   },
+   "expect": {
+    "writes": 0,
+    "slack_posts": 0,
+    "report_has": [
+     "by_source",
+     "by_skip_reason",
+     "industry_hit_rate",
+     "weekly_schedule"
+    ],
+    "max_sample_drafts": 10
+   }
+  },
+  {
+   "id": "T-32",
+   "area": "Live cap",
+   "input": {
+    "now": "2026-10-12T17:00:00-05:00",
+    "due_rows": 8,
+    "max_per_weekday": 5
+   },
+   "expect": {
+    "posted": 5,
+    "rolled_to": "2026-10-13",
+    "rolled": 3
+   }
+  }
+ ]
+}
