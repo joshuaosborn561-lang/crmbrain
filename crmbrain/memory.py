@@ -274,6 +274,8 @@ class Memory:
     def enroll_ticker(self, row: dict) -> None:
         if self._skip_side_write("ticker"):
             return
+        if not str(row.get("name") or "").strip():
+            return
         if self._ticker_already_active(row):
             return
         self._local.setdefault("ticker", []).append(row)

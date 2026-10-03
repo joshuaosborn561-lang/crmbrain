@@ -9,12 +9,19 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact
+from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact, is_zoom_room_address
 from crmbrain.models import Engagement
-from crmbrain.names import prefer_contact_name
+from crmbrain.names import names_fuzzy_match, prefer_contact_name
 from crmbrain import intelligence, policy
 
 logger = logging.getLogger(__name__)
+
+
+def _amount_key(raw: object) -> str:
+    try:
+        return f"{float(str(raw or '').replace(',', '').strip()):.2f}"
+    except ValueError:
+        return ""
 
 # Listing contacts for HeyReach backfill can exceed 30s; retry transient reads.
 READ_TIMEOUT = 45
@@ -78,6 +85,17 @@ CONTACT_PROPS = [
         "type": "string",
         "fieldType": "textarea",
         "groupName": "contactinformation",
+    },
+]
+
+DEAL_PROPS = [
+    {
+        "name": "crmbrain_locked",
+        "label": "CRMBrain locked",
+        "type": "bool",
+        "fieldType": "booleancheckbox",
+        "groupName": "dealinformation",
+        "description": "When true, CRMBrain will not change stage or amount on this deal.",
     },
 ]
 
@@ -179,6 +197,16 @@ class HubSpot:
                 )
                 if created.status_code >= 400:
                     raise RuntimeError(f"create prop {prop['name']}: {created.text[:300]}")
+        for prop in DEAL_PROPS:
+            resp = self._request(
+                "GET", f"/crm/v3/properties/deals/{prop['name']}", retry=True, timeout=20
+            )
+            if resp.status_code == 404:
+                created = self._request(
+                    "POST", "/crm/v3/properties/deals", json=prop, timeout=WRITE_TIMEOUT
+                )
+                if created.status_code >= 400:
+                    logger.warning("create deal prop %s: %s", prop["name"], created.text[:300])
 
     def _search(self, object_name: str, filters: list[dict], properties: list[str]) -> list[dict]:
         payload = {
@@ -197,6 +225,8 @@ class HubSpot:
         return resp.json().get("results", [])
 
     def find_contact(self, email: str = "", phone: str = "", name: str = "") -> dict | None:
+        if email and is_zoom_room_address(email):
+            return None
         if email:
             rows = self._search(
                 "contacts",
@@ -233,6 +263,27 @@ class HubSpot:
         )
         if len(rows) == 1:
             return rows[0]
+        return None
+
+    def find_contact_fuzzy(self, name: str = "", company: str = "") -> dict | None:
+        """Company plus fuzzy person name (MacAntosh / McAntosh at Emcor)."""
+        raw_company = (company or "").strip()
+        raw_name = (name or "").strip()
+        if not raw_name or len(raw_company) < 3:
+            return None
+        rows = self._search(
+            "contacts",
+            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw_company}],
+            CONTACT_SEARCH_PROPS,
+        )
+        hits = []
+        for row in rows:
+            props = row.get("properties") or {}
+            full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+            if names_fuzzy_match(raw_name, full):
+                hits.append(row)
+        if len(hits) == 1:
+            return hits[0]
         return None
 
     def in_crm(self, email: str = "", phone: str = "") -> bool:
@@ -376,8 +427,11 @@ class HubSpot:
                 params={
                     "properties": (
                         "dealname,dealstage,pipeline,amount,dealtype,"
-                        "hs_mrr,hs_arr,hs_acv,hs_tcv,hs_is_closed_won"
-                    )
+                        "hs_mrr,hs_arr,hs_acv,hs_tcv,hs_is_closed_won,"
+                        "hs_lastmodifieddate,hs_updated_by_user_id,description,"
+                        "crmbrain_locked"
+                    ),
+                    "propertiesWithHistory": "dealstage,amount",
                 },
                 retry=True,
                 timeout=20,
@@ -411,9 +465,72 @@ class HubSpot:
             ["email", "firstname", "lastname", "phone", "company", "crm_source"],
         )
 
+    def find_contact_by_company(self, company: str) -> dict | None:
+        raw = (company or "").strip()
+        if len(raw) < 3:
+            return None
+        rows = self._search(
+            "contacts",
+            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw}],
+            CONTACT_SEARCH_PROPS,
+        )
+        if len(rows) == 1:
+            return rows[0]
+        return None
+
+    def find_deal_by_amount(self, amount: str) -> dict | None:
+        """Removed: amount-only matching created wrong deals. Always None."""
+        del amount
+        return None
+
+    def deals_for_company(self, company: str) -> list[dict]:
+        """Open deals on contacts whose company matches. Used for Paid-client gates."""
+        raw = (company or "").strip()
+        if len(raw) < 3:
+            return []
+        rows = self._search(
+            "contacts",
+            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw}],
+            CONTACT_SEARCH_PROPS,
+        )
+        deals: list[dict] = []
+        seen: set[str] = set()
+        for row in rows[:20]:
+            cid = str(row.get("id") or "")
+            if not cid:
+                continue
+            for deal in self.open_deals_for_contact(cid):
+                did = str(deal.get("id") or "")
+                if did and did not in seen:
+                    seen.add(did)
+                    deals.append(deal)
+        return deals
+
+    def find_contact_for_commerce(
+        self, name: str = "", company: str = "", amount: str = "", email: str = ""
+    ) -> dict | None:
+        """Payer email or exact payer-name match only. No company or amount match."""
+        del company, amount
+        if email:
+            found = self.find_contact(email=email)
+            if found:
+                return found
+            token = email.split("@", 1)[0]
+            if token and hasattr(self, "search_contacts_by_email_token"):
+                rows = self.search_contacts_by_email_token(email) or self.search_contacts_by_email_token(token)
+                if len(rows) == 1:
+                    return rows[0]
+        if name:
+            return self._find_contact_by_name(name)
+        return None
+
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
         current = (deal.get("properties") or {}).get("dealstage") or ""
-        target = policy.choose_deal_action(current, stage, ev, deal=deal) if stage else None
+        target = (
+            policy.choose_deal_action(current, stage, ev, deal=deal, settings=self.settings)
+            if stage
+            else None
+        )
         current_name = (deal.get("properties") or {}).get("dealname") or ""
         wanted = policy.deal_name_for(ev, contact)
         cleaned = policy.prefer_deal_name(
@@ -447,9 +564,16 @@ class HubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        won = policy.closed_won_deals(existing)
+        if won and stage == STAGE["paid"]:
+            deal = max(won, key=policy.deal_richness)
+            return self._apply_live_deal(deal, ev, stage, amount, contact)
+        if won and not policy.is_new_completed_paperwork(ev):
+            logger.info("skip new deal; contact already has Paid/Signed")
+            return {}
         if policy.blocks_no_show_create(existing, stage):
             return {}
-        target = policy.choose_deal_action(None, stage, ev) if stage else None
+        target = policy.choose_deal_action(None, stage, ev, settings=self.settings) if stage else None
         if not target:
             return {}
         # HubSpot workflows can create a deal between the first read and POST.
@@ -458,6 +582,13 @@ class HubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             return self._apply_live_deal(deal, ev, stage, amount, contact)
+        won = policy.closed_won_deals(existing)
+        if won and stage == STAGE["paid"]:
+            deal = max(won, key=policy.deal_richness)
+            return self._apply_live_deal(deal, ev, stage, amount, contact)
+        if won and not policy.is_new_completed_paperwork(ev):
+            logger.info("skip new deal; contact already has Paid/Signed")
+            return {}
         if policy.blocks_no_show_create(existing, stage):
             return {}
         name = policy.deal_name_for(ev, contact) or ev.email or "SalesGlider deal"
@@ -482,6 +613,14 @@ class HubSpot:
         created = resp.json()
         if amount:
             created.setdefault("properties", {})["amount"] = amount
+            extra = ev.extra or {}
+            note = intelligence.amount_citation_note(
+                ev, amount, extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else None
+            )
+            try:
+                self.add_note(str(contact_id), note, ev=ev, contact=contact)
+            except Exception as exc:
+                logger.warning("amount note failed %s: %s", contact_id, exc)
         return created
 
     def fill_deal_amount(
@@ -491,15 +630,30 @@ class HubSpot:
         ev: Engagement | None = None,
         contact: dict | None = None,
     ) -> bool:
-        """PATCH amount only when the live deal amount is empty. Never invent."""
+        """PATCH amount by source priority. Paid only from doc/payment evidence."""
         if self._is_excluded(ev, contact):
             logger.info("skip hubspot amount write for excluded person")
             return False
-        hint = intelligence.amount_to_write((deal.get("properties") or {}).get("amount"), amount)
+        if ev and not policy.may_mutate_existing_deal(ev, deal, self.settings):
+            return False
+        if not ev and policy.deal_is_locked(deal):
+            return False
+        hint = intelligence.deal_amount_to_write(deal, amount, ev=ev)
         if not hint or not deal.get("id"):
+            return False
+        if intelligence.amounts_equal((deal.get("properties") or {}).get("amount"), hint):
             return False
         self.patch_deal(str(deal["id"]), {"amount": hint})
         deal.setdefault("properties", {})["amount"] = hint
+        if contact and contact.get("id"):
+            extra = (ev.extra if ev else {}) or {}
+            note = intelligence.amount_citation_note(
+                ev, hint, extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else None
+            )
+            try:
+                self.add_note(str(contact["id"]), note, ev=ev, contact=contact)
+            except Exception as exc:
+                logger.warning("amount note failed %s: %s", contact.get("id"), exc)
         return True
 
     def patch_deal(self, deal_id: str, properties: dict[str, Any]) -> None:

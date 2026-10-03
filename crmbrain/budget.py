@@ -10,6 +10,7 @@ from crmbrain.policy import STAGE_RANK
 DEFAULT_MAX_ARCHIVES_REGRESSIONS = 10
 DEFAULT_MAX_CREATES = 10
 DEFAULT_MAX_STAGE_MOVES = 20
+DEFAULT_MAX_AMOUNT_WRITES = 20
 DEFAULT_MAX_CHANGE_FRACTION = 0.15
 
 
@@ -35,10 +36,12 @@ class WriteBudget:
     max_creates: int = DEFAULT_MAX_CREATES
     max_archives_regressions: int = DEFAULT_MAX_ARCHIVES_REGRESSIONS
     max_stage_moves: int = DEFAULT_MAX_STAGE_MOVES
+    max_amount_writes: int = DEFAULT_MAX_AMOUNT_WRITES
     max_change_fraction: float = DEFAULT_MAX_CHANGE_FRACTION
     creates: int = 0
     archives_regressions: int = 0
     stage_moves: int = 0
+    amount_writes: int = 0
     aborted: bool = False
     abort_reason: str = ""
     planned: list[dict] = field(default_factory=list)
@@ -53,6 +56,9 @@ class WriteBudget:
                 getattr(settings, "max_archives_regressions", DEFAULT_MAX_ARCHIVES_REGRESSIONS)
             ),
             max_stage_moves=int(getattr(settings, "max_stage_moves", DEFAULT_MAX_STAGE_MOVES)),
+            max_amount_writes=int(
+                getattr(settings, "max_amount_writes", DEFAULT_MAX_AMOUNT_WRITES)
+            ),
             max_change_fraction=float(
                 getattr(settings, "max_change_fraction", DEFAULT_MAX_CHANGE_FRACTION)
             ),
@@ -66,6 +72,8 @@ class WriteBudget:
             return max(0, self.max_creates - self.creates)
         if kind == "archive_regression":
             return max(0, self.max_archives_regressions - self.archives_regressions)
+        if kind == "amount":
+            return max(0, self.max_amount_writes - self.amount_writes)
         return max(0, self.max_stage_moves - self.stage_moves)
 
     def allow(self, kind: str) -> bool:
@@ -80,6 +88,11 @@ class WriteBudget:
             if self.archives_regressions >= self.max_archives_regressions:
                 return False
             self.archives_regressions += 1
+            return True
+        if kind == "amount":
+            if self.amount_writes >= self.max_amount_writes:
+                return False
+            self.amount_writes += 1
             return True
         if self.stage_moves >= self.max_stage_moves:
             return False

@@ -9,6 +9,10 @@ from crmbrain.models import Engagement
 from crmbrain.names import looks_like_meeting_title, parse_attendee_token, person_name_from_attendee
 from crmbrain.sources.gmail_scan import is_junk_crm_email, is_notetaker_email
 
+EXTRACT_TEXT_CAP = 200_000
+MEETING_INFO_BLOCK = "    meeting_info { silent_meeting summary_status }\n"
+SPEAKER_NAME_TOKEN = "speaker_name "
+
 QUERY = """
 query Transcripts($limit: Int) {
   transcripts(limit: $limit) {
@@ -20,6 +24,7 @@ query Transcripts($limit: Int) {
     organizer_email
     participants
     meeting_attendees { displayName email name }
+    meeting_info { silent_meeting summary_status }
     transcript_url
     summary { overview action_items shorthand_bullet }
   }
@@ -34,7 +39,8 @@ query Transcript($id: String!) {
     date
     participants
     meeting_attendees { displayName email name }
-    sentences { speaker_id raw_text text }
+    meeting_info { silent_meeting summary_status }
+    sentences { speaker_name speaker_id raw_text text }
     summary { overview action_items shorthand_bullet }
   }
 }
@@ -58,26 +64,101 @@ def _post(settings: Settings, query: str, variables: dict) -> dict:
     return data.get("data") or {}
 
 
+def _drop(query: str, *chunks: str) -> str:
+    out = query
+    for chunk in chunks:
+        out = out.replace(chunk, "")
+    return out
+
+
 def _safe_listing(settings: Settings, limit: int) -> list[dict]:
     try:
         return _post(settings, QUERY, {"limit": limit}).get("transcripts") or []
     except Exception:
-        fallback = QUERY.replace(
-            "    meeting_attendees { displayName email name }\n",
-            "",
-        )
-        return _post(settings, fallback, {"limit": limit}).get("transcripts") or []
+        pass
+    fallbacks = (
+        _drop(QUERY, MEETING_INFO_BLOCK),
+        _drop(QUERY, MEETING_INFO_BLOCK, "    meeting_attendees { displayName email name }\n"),
+    )
+    last_exc: Exception | None = None
+    for query in fallbacks:
+        try:
+            return _post(settings, query, {"limit": limit}).get("transcripts") or []
+        except Exception as exc:
+            last_exc = exc
+    if last_exc:
+        raise last_exc
+    return []
 
 
 def _safe_detail(settings: Settings, transcript_id: str, row: dict) -> dict:
     try:
         return _post(settings, DETAIL, {"id": transcript_id}).get("transcript") or row
     except Exception:
-        fallback = DETAIL.replace(
+        pass
+    fallbacks = (
+        _drop(DETAIL, SPEAKER_NAME_TOKEN),
+        _drop(DETAIL, MEETING_INFO_BLOCK, SPEAKER_NAME_TOKEN),
+        _drop(
+            DETAIL,
+            MEETING_INFO_BLOCK,
+            SPEAKER_NAME_TOKEN,
             "    meeting_attendees { displayName email name }\n",
-            "",
-        )
-        return _post(settings, fallback, {"id": transcript_id}).get("transcript") or row
+        ),
+    )
+    last_exc: Exception | None = None
+    for query in fallbacks:
+        try:
+            return _post(settings, query, {"id": transcript_id}).get("transcript") or row
+        except Exception as exc:
+            last_exc = exc
+    if last_exc:
+        raise last_exc
+    return row
+
+
+def _format_sentences(sentences: list) -> str:
+    lines: list[str] = []
+    for raw in sentences or []:
+        if not isinstance(raw, dict):
+            text = str(raw or "").strip()
+            if text:
+                lines.append(text)
+            continue
+        speaker = (raw.get("speaker_name") or raw.get("speaker_id") or "").strip()
+        text = (raw.get("text") or raw.get("raw_text") or "").strip()
+        if not text:
+            continue
+        lines.append(f"{speaker}: {text}" if speaker else text)
+    return "\n".join(lines)
+
+
+def _summary_block(summary: dict | None) -> tuple[str, object, object]:
+    summary = summary or {}
+    overview = summary.get("overview") or ""
+    if not isinstance(overview, str):
+        overview = str(overview)
+    bullets = summary.get("shorthand_bullet")
+    items = summary.get("action_items")
+    parts: list[str] = []
+    if overview.strip():
+        parts.append(overview.strip())
+    if bullets:
+        if isinstance(bullets, list):
+            parts.append("\n".join(str(b) for b in bullets if b))
+        else:
+            parts.append(str(bullets).strip())
+    if items:
+        if isinstance(items, list):
+            parts.append("\n".join(str(i) for i in items if i))
+        else:
+            parts.append(str(items).strip())
+    return "\n\n".join(p for p in parts if p), bullets, items
+
+
+def _meeting_info(detail: dict, row: dict) -> dict:
+    info = detail.get("meeting_info") or row.get("meeting_info") or {}
+    return info if isinstance(info, dict) else {}
 
 
 def counterpart_from_fireflies(
@@ -138,10 +219,10 @@ def scan(settings: Settings, limit: int = 50) -> list[Engagement]:
             continue
         detail = _safe_detail(settings, row["id"], row)
         sentences = detail.get("sentences") or []
-        text = "\n".join(
-            (s.get("text") or s.get("raw_text") or "") for s in sentences
-        )[:20000]
-        summary = ((detail.get("summary") or {}).get("overview") or "")[:2000]
+        text = _format_sentences(sentences)[:EXTRACT_TEXT_CAP]
+        summary_text, bullets, items = _summary_block(detail.get("summary") or row.get("summary"))
+        info = _meeting_info(detail, row)
+        silent = bool(info.get("silent_meeting")) or not sentences
         attendees = detail.get("meeting_attendees") or row.get("meeting_attendees") or []
         name, first, last, email = counterpart_from_fireflies(title, participants, attendees)
         if not email and not name:
@@ -156,12 +237,18 @@ def scan(settings: Settings, limit: int = 50) -> list[Engagement]:
                 last_name=last,
                 email=email,
                 transcript=text,
-                summary=summary,
+                summary=summary_text[:EXTRACT_TEXT_CAP],
                 raw_subject=title,
                 extra={
                     "participants": participants,
                     "meeting_attendees": attendees,
-                    "action_items": (detail.get("summary") or {}).get("action_items"),
+                    "overview": ((detail.get("summary") or {}).get("overview") or ""),
+                    "shorthand_bullet": bullets,
+                    "action_items": items,
+                    "silent_meeting": silent,
+                    "summary_status": info.get("summary_status") or "",
+                    "sentence_count": len(sentences),
+                    "has_sentences": bool(sentences),
                 },
             )
         )

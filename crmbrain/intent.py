@@ -20,6 +20,7 @@ from crmbrain.policy import (
     NEVER_OPEN_DEAL_SOURCES,
     STRICT_DISCOVERY_HINTS,
     has_word_hint,
+    is_closed_won_client,
 )
 
 SALES_HINTS = (
@@ -42,12 +43,11 @@ SALES_HINTS = (
     "onboarding",
     "growth partners",
 )
+# Josh-is-the-student only. "how do you" / "learn about" are discovery talk.
 LEARNING_HINTS = (
     "marketing masterclass",
     "masterclass",
     "chorbie",
-    "how do you",
-    "learn about",
     "asking about marketing",
 )
 DAY_JOB_HINTS = (
@@ -65,9 +65,9 @@ PERSONAL_HINTS = (
     "birthday",
     "family",
 )
+# Josh's supplier. Bare "vendor" in a Cube transcript is prospect language.
 VENDOR_HINTS = (
     "seo partner",
-    "vendor",
     "partner sync",
     "seth kingdon",
 )
@@ -127,6 +127,9 @@ NOT a sales opportunity:
 - Josh's Insight/Cisco day job (insight.com, DotsTech, "Meraki Discussion")
 - Existing clients' internal ops calls (no new commercial paper)
 
+Do NOT mark learning because someone said "how do you" or "learn about" — those are normal discovery questions. learning = Josh is the student (Chorbie / Marketing Masterclass only).
+Do NOT mark vendor because the word "vendor" appears in a sales call (prospects talk about their vendors). vendor = Josh's supplier (Seth Kingdon / SEO partner) only.
+
 Return ONLY JSON:
 {
   "verdict": "yes"|"no"|"review",
@@ -167,6 +170,48 @@ def _blob(ev: Engagement) -> str:
     ).lower()
 
 
+def has_sales_context(ev: Engagement) -> bool:
+    """True when the thread is a SalesGlider opportunity, not Josh learning/buying."""
+    blob = _blob(ev)
+    if has_word_hint(blob, SALES_HINTS) or has_word_hint(blob, STRICT_DISCOVERY_HINTS):
+        return True
+    extra = ev.extra or {}
+    if extra.get("document_id") or extra.get("document_name") or extra.get("create_new"):
+        return True
+    if ev.stage_hint in {
+        STAGE["signed"],
+        STAGE["paid"],
+        STAGE["proposal_sent"],
+        STAGE["discovery_scheduled"],
+        STAGE["discovery_completed"],
+    }:
+        return True
+    if ev.source == "calendly":
+        return True
+    return False
+
+
+def _veto_learning_vendor_in_sales_context(ev: Engagement, decision: IntentDecision) -> IntentDecision:
+    if decision.verdict != "no" or (decision.intent or "") not in {"learning", "vendor"}:
+        return decision
+    if not has_sales_context(ev):
+        return decision
+    name = (ev.display_name() or ev.name or "").strip().lower()
+    blob = _blob(ev)
+    for person, _intent in KNOWN_NON_SALES_PEOPLE.items():
+        if person in name or person in blob:
+            return decision
+    return IntentDecision(
+        verdict="review",
+        intent="",
+        confidence=min(decision.confidence, 0.4),
+        reason="Sales context — not learning/vendor",
+        stage=decision.stage,
+        amount=decision.amount,
+        via=decision.via,
+    )
+
+
 def _email_domain(email: str) -> str:
     low = (email or "").strip().lower()
     if "@" not in low:
@@ -188,10 +233,20 @@ def _is_plain_gmail(ev: Engagement) -> bool:
     return True
 
 
+def _has_salesglider_deal(ev: Engagement) -> bool:
+    extra = ev.extra or {}
+    return bool(extra.get("has_sg_deal") or extra.get("closed_won") or extra.get("already_prospect"))
+
+
+def _explicit_hire_evidence(blob: str) -> str:
+    return next((h for h in HIRE_HINTS if h in blob), "")
+
+
 def heuristic_intent(ev: Engagement) -> IntentDecision:
     blob = _blob(ev)
     name = (ev.display_name() or ev.name or "").strip().lower()
     domain = _email_domain(ev.email)
+    deal_holder = _has_salesglider_deal(ev)
 
     if ev.source in NEVER_OPEN_DEAL_SOURCES or _is_plain_gmail(ev):
         return IntentDecision(
@@ -201,7 +256,7 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             reason="Reply/chat/RVM/plain Gmail alone is not a booked meeting",
         )
 
-    if domain in JOSH_DOMAINS or domain == "insight.com":
+    if (domain in JOSH_DOMAINS or domain == "insight.com") and not deal_holder:
         return IntentDecision(
             verdict="no",
             intent="day_job" if domain == "insight.com" else "personal",
@@ -218,14 +273,14 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
                 reason=f"Known non-opportunity: {person}",
             )
 
-    if any(h in blob for h in DAY_JOB_HINTS):
+    if any(h in blob for h in DAY_JOB_HINTS) and not deal_holder:
         return IntentDecision(
             verdict="no",
             intent="day_job",
             confidence=0.92,
             reason="Insight/Cisco/Meraki day-job context",
         )
-    if any(h in blob for h in LEARNING_HINTS):
+    if any(h in blob for h in LEARNING_HINTS) and not has_sales_context(ev):
         return IntentDecision(
             verdict="no",
             intent="learning",
@@ -239,14 +294,14 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             confidence=0.9,
             reason="Mentor / recurring Mark-Josh style call",
         )
-    if any(h in blob for h in VENDOR_HINTS):
+    if any(h in blob for h in VENDOR_HINTS) and not has_sales_context(ev):
         return IntentDecision(
             verdict="no",
             intent="vendor",
             confidence=0.9,
             reason="Vendor or partner, not a prospect",
         )
-    hire_hit = next((h for h in HIRE_HINTS if h in blob), "")
+    hire_hit = _explicit_hire_evidence(blob)
     if hire_hit:
         return IntentDecision(
             verdict="no",
@@ -254,21 +309,25 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             confidence=0.93,
             reason="Josh is hiring or contracting, not selling",
         )
-    if any(h in blob for h in RECRUITER_HINTS):
+    if any(h in blob for h in RECRUITER_HINTS) and not deal_holder:
         return IntentDecision(
             verdict="no",
             intent="recruiter",
             confidence=0.9,
             reason="Recruiter meeting",
         )
-    if any(h in blob for h in PERSONAL_HINTS) and not any(h in blob for h in SALES_HINTS):
+    if any(h in blob for h in PERSONAL_HINTS) and not any(h in blob for h in SALES_HINTS) and not deal_holder:
         return IntentDecision(
             verdict="no",
             intent="personal",
             confidence=0.86,
             reason="Personal/social meeting with no sales language",
         )
-    if any(h in blob for h in NON_SALES_TITLE_HINTS) and not any(h in blob for h in SALES_HINTS):
+    if (
+        any(h in blob for h in NON_SALES_TITLE_HINTS)
+        and not any(h in blob for h in SALES_HINTS)
+        and not deal_holder
+    ):
         return IntentDecision(
             verdict="no",
             intent="networking",
@@ -276,8 +335,12 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
             reason="Title matches a non-sales pattern",
         )
 
-    if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and not any(
-        h in blob for h in ("proposal", "agreement", "invoice", "pandadoc", "docusign", "paid", "growth partners")
+    if (
+        is_client_context(ev.display_name(), ev.company, ev.raw_subject)
+        and is_closed_won_client(ev)
+        and not any(
+            h in blob for h in ("proposal", "agreement", "invoice", "pandadoc", "docusign", "paid", "growth partners")
+        )
     ):
         return IntentDecision(
             verdict="no",
@@ -323,11 +386,51 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
     )
 
 
+def apply_deal_holder_veto(ev: Engagement, decision: IntentDecision | None = None) -> IntentDecision | None:
+    """Open/recent SalesGlider deal holders are never day_job/hire/recruiter without explicit hire."""
+    decision = decision or getattr(ev, "_intent_decision", None)
+    if not isinstance(decision, IntentDecision):
+        return decision
+    if not _has_salesglider_deal(ev):
+        return decision
+    if (decision.intent or "") not in {"day_job", "hire", "recruiter", "networking"}:
+        return decision
+    if decision.intent == "hire" and _explicit_hire_evidence(_blob(ev)):
+        return decision
+    if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and is_closed_won_client(ev):
+        rewritten = IntentDecision(
+            verdict="no",
+            intent="client_ops",
+            confidence=max(decision.confidence, 0.8),
+            reason="Paid/Signed client — notes only, not day-job/hire",
+            stage=decision.stage,
+            amount=decision.amount,
+            via=decision.via,
+        )
+    else:
+        rewritten = IntentDecision(
+            verdict="yes",
+            intent="sales",
+            confidence=max(0.8, min(decision.confidence, 0.9)),
+            reason="Open SalesGlider deal — stay updatable, not day-job/hire/recruiter",
+            stage=decision.stage,
+            amount=decision.amount,
+            via=decision.via,
+        )
+    ev._intent_decision = rewritten
+    ev._person_intent = rewritten
+    extra = ev.extra
+    extra["intent_no"] = is_confident_non_sales(rewritten, 0.75)
+    extra["intent_gemini_yes"] = rewritten.via == "gemini" and is_confident_sales(rewritten, 0.75)
+    return rewritten
+
+
 def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
     cached = getattr(ev, "_intent_decision", None)
     if isinstance(cached, IntentDecision):
-        return cached
+        return apply_deal_holder_veto(ev, cached) or cached
     decision = heuristic_intent(ev)
+    decision = _veto_learning_vendor_in_sales_context(ev, decision)
     if decision.verdict == "review" and settings and settings.gemini_key:
         text = _blob(ev)[:8000]
         if text.strip():
@@ -335,8 +438,10 @@ def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
                 model = _gemini_intent(settings, text)
                 decision = _merge_model(decision, model, settings.intent_min_confidence)
                 decision.via = "gemini"
+                decision = _veto_learning_vendor_in_sales_context(ev, decision)
             except Exception:
                 pass
+    decision = apply_deal_holder_veto(ev, decision) or decision
     ev._intent_decision = decision
     extra = ev.extra
     extra["intent_via"] = decision.via
@@ -383,7 +488,12 @@ def _merge_model(base: IntentDecision, incoming: dict[str, Any], min_confidence:
 
 
 def _gemini_intent(settings: Settings, text: str) -> dict[str, Any]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
+    from crmbrain.config import resolve_gemini_model
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{resolve_gemini_model(getattr(settings, 'gemini_model', ''))}:generateContent"
+    )
     resp = requests.post(
         url,
         params={"key": settings.gemini_key},
@@ -393,7 +503,12 @@ def _gemini_intent(settings: Settings, text: str) -> dict[str, Any]:
         },
         timeout=45,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except Exception as exc:
+        from crmbrain.config import redact_secrets
+
+        raise RuntimeError(redact_secrets(str(exc))) from None
     body = resp.json()
     raw = body["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(raw)
@@ -578,7 +693,7 @@ def attach_person_intent(settings: Settings | None, events: list[Engagement]) ->
     for key, evs in groups.items():
         cached = [getattr(ev, "_person_intent", None) for ev in evs]
         if cached and all(isinstance(item, IntentDecision) for item in cached):
-            winner = cached[0]
+            winner = apply_deal_holder_veto(evs[0], cached[0]) or cached[0]
             out[key] = winner
             for ev in evs:
                 ev._person_intent = winner
@@ -594,8 +709,11 @@ def attach_person_intent(settings: Settings | None, events: list[Engagement]) ->
             winner = classify(settings, _merged_engagement(evs))
         if winner is None:
             winner = classify(settings, evs[0])
+        winner = apply_deal_holder_veto(evs[0], winner) or winner
         out[key] = winner
         for ev in evs:
             ev._person_intent = winner
             ev._person_events = evs
+            ev._intent_decision = getattr(ev, "_intent_decision", None) or winner
+            apply_deal_holder_veto(ev, getattr(ev, "_intent_decision", winner))
     return out

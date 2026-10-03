@@ -75,6 +75,10 @@ class FakeHubSpot:
         return None
 
     def find_contact(self, email="", phone="", name=""):
+        from crmbrain.config import is_zoom_room_address
+
+        if email and is_zoom_room_address(email):
+            return None
         email_l = (email or "").lower()
         digits = "".join(c for c in (phone or "") if c.isdigit())
         for row in self.contacts:
@@ -95,6 +99,23 @@ class FakeHubSpot:
             if len(matches) == 1:
                 return matches[0]
         return None
+
+    def find_contact_fuzzy(self, name="", company=""):
+        from crmbrain.names import names_fuzzy_match
+
+        raw = (company or "").strip().lower()
+        if len(raw) < 3 or not (name or "").strip():
+            return None
+        hits = []
+        for row in self.contacts:
+            props = row.get("properties") or {}
+            other = (props.get("company") or "").strip().lower()
+            if not other or (raw not in other and other not in raw):
+                continue
+            full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+            if names_fuzzy_match(name, full):
+                hits.append(row)
+        return hits[0] if len(hits) == 1 else None
 
     def in_crm(self, email="", phone=""):
         return self.find_contact(email=email, phone=phone) is not None
@@ -127,6 +148,55 @@ class FakeHubSpot:
         }
         self.contacts.append(row)
         return row
+
+    def find_contact_by_company(self, company=""):
+        raw = (company or "").strip().lower()
+        if len(raw) < 3:
+            return None
+        hits = []
+        for row in self.contacts:
+            other = ((row.get("properties") or {}).get("company") or "").strip().lower()
+            if other and (raw in other or other in raw):
+                hits.append(row)
+        return hits[0] if len(hits) == 1 else None
+
+    def find_deal_by_amount(self, amount=""):
+        del amount
+        return None
+
+    def deals_for_company(self, company=""):
+        raw = (company or "").strip().lower()
+        if len(raw) < 3:
+            return []
+        deals = []
+        seen = set()
+        for row in self.contacts:
+            other = ((row.get("properties") or {}).get("company") or "").strip().lower()
+            if not other or (raw not in other and other not in raw):
+                continue
+            for deal in self.open_deals_for_contact(row["id"]):
+                did = str(deal.get("id") or "")
+                if did and did not in seen:
+                    seen.add(did)
+                    deals.append(deal)
+        return deals
+
+    def find_contact_for_commerce(self, name="", company="", amount="", email=""):
+        del company, amount
+        if email:
+            found = self.find_contact(email=email)
+            if found:
+                return found
+            token = (email or "").split("@", 1)[0]
+            if token:
+                rows = self.search_contacts_by_email_token(email) or self.search_contacts_by_email_token(token)
+                if len(rows) == 1:
+                    return rows[0]
+        if name:
+            found = self.find_contact(name=name)
+            if found:
+                return found
+        return None
 
     def search_contacts_by_email_token(self, token):
         needle = (token or "").lower()
@@ -218,13 +288,15 @@ class FakeHubSpot:
                 deal.setdefault("properties", {}).update(properties)
 
     def fill_deal_amount(self, deal, amount, ev=None, contact=None):
-        from crmbrain.intelligence import amount_to_write
+        from crmbrain.intelligence import amount_citation_note, deal_amount_to_write
 
-        hint = amount_to_write((deal.get("properties") or {}).get("amount"), amount)
+        hint = deal_amount_to_write(deal, amount, ev=ev)
         if not hint or not deal.get("id"):
             return False
         self.patch_deal(str(deal["id"]), {"amount": hint})
         deal.setdefault("properties", {})["amount"] = hint
+        if ev and contact and contact.get("id"):
+            self.add_note(contact["id"], amount_citation_note(ev, hint), ev=ev, contact=contact)
         return True
 
     def upsert_deal(self, contact, ev, stage, amount=""):
@@ -236,13 +308,24 @@ class FakeHubSpot:
             self.archive_deal(dup["id"])
         existing = self.open_deals_for_contact(contact["id"])
         live = policy.live_open_deals(existing)
+        won = policy.closed_won_deals(existing)
+        if not live and won and stage == STAGE["paid"]:
+            deal = max(won, key=policy.deal_richness)
+            self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
+            return deal
+        if not live and won and not policy.is_new_completed_paperwork(ev):
+            return {}
         if not live and policy.blocks_no_show_create(existing, stage):
             return {}
         wanted = policy.deal_name_for(ev, contact)
         if live:
             deal = max(live, key=policy.deal_richness)
             current = (deal.get("properties") or {}).get("dealstage") or ""
-            target = choose_deal_action(current, stage, ev, deal=deal) if stage else None
+            target = (
+                choose_deal_action(current, stage, ev, deal=deal, settings=getattr(self, "settings", None))
+                if stage
+                else None
+            )
             current_name = deal["properties"].get("dealname") or ""
             cleaned = policy.prefer_deal_name(
                 clean_deal_name(current_name, fallback=wanted or ev.display_name()),
@@ -255,9 +338,9 @@ class FakeHubSpot:
             if cleaned and cleaned != current_name:
                 deal["properties"]["dealname"] = cleaned
                 self.patch_deal(deal["id"], {"dealname": cleaned})
-            self.fill_deal_amount(deal, amount)
+            self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
             return deal
-        target = choose_deal_action(None, stage, ev) if stage else None
+        target = choose_deal_action(None, stage, ev, settings=getattr(self, "settings", None)) if stage else None
         if not target:
             return {}
         props = {"dealstage": target, "dealname": wanted or ev.display_name() or ev.email or "SalesGlider deal"}
@@ -269,11 +352,38 @@ class FakeHubSpot:
             "properties": props,
         }
         self.deals.append(deal)
+        if amount and contact and contact.get("id"):
+            from crmbrain.intelligence import amount_citation_note
+
+            self.add_note(contact["id"], amount_citation_note(ev, amount), ev=ev, contact=contact)
         return deal
 
 
-def _handle(tmp_path: Path, ev: Engagement, hs: FakeHubSpot | None = None):
-    settings = make_settings()
+def stub_gemini_extract(monkeypatch, amount=None, quote=None, stage_hint=""):
+    """Gemini success path: deal_terms + quote so call amounts may write."""
+
+    def _fake(_settings, text):
+        from crmbrain.intelligence import heuristic_extract
+
+        facts = heuristic_extract(text)
+        terms = dict(facts.get("deal_terms") or {})
+        amt = amount or facts.get("amount_hint") or ""
+        q = quote or terms.get("quote") or (f"${amt}" if amt else "")
+        if amt:
+            terms["tcv"] = amt
+            terms["quote"] = q
+            facts["deal_terms"] = terms
+            facts["amount_hint"] = amt
+            facts["deal_amount"] = amt
+        if stage_hint:
+            facts["stage_hint"] = stage_hint
+        return facts
+
+    monkeypatch.setattr("crmbrain.intelligence._gemini", _fake)
+
+
+def _handle(tmp_path: Path, ev: Engagement, hs: FakeHubSpot | None = None, settings=None):
+    settings = settings or make_settings()
     memory = Memory(settings, data_dir=tmp_path)
     report = CycleReport()
     hs = hs or FakeHubSpot()
@@ -364,7 +474,8 @@ def test_fireflies_held_is_discovery_completed(tmp_path):
     assert report.contacts_upserted
 
 
-def test_cube_disco_through_handle_engagement(tmp_path):
+def test_cube_disco_through_handle_engagement(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000")
     ev = Engagement(
         source="cube_acr",
         external_id="cu-1",
@@ -382,7 +493,7 @@ def test_cube_disco_through_handle_engagement(tmp_path):
     assert is_cube_business_discovery(ev)
     assert may_create_hubspot_contact(ev)
     assert resolve_stage(ev) == STAGE["discovery_completed"]
-    hs, _, report = _handle(tmp_path, ev)
+    hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
     assert hs.contacts
     assert any(w[0] == "upsert_contact" for w in hs.writes)
     assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_completed"]
@@ -600,7 +711,8 @@ def test_meeting_evidence_and_blank_contact():
     assert not is_blank_contact(meeting)
 
 
-def test_fireflies_lands_relational_notes_and_amount(tmp_path):
+def test_fireflies_lands_relational_notes_and_amount(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000")
     ev = Engagement(
         source="fireflies",
         external_id="ff-notes",
@@ -612,7 +724,7 @@ def test_fireflies_lands_relational_notes_and_amount(tmp_path):
         ),
         raw_subject="Robert Lawson and Joshua Osborn",
     )
-    hs, _, report = _handle(tmp_path, ev)
+    hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
     note_patch = next((p for p in hs.patches if p[1].get("family_notes") or p[1].get("relationship_hooks")), None)
     assert note_patch
     assert "son" in (note_patch[1].get("family_notes") or "").lower()
@@ -644,7 +756,8 @@ def test_calendar_system_email_never_upserts_hubspot(tmp_path):
         assert f"calendly:sys-{email}" in memory._local["processed"]
 
 
-def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
+def test_fireflies_3000_per_month_patches_deal_amount(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000/month")
     ev = Engagement(
         source="fireflies",
         external_id="ff-3k-month",
@@ -655,7 +768,7 @@ def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
         transcript="Laura walked the discovery. They want to start at $3,000/month next month.",
         raw_subject="Laura Klein and Joshua Osborn",
     )
-    hs, _, report = _handle(tmp_path, ev)
+    hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
     assert any(w[0] == "patch_deal" and w[2].get("amount") == "3000" for w in hs.writes) or (
         hs.deals and hs.deals[0]["properties"].get("amount") == "3000"
     )
@@ -663,7 +776,7 @@ def test_fireflies_3000_per_month_patches_deal_amount(tmp_path):
     assert any("3000" in a for a in report.amounts_set)
 
 
-def test_fireflies_gemini_failure_still_uses_heuristic_amount(tmp_path, monkeypatch):
+def test_fireflies_gemini_failure_writes_no_amount(tmp_path, monkeypatch):
     ev = Engagement(
         source="fireflies",
         external_id="ff-gemini-fail",
@@ -679,18 +792,20 @@ def test_fireflies_gemini_failure_still_uses_heuristic_amount(tmp_path, monkeypa
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("gemini 500")),
     )
     facts = extract(settings, ev)
-    assert facts["amount_hint"] == "3000"
+    assert facts["amount_hint"] == ""
     assert "son" in (facts.get("family_notes") or "").lower()
     hs = FakeHubSpot()
     memory = Memory(settings, data_dir=tmp_path)
     report = CycleReport()
     _handle_engagement(ev, settings, hs, memory, None, report)
-    assert hs.deals[0]["properties"]["amount"] == "3000"
-    assert any("3000" in a for a in report.amounts_set)
+    assert hs.deals
+    assert hs.deals[0]["properties"].get("amount") in {"", None}
+    assert report.amounts_set == []
     assert report.notes_updated
 
 
-def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
+def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="4500", quote="$4,500")
     ev = Engagement(
         source="fireflies",
         external_id="ff-name-only",
@@ -726,7 +841,7 @@ def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
             },
         }
     )
-    settings = make_settings()
+    settings = make_settings(gemini_key="fake")
     memory = Memory(settings, data_dir=tmp_path)
     memory.mark_processed("fireflies", "ff-name-only", {"contact_id": "lk-1"})
     report = CycleReport()
@@ -737,11 +852,12 @@ def test_fireflies_name_only_matches_existing_and_refreshes(tmp_path):
     assert hs.deals[0]["properties"]["dealname"] == "Laura Klein"
     assert report.notes_updated
     assert any("4500" in a for a in report.amounts_set)
-    assert hs.notes == []
+    assert any("4500" in (n[1] or "") for n in hs.notes)
     assert len(hs.contacts) == 1
 
 
-def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
+def test_fireflies_already_processed_still_refreshes_notes(tmp_path, monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="4500", quote="$4,500")
     ev = Engagement(
         source="fireflies",
         external_id="ff-refresh",
@@ -770,7 +886,7 @@ def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
             "properties": {"dealstage": STAGE["discovery_completed"], "dealname": "Robert", "amount": ""},
         }
     )
-    settings = make_settings()
+    settings = make_settings(gemini_key="fake")
     memory = Memory(settings, data_dir=tmp_path)
     memory.mark_processed("fireflies", "ff-refresh", {"contact_id": "77"})
     report = CycleReport()
@@ -778,10 +894,11 @@ def test_fireflies_already_processed_still_refreshes_notes(tmp_path):
     assert any("refreshed notes/amount" in s for s in report.skipped)
     assert any(p[1].get("family_notes") for p in hs.patches)
     assert hs.deals[0]["properties"]["amount"] == "4500"
-    assert hs.notes == []
+    assert any("4500" in (n[1] or "") for n in hs.notes)
 
 
-def test_notes_amount_backfill_dry_run_does_not_write():
+def test_notes_amount_backfill_dry_run_does_not_write(monkeypatch):
+    stub_gemini_extract(monkeypatch, amount="3000", quote="$3,000")
     path = Path(__file__).resolve().parents[1] / "scripts" / "backfill_notes_and_amounts.py"
     spec = importlib.util.spec_from_file_location("backfill_notes_and_amounts", path)
     assert spec and spec.loader
@@ -800,7 +917,7 @@ def test_notes_amount_backfill_dry_run_does_not_write():
     result = mod.run(
         apply=False,
         days=7,
-        settings=make_settings(),
+        settings=make_settings(gemini_key="fake"),
         hs=hs,
         engagements=[ev],
     )

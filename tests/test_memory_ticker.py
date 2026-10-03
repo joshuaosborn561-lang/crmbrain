@@ -60,6 +60,7 @@ def test_memory_records_supabase_errors_on_report(tmp_path: Path):
     memory.enroll_ticker(
         {
             "id": "t1",
+            "name": "Pat Lee",
             "email": "pat@example.com",
             "status": "active",
             "next_fire_at": "2020-01-01T00:00:00+00:00",
@@ -97,6 +98,7 @@ def test_duplicate_key_is_success_for_mark_and_enroll(tmp_path: Path):
     memory.enroll_ticker(
         {
             "id": "t-dup",
+            "name": "Pat Lee",
             "email": "pat@example.com",
             "status": "active",
             "next_fire_at": "2026-01-01T00:00:00+00:00",
@@ -110,6 +112,7 @@ def test_duplicate_key_is_success_for_mark_and_enroll(tmp_path: Path):
     memory.enroll_ticker(
         {
             "id": "t-dup-2",
+            "name": "Pat Lee",
             "email": "pat@example.com",
             "status": "active",
             "next_fire_at": "2026-02-01T00:00:00+00:00",

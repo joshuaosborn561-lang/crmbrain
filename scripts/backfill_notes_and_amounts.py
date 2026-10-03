@@ -21,6 +21,7 @@ from crmbrain.config import Settings, is_personal, now_cdt  # noqa: E402
 from crmbrain.hubspot import HubSpot  # noqa: E402
 from crmbrain.intelligence import extract, merge_contact_props  # noqa: E402
 from crmbrain.models import Engagement  # noqa: E402
+from crmbrain.deal_write import authorize_deal_write, commit_amount_write  # noqa: E402
 from crmbrain.policy import may_write_hubspot, personal_allowed_for_sales_intro  # noqa: E402
 from crmbrain.sources import cube_acr, fireflies  # noqa: E402
 
@@ -55,6 +56,7 @@ def plan_row(ev: Engagement, contact: dict, facts: dict) -> dict:
         "name": ev.display_name() or ev.email or ev.phone,
         "note_fields": merged,
         "amount": amount,
+        "ev": ev,
     }
 
 
@@ -65,10 +67,19 @@ def apply_row(hs: HubSpot, row: dict) -> dict:
         hs.patch_contact(row["contact_id"], row["note_fields"])
         wrote_notes = True
     amount = row.get("amount") or ""
+    ev = row.get("ev")
     if amount:
         for deal in hs.open_deals_for_contact(row["contact_id"]):
-            if hs.fill_deal_amount(deal, amount):
+            _stage, write_amount, reason = authorize_deal_write(
+                ev or Engagement(source="backfill", external_id=row.get("external_id") or "backfill"),
+                amount=amount,
+                contact={"id": row.get("contact_id")},
+                deal=deal,
+                settings=getattr(hs, "settings", None),
+            )
+            if write_amount and commit_amount_write(hs, deal, write_amount, ev=ev):
                 wrote_amount = True
+            del reason
     return {"wrote_notes": wrote_notes, "wrote_amount": wrote_amount}
 
 

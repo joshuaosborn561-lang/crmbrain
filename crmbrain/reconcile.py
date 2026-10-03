@@ -11,7 +11,7 @@ from datetime import datetime
 
 from crmbrain import evidence, intent, policy, prune
 from crmbrain.budget import WriteBudget
-from crmbrain.config import STAGE, Settings, is_non_deal_person
+from crmbrain.config import STAGE, Settings, is_excluded_contact, is_non_deal_person
 from crmbrain.evidence import (
     KIND_BOOKED,
     KIND_CANCELED,
@@ -23,10 +23,11 @@ from crmbrain.evidence import (
     KIND_SIGNED,
     PersonTimeline,
 )
+from crmbrain.deal_write import authorize_deal_write, commit_deal_write, propose_deal_write
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
-from crmbrain.models import CycleReport, Engagement, IntentDecision, ProposedWrite
-from crmbrain.policy import CLOSED_WON_STAGES, NEVER_OPEN_DEAL_SOURCES, STAGE_RANK
+from crmbrain.models import CycleReport, Engagement, IntentDecision
+from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -122,28 +123,73 @@ def _open_deal(timeline: PersonTimeline) -> dict | None:
     return max(live, key=policy.deal_richness)
 
 
-def evidence_move(current: str, target: str, timeline: PersonTimeline, ev: Engagement | None = None) -> str | None:
-    """Stage to write. Empty means leave alone. Never archive Paid/Signed."""
+def _company_deals(hs: HubSpot, timeline: PersonTimeline) -> list[dict]:
+    company = (timeline.company or "").strip()
+    if not company or not hasattr(hs, "deals_for_company"):
+        return []
+    try:
+        return hs.deals_for_company(company) or []
+    except Exception:
+        return []
+
+
+def _resolve_contact(hs: HubSpot, timeline: PersonTimeline, ev: Engagement) -> dict | None:
+    if timeline.contact:
+        return timeline.contact
+    found = None
+    if hasattr(hs, "find_contact"):
+        try:
+            found = hs.find_contact(
+                email=timeline.email or ev.email,
+                phone=timeline.phone or ev.phone,
+                name=timeline.display_name() or ev.display_name(),
+            )
+        except Exception:
+            found = None
+    if not found:
+        finder = getattr(hs, "find_contact_fuzzy", None)
+        if callable(finder):
+            try:
+                found = finder(timeline.display_name() or ev.display_name(), timeline.company or ev.company)
+            except Exception:
+                found = None
+    if found:
+        timeline.contact = found
+        if hasattr(hs, "open_deals_for_contact") and found.get("id"):
+            try:
+                timeline.deals = hs.open_deals_for_contact(found["id"])
+            except Exception:
+                timeline.deals = timeline.deals or []
+    return found
+
+
+def _stamp_timeline(hs: HubSpot, timeline: PersonTimeline, ev: Engagement) -> tuple[dict | None, list[dict]]:
+    contact = _resolve_contact(hs, timeline, ev)
+    company_deals = _company_deals(hs, timeline)
+    policy.stamp_deal_context(ev, contact, timeline.deals, company_deals)
+    for item in timeline.engagements:
+        policy.stamp_deal_context(item, contact, timeline.deals, company_deals)
+    return contact, company_deals
+
+
+def evidence_move(
+    current: str,
+    target: str,
+    timeline: PersonTimeline,
+    ev: Engagement | None = None,
+    settings: Settings | None = None,
+    deal: dict | None = None,
+) -> str | None:
+    """Stage to write. Same decision function as the cycle path."""
     if not target or current == target:
         return None
-    if current == STAGE["paid"]:
-        return None
-    if current == STAGE["signed"] and target == STAGE["proposal_sent"]:
-        deal = _open_deal(timeline)
-        if ev and policy.document_matches_deal(deal, ev):
-            return target
-        return None
-    if current in PROTECTED_STAGES and target not in {STAGE["paid"], STAGE["signed"]}:
-        return None
-    if target in {STAGE["nurture"], STAGE["no_show"]} and KIND_HELD in timeline.kinds():
-        return None
-    if current and STAGE_RANK.get(target, 0) == STAGE_RANK.get(current, 0):
-        return None
-    return target
+    ev = ev or representative_engagement(timeline)
+    deal = deal if deal is not None else _open_deal(timeline)
+    return policy.choose_deal_action(current or None, target, ev, deal=deal, settings=settings)
 
 
-def _propose(report: CycleReport, write: ProposedWrite) -> None:
-    report.proposed_writes.append(write.as_dict())
+def _propose(report: CycleReport, **kwargs) -> None:
+    propose_deal_write(report, **kwargs)
 
 
 def _queue_review(
@@ -185,16 +231,22 @@ def _commit(
     memory: Memory,
     report: CycleReport,
     budget: WriteBudget,
-    write: ProposedWrite,
     *,
+    action: str,
+    label: str,
+    stage: str = "",
+    amount: str = "",
+    reason: str = "",
     current: str,
     contact: dict | None,
     ev: Engagement,
     timeline: PersonTimeline,
     deal: dict | None,
     dry_run: bool,
+    settings: Settings | None = None,
+    company_deals: list[dict] | None = None,
 ) -> bool:
-    if is_non_deal_person(
+    if is_excluded_contact(ev, contact) or is_non_deal_person(
         name=timeline.display_name(),
         email=timeline.email,
         company=timeline.company,
@@ -207,41 +259,81 @@ def _commit(
     ):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} excluded")
         return False
-    _decision_for(None, timeline, ev)
-    if intent.person_blocks_deal(ev):
+    _decision_for(settings, timeline, ev)
+    if intent.person_blocks_deal(ev, settings):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} person_intent_no")
         return False
+    if action == "archive":
+        pass
+    else:
+        stage_out, amount_out, gate_reason = authorize_deal_write(
+            ev,
+            requested_stage=stage or current,
+            amount=amount,
+            contact=contact,
+            deal=None if action in {"create", "restore"} else deal,
+            deals=timeline.deals,
+            company_deals=company_deals,
+            settings=settings,
+        )
+        if action in {"create", "restore"}:
+            if gate_reason not in {"create"}:
+                if gate_reason == "unknown_phone":
+                    _queue_review(memory, report, timeline, reason="unknown_phone", dry_run=dry_run)
+                else:
+                    report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} {gate_reason}")
+                return False
+            stage, amount = stage_out, amount_out
+        else:
+            if not stage_out and not amount_out:
+                return False
+            stage, amount = stage_out or current, amount_out
     if budget.aborted:
         _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
         return False
-    kind = budget.classify(write.action, current, write.stage)
+    kind = budget.classify(action, current, stage)
     if not budget.allow(kind):
-        write.reason = "cap"
+        reason = "cap"
         _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
         return False
-    _propose(report, write)
+    _propose(
+        report,
+        action=action,
+        label=label,
+        stage=stage,
+        amount=amount,
+        contact_id=str((contact or {}).get("id") or ""),
+        deal_id=str((deal or {}).get("id") or ""),
+        reason=reason,
+    )
     if dry_run:
         return True
-    if write.action == "archive" and deal:
+    if action == "archive" and deal:
         hs.archive_deal(str(deal.get("id") or ""))
-        report.deals_pruned.append(f"{write.label} {write.reason or 'archive'}")
+        report.deals_pruned.append(f"{label} {reason or 'archive'}")
         return True
     if not contact:
-        if ev.source in COLD_CREATE_SOURCES:
-            _queue_review(memory, report, timeline, reason="cold_source", dry_run=dry_run)
+        if ev.source in COLD_CREATE_SOURCES or policy.is_unidentified_cube_phone(ev, contact):
+            _queue_review(
+                memory,
+                report,
+                timeline,
+                reason="unknown_phone" if policy.is_unidentified_cube_phone(ev, contact) else "cold_source",
+                dry_run=dry_run,
+            )
             return False
         contact = hs.upsert_contact(ev)
         timeline.contact = contact
-        report.contacts_upserted.append(f"{write.label} (reconcile)")
-    wrote = hs.upsert_deal(contact, ev, write.stage or current, amount=write.amount)
+        report.contacts_upserted.append(f"{label} (reconcile)")
+    wrote = commit_deal_write(hs, contact, ev, stage or current, amount=amount)
     if wrote.get("id"):
-        if write.action in {"create", "restore"}:
-            report.deals_restored.append(f"{write.label} -> {write.stage} ({wrote.get('id')})")
-        elif write.stage:
-            report.deals_moved.append(f"{write.label} -> {write.stage} ({wrote.get('id')})")
-        if write.amount:
-            report.amounts_set.append(f"{write.label} {write.amount}")
-        if write.stage in {
+        if action in {"create", "restore"}:
+            report.deals_restored.append(f"{label} -> {stage} ({wrote.get('id')})")
+        elif stage and stage != current:
+            report.deals_moved.append(f"{label} -> {stage} ({wrote.get('id')})")
+        if amount:
+            report.amounts_set.append(f"{label} {amount}")
+        if stage in {
             STAGE["discovery_scheduled"],
             STAGE["discovery_completed"],
             STAGE["signed"],
@@ -268,7 +360,15 @@ def apply_timeline(
     del held_events
     budget = budget or WriteBudget.from_settings(settings)
     ev = representative_engagement(timeline)
+    contact, company_deals = _stamp_timeline(hs, timeline, ev)
+    if is_excluded_contact(ev, contact):
+        report.skipped.append(f"{timeline.display_name()} excluded")
+        return _decision_for(settings, timeline, ev)
+    if policy.is_unidentified_cube_phone(ev, contact):
+        _queue_review(memory, report, timeline, reason="unknown_phone", dry_run=dry_run)
+        return _decision_for(settings, timeline, ev)
     decision = _decision_for(settings, timeline, ev)
+    intent.apply_deal_holder_veto(ev, decision)
     if intent.person_blocks_deal(ev, settings):
         report.skipped.append(f"{timeline.display_name()} {decision.intent}, skip HubSpot")
         _queue_review(
@@ -316,14 +416,10 @@ def apply_timeline(
                     memory,
                     report,
                     budget,
-                    ProposedWrite(
-                        action="archive",
-                        label=label,
-                        stage=current,
-                        deal_id=str(deal.get("id") or ""),
-                        contact_id=str((timeline.contact or {}).get("id") or ""),
-                        reason="reply-only",
-                    ),
+                    action="archive",
+                    label=label,
+                    stage=current,
+                    reason="reply-only",
                     current=current,
                     contact=timeline.contact,
                     ev=ev,
@@ -375,8 +471,30 @@ def apply_timeline(
         _queue_review(memory, report, timeline, decision, reason="signed_document_mismatch", dry_run=dry_run)
         return decision
 
-    write_stage = evidence_move(current, target, timeline, ev)
-    if deal and not write_stage and not amount:
+    write_stage = evidence_move(current, target, timeline, ev, settings=settings, deal=deal)
+    write_amount = amount
+    if deal:
+        if not policy.may_mutate_existing_deal(ev, deal, settings):
+            write_stage = None
+            write_amount = ""
+        elif write_amount:
+            from crmbrain.intelligence import deal_amount_to_write
+
+            write_amount = deal_amount_to_write(deal, write_amount, ev=ev)
+    if not deal:
+        ok, reason = policy.may_open_new_deal(
+            ev, timeline.contact, timeline.deals, settings, company_deals
+        )
+        if not ok:
+            if reason in {"unknown_phone", "not_deal", "no_contact_no_meeting", "cold_source"}:
+                _queue_review(memory, report, timeline, decision, reason=reason, dry_run=dry_run)
+            else:
+                report.skipped.append(f"{label} {reason}")
+            return decision
+        write_stage = policy.choose_deal_action(None, target, ev, settings=settings)
+        if not write_stage:
+            return decision
+    elif not write_stage and not write_amount:
         return decision
 
     if not deal and ev.source in COLD_CREATE_SOURCES:
@@ -389,21 +507,19 @@ def apply_timeline(
         memory,
         report,
         budget,
-        ProposedWrite(
-            action=action,
-            label=label,
-            stage=write_stage or current,
-            amount=amount,
-            contact_id=str((timeline.contact or {}).get("id") or ""),
-            deal_id=str((deal or {}).get("id") or ""),
-            reason=decision.reason,
-        ),
+        action=action,
+        label=label,
+        stage=write_stage or current,
+        amount=write_amount,
+        reason=decision.reason,
         current=current,
         contact=timeline.contact,
         ev=ev,
         timeline=timeline,
         deal=deal,
         dry_run=dry_run,
+        settings=settings,
+        company_deals=company_deals,
     )
     return decision
 
@@ -428,6 +544,10 @@ def restore_missing_deals(
             phone=timeline.phone,
         ):
             continue
+        probe = representative_engagement(timeline)
+        if policy.is_unidentified_cube_phone(probe, timeline.contact):
+            _queue_review(memory, report, timeline, reason="unknown_phone", dry_run=dry_run)
+            continue
         if _open_deal(timeline):
             continue
         if policy.has_closed_won_deal(timeline.deals):
@@ -440,7 +560,14 @@ def restore_missing_deals(
             if not policy.contact_has_meeting_evidence(contact, timeline.deals):
                 continue
         ev = representative_engagement(timeline)
+        contact, company_deals = _stamp_timeline(hs, timeline, ev)
+        if is_excluded_contact(ev, contact):
+            continue
+        if policy.is_unidentified_cube_phone(ev, contact):
+            _queue_review(memory, report, timeline, reason="unknown_phone", dry_run=dry_run)
+            continue
         decision = _decision_for(settings, timeline, ev)
+        intent.apply_deal_holder_veto(ev, decision)
         if ev.source in COLD_CREATE_SOURCES and not evidence.has_meeting_evidence(timeline):
             continue
         if intent.person_blocks_deal(ev, settings):
@@ -470,40 +597,66 @@ def restore_missing_deals(
         target = stage_from_timeline(timeline, decision) or STAGE["discovery_completed"]
         if target == STAGE["signed"] and KIND_SIGNED not in timeline.kinds() and KIND_PAYMENT not in timeline.kinds():
             target = STAGE["discovery_completed"] if KIND_HELD in timeline.kinds() else STAGE["discovery_scheduled"]
-        label = timeline.display_name()
-        if dry_run:
-            kind = budget.classify("restore", "", target)
-            if budget.aborted or not budget.allow(kind):
-                _queue_review(memory, report, timeline, decision, reason="cap", dry_run=True)
-                continue
-            _propose(report, ProposedWrite(action="restore", label=label, stage=target, amount=timeline.amount()))
+        ok, reason = policy.may_open_new_deal(
+            ev, timeline.contact, timeline.deals, settings, company_deals
+        )
+        if not ok:
+            if reason == "unknown_phone":
+                _queue_review(memory, report, timeline, decision, reason="unknown_phone", dry_run=dry_run)
+            elif reason not in {"closed_won", "not_deal", "client"}:
+                _queue_review(memory, report, timeline, decision, reason=reason, dry_run=dry_run)
+            else:
+                report.skipped.append(f"{timeline.display_name()} {reason}")
             continue
-        kind = budget.classify("restore", "", target)
+        stage_out, amount_out, gate_reason = authorize_deal_write(
+            ev,
+            requested_stage=target,
+            amount=timeline.amount(),
+            contact=timeline.contact,
+            deal=None,
+            deals=timeline.deals,
+            company_deals=company_deals,
+            settings=settings,
+        )
+        if not stage_out:
+            continue
+        write_stage = stage_out
+        label = timeline.display_name()
+        kind = budget.classify("restore", "", write_stage)
         if budget.aborted or not budget.allow(kind):
             _queue_review(memory, report, timeline, decision, reason="cap", dry_run=dry_run)
             continue
+        _propose(
+            report,
+            action="restore",
+            label=label,
+            stage=write_stage,
+            amount=amount_out,
+            reason=gate_reason,
+        )
+        if dry_run:
+            continue
         contact = timeline.contact
         if not contact:
-            if ev.source in COLD_CREATE_SOURCES:
-                _queue_review(memory, report, timeline, decision, reason="cold_source", dry_run=dry_run)
+            if ev.source in COLD_CREATE_SOURCES or policy.is_unidentified_cube_phone(ev, contact):
+                _queue_review(
+                    memory,
+                    report,
+                    timeline,
+                    decision,
+                    reason="unknown_phone" if policy.is_unidentified_cube_phone(ev, contact) else "cold_source",
+                    dry_run=dry_run,
+                )
                 continue
             contact = hs.upsert_contact(ev)
         timeline.contact = contact
-        archived = _restore_archived_deal(hs, contact, ev, target)
+        archived = _restore_archived_deal(hs, contact, ev, write_stage)
         if archived:
             report.deals_restored.append(f"{label} restored {archived.get('id')}")
-            _propose(
-                report,
-                ProposedWrite(action="restore", label=label, stage=target, deal_id=str(archived.get("id") or "")),
-            )
             continue
-        deal = hs.upsert_deal(contact, ev, target, amount=timeline.amount())
+        deal = commit_deal_write(hs, contact, ev, write_stage, amount=amount_out)
         if deal.get("id"):
-            report.deals_restored.append(f"{label} -> {target} ({deal.get('id')})")
-            _propose(
-                report,
-                ProposedWrite(action="restore", label=label, stage=target, deal_id=str(deal.get("id") or "")),
-            )
+            report.deals_restored.append(f"{label} -> {write_stage} ({deal.get('id')})")
 
 
 def _scheduled_at(timeline: PersonTimeline, deal: dict | None) -> datetime | None:
@@ -700,19 +853,34 @@ def reeval_discovery_scheduled(
             continue
         if not target or target == STAGE["discovery_scheduled"]:
             continue
-        kind = budget.classify("move", STAGE["discovery_scheduled"], target)
+        stage_out, _amt, gate_reason = authorize_deal_write(
+            ev,
+            requested_stage=target,
+            contact=contact,
+            deal=deal,
+            deals=[deal],
+            settings=settings,
+        )
+        if not stage_out:
+            continue
+        write_stage = stage_out
+        kind = budget.classify("move", STAGE["discovery_scheduled"], write_stage)
         if budget.aborted or not budget.allow(kind):
             _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
             continue
         _propose(
             report,
-            ProposedWrite(action="move", label=str(label), stage=target, deal_id=deal_id, reason=reason),
+            action="move",
+            label=str(label),
+            stage=write_stage,
+            deal_id=deal_id,
+            reason=reason,
         )
         if dry_run:
             continue
         ev = representative_engagement(timeline)
-        ev.stage_hint = target
-        wrote = hs.upsert_deal(contact, ev, target)
+        ev.stage_hint = write_stage
+        wrote = commit_deal_write(hs, contact, ev, write_stage)
         if wrote.get("id"):
             report.deals_moved.append(f"{label} scheduled-reeval -> {target} ({wrote.get('id')})")
             if target == STAGE["no_show"]:
@@ -796,14 +964,16 @@ def _planned_change_count(
             if deal_id:
                 changed.add(deal_id)
             continue
-        write = evidence_move(current, target, timeline, ev) if target else None
+        write = evidence_move(current, target, timeline, ev, settings=settings, deal=deal) if target else None
         if write and deal_id:
             changed.add(deal_id)
         elif not deal and target and (
             intent.is_confident_sales(decision, settings.intent_min_confidence)
             or intent.commerce_overrides_person_no(ev, settings)
         ):
-            creates += 1
+            ok, _reason = policy.may_open_new_deal(ev, timeline.contact, timeline.deals, settings)
+            if ok and policy.choose_deal_action(None, target, ev, settings=settings):
+                creates += 1
     if calendar_api_ok and hasattr(hs, "iter_deals"):
         try:
             for deal in hs.iter_deals(["dealname", "dealstage", "meeting_at"], stage=STAGE["discovery_scheduled"]):
@@ -832,7 +1002,14 @@ def _planned_change_count(
                 target, reason = _reeval_decision(
                     hs, timeline, deal, contact, upcoming_emails, held_events
                 )
-                if target and reason != "unknown_scheduled_time":
+                ev = representative_engagement(timeline)
+                if (
+                    target
+                    and reason != "unknown_scheduled_time"
+                    and policy.choose_deal_action(
+                        STAGE["discovery_scheduled"], target, ev, deal=deal, settings=settings
+                    )
+                ):
                     changed.add(deal_id)
         except Exception:
             pass
@@ -881,7 +1058,7 @@ def planned_change_person_keys(
         if evidence.reply_only(timeline) and deal and current == STAGE["discovery_scheduled"]:
             keys.add(timeline.key)
             continue
-        write = evidence_move(current, target, timeline, ev) if target else None
+        write = evidence_move(current, target, timeline, ev, settings=settings, deal=deal) if target else None
         if write and deal:
             keys.add(timeline.key)
         elif not deal and target and (
@@ -893,7 +1070,9 @@ def planned_change_person_keys(
                 or policy.contact_is_prospect(timeline.contact, timeline.deals)
             ):
                 continue
-            keys.add(timeline.key)
+            ok, _reason = policy.may_open_new_deal(ev, timeline.contact, timeline.deals, settings)
+            if ok and policy.choose_deal_action(None, target, ev, settings=settings):
+                keys.add(timeline.key)
     return {k for k in keys if k}
 
 
@@ -991,6 +1170,13 @@ def _attach_hubspot(hs: HubSpot, timelines: dict[str, PersonTimeline]) -> None:
         except Exception:
             found = None
         if not found:
+            finder = getattr(hs, "find_contact_fuzzy", None)
+            if callable(finder):
+                try:
+                    found = finder(timeline.display_name(), timeline.company)
+                except Exception:
+                    found = None
+        if not found:
             continue
         timeline.contact = found
         if hasattr(hs, "open_deals_for_contact") and found.get("id"):
@@ -998,6 +1184,9 @@ def _attach_hubspot(hs: HubSpot, timelines: dict[str, PersonTimeline]) -> None:
                 timeline.deals = hs.open_deals_for_contact(found["id"])
             except Exception:
                 timeline.deals = []
+        company_deals = _company_deals(hs, timeline)
+        for ev in timeline.engagements:
+            policy.stamp_deal_context(ev, found, timeline.deals, company_deals)
 
 
 def _restore_archived_deal(hs: HubSpot, contact: dict, ev: Engagement, stage: str) -> dict | None:
@@ -1007,6 +1196,17 @@ def _restore_archived_deal(hs: HubSpot, contact: dict, ev: Engagement, stage: st
         return None
     archived = find(contact.get("id") or "")
     if not archived:
+        return None
+    if policy.row_has_not_deal_note(archived) or policy.row_has_not_deal_note(contact):
+        return None
+    props = (contact or {}).get("properties") or {}
+    if is_non_deal_person(
+        name=f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip() or ev.display_name(),
+        email=props.get("email") or ev.email,
+        company=props.get("company") or ev.company,
+        phone=props.get("phone") or ev.phone,
+        title=props.get("jobtitle") or ev.title,
+    ):
         return None
     restored = restore(str(archived.get("id") or ""), stage)
     return restored

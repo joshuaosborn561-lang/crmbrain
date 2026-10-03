@@ -12,6 +12,7 @@ from crmbrain.config import (
     is_josh_address,
     is_non_deal_person,
     is_personal,
+    is_zoom_room_address,
     settings_lookback_start,
 )
 from crmbrain.gmail_client import Gmail
@@ -24,6 +25,10 @@ QUERIES = [
     "newer_than:2d (from:calendly.com (\"New Event\" OR Accepted OR canceled OR \"no-show\" OR \"Invitee\"))",
     "newer_than:2d (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR \"new event\")",
     "newer_than:2d (from:docusign.net OR subject:DocuSign completed)",
+    (
+        'newer_than:2d in:sent (proposal OR SOW OR "statement of work" OR pricing OR quote OR retainer)'
+        " -from:pandadoc.com -from:calendly.com -from:docusign.net"
+    ),
 ]
 
 NOTETAKER_DOMAINS = frozenset(
@@ -46,6 +51,10 @@ def mail_queries(settings: Settings) -> list[str]:
         f'{after} (from:calendly.com ("New Event" OR Accepted OR canceled OR "no-show" OR "Invitee"))',
         f'{after} (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR "new event")',
         f"{after} (from:docusign.net OR subject:DocuSign completed)",
+        (
+            f"{after} in:sent (proposal OR SOW OR \"statement of work\" OR pricing OR quote OR retainer)"
+            " -from:pandadoc.com -from:calendly.com -from:docusign.net"
+        ),
     ]
 
 
@@ -196,6 +205,29 @@ def is_invite_notification(sender: str, subject: str) -> bool:
     )
 
 
+JOSH_PROPOSAL_HINTS = (
+    "proposal",
+    "sow",
+    "statement of work",
+    "pricing",
+    "quote",
+    "retainer",
+    "order form",
+)
+
+
+def is_josh_sent_proposal(sender: str, subject: str, body: str = "", to: str = "") -> bool:
+    """Josh's SENT mail that mentions proposal / SOW / pricing."""
+    if not is_josh_address((_addresses(sender) or [""])[0]):
+        return False
+    from crmbrain.intelligence import josh_new_text
+
+    blob = f"{subject} {josh_new_text(body) or body}".lower()
+    if any(h in f"{sender} {subject}".lower() for h in ("pandadoc", "docusign", "calendly")):
+        return False
+    return any(h in blob for h in JOSH_PROPOSAL_HINTS)
+
+
 def is_billing_or_signature_mail(sender: str, subject: str) -> bool:
     blob = f"{sender} {subject}".lower()
     return any(
@@ -284,9 +316,59 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
             if create_new and (not ev_email or is_system_address(ev_email)):
                 report.junk_blocked.append(f"gmail {subject[:80]} (system address)")
                 continue
+            josh_proposal = is_josh_sent_proposal(sender, subject, body, to)
+            payment_mail = False
+            payer_emails: list[str] = []
+            amount_is_instalment = False
             if not contact and not create_new:
-                report.junk_blocked.append(f"gmail {subject[:80]} (not in CRM)")
-                continue
+                from crmbrain.documents import (
+                    commerce_match_fields,
+                    is_payment_mail,
+                    payer_emails_from_body,
+                    payment_amount_from_text,
+                )
+
+                payment_mail = is_payment_mail(subject, sender, snippet) or is_payment_mail(
+                    subject, sender, body
+                )
+                payer, company, amount = commerce_match_fields(subject, snippet, body)
+                pay_amount, amount_is_instalment = payment_amount_from_text(
+                    f"{subject}\n{snippet}\n{body}"
+                )
+                amount = pay_amount or sig_amount or amount
+                payer_emails = payer_emails_from_body(body) if payment_mail else []
+                finder = getattr(hubspot, "find_contact_for_commerce", None)
+                if payment_mail and callable(finder):
+                    for payer_email in payer_emails:
+                        contact = finder(name=payer, company=company, amount=amount, email=payer_email)
+                        if contact:
+                            ev_email = payer_email
+                            break
+                if not contact and callable(finder) and (payment_mail or sig_stage or payer or company):
+                    contact = finder(name=payer, company=company, amount=amount)
+                if not contact and josh_proposal:
+                    for email in emails:
+                        contact = hubspot.find_contact(email=email)
+                        if contact:
+                            break
+                if not contact:
+                    report.junk_blocked.append(f"gmail {subject[:80]} (not in CRM)")
+                    continue
+            elif create_new or contact:
+                from crmbrain.documents import is_payment_mail, payer_emails_from_body, payment_amount_from_text
+
+                payment_mail = is_payment_mail(subject, sender, snippet) or is_payment_mail(
+                    subject, sender, body
+                )
+                if payment_mail:
+                    pay_amount, amount_is_instalment = payment_amount_from_text(
+                        f"{subject}\n{snippet}\n{body}"
+                    )
+                    if pay_amount:
+                        sig_amount = pay_amount
+                    payer_emails = payer_emails_from_body(body)
+                    if payer_emails and not ev_email:
+                        ev_email = payer_emails[0]
             props = (contact or {}).get("properties") or {}
             if gcal_create and classified is not None:
                 from crmbrain.names import person_name_from_attendee
@@ -299,6 +381,58 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 last = cal.get("last_name") or props.get("lastname") or ""
                 domain = cal.get("domain") or ""
                 extra_event = cal.get("event_type", "")
+            amount_source = ""
+            extra_amount = sig_amount
+            extra_terms: dict = {}
+            write_stage = stage or sig_stage or (STAGE["discovery_scheduled"] if gcal_create else "")
+            if payment_mail:
+                from crmbrain.documents import payment_amount_from_text
+
+                pay_amount, amount_is_instalment = payment_amount_from_text(
+                    f"{subject}\n{snippet}\n{body}"
+                )
+                extra_amount = pay_amount or extra_amount
+                write_stage = STAGE["paid"]
+                amount_source = "payment"
+                if payer_emails and (not ev_email or is_system_address(ev_email)):
+                    ev_email = payer_emails[0]
+            elif josh_proposal:
+                from crmbrain.intelligence import (
+                    _INSTALMENT_SENT_RE,
+                    _TOTAL_SENT_RE,
+                    extract as extract_facts,
+                    josh_new_text,
+                    latest_proposal_figure,
+                )
+
+                new_text = josh_new_text(body) or body
+                proposal_ev = Engagement(
+                    source="gmail",
+                    external_id=mid,
+                    raw_subject=subject,
+                    summary=snippet,
+                    transcript=new_text,
+                    email=ev_email,
+                    extra={"josh_sent_proposal": True},
+                )
+                facts = extract_facts(settings, proposal_ev)
+                extra_terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
+                extra_amount = latest_proposal_figure(new_text) or str(
+                    facts.get("amount_hint") or facts.get("deal_amount") or extra_amount or ""
+                )
+                if (
+                    extra_amount
+                    and _INSTALMENT_SENT_RE.search(new_text)
+                    and not _TOTAL_SENT_RE.search(new_text)
+                ):
+                    amount_is_instalment = True
+                write_stage = STAGE["proposal_sent"]
+                amount_source = "proposal_email"
+                if extra_terms:
+                    extra_terms = dict(extra_terms)
+                body = new_text
+            if sig_stage == STAGE["signed"] or (sig_name and write_stage == STAGE["signed"]):
+                amount_source = amount_source or "doc"
             out.append(
                 Engagement(
                     source="gmail",
@@ -312,7 +446,8 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                     domain=domain,
                     raw_subject=subject,
                     summary=f"{snippet}\n{cal.get('when') or ''}\n{extra_event}".strip(),
-                    stage_hint=stage or sig_stage or (STAGE["discovery_scheduled"] if gcal_create else ""),
+                    transcript=body if (josh_proposal or payment_mail) else "",
+                    stage_hint=write_stage,
                     extra={
                         "hubspot_contact_id": contact["id"] if contact else "",
                         "from": sender,
@@ -321,8 +456,14 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                         "meeting_when": cal.get("when", ""),
                         "meeting_at": cal.get("meeting_at", ""),
                         "gcal_create": gcal_create,
-                        "amount": sig_amount,
+                        "amount": extra_amount,
                         "document_name": sig_name,
+                        "amount_source": amount_source,
+                        "amount_is_instalment": amount_is_instalment,
+                        "josh_sent_proposal": josh_proposal,
+                        "payment": payment_mail,
+                        "deal_terms": extra_terms,
+                        "payer_emails": payer_emails,
                     },
                 )
             )
@@ -334,6 +475,8 @@ def is_system_address(email: str) -> bool:
     if not low or low in JOSH_EMAILS:
         return True
     if any(h in low for h in SYSTEM_EMAIL_HINTS) or any(h in low for h in NOREPLY_HINTS):
+        return True
+    if is_zoom_room_address(low):
         return True
     local, _, domain = low.partition("@")
     if domain in {"calendar.google.com", "googlemail.com"}:
@@ -521,7 +664,7 @@ def scan_people(
         for row in memory.get_gmail_people_overflow():
             ev = _overflow_engagement(row)
             email = (ev.email or "").strip().lower()
-            if not email or is_josh_address(email) or email in seen_emails:
+            if not email or is_josh_address(email) or is_system_address(email) or email in seen_emails:
                 continue
             if ev.external_id:
                 seen.add(ev.external_id)
@@ -534,7 +677,13 @@ def scan_people(
             if mid in seen:
                 continue
             seen.add(mid)
-            msg = gmail.get(mid)
+            try:
+                msg = gmail.get(mid)
+            except Exception as exc:
+                if report is not None:
+                    report.skipped.append(f"gmail_person:{mid} {exc}")
+                    report.warnings.append(f"gmail_person skipped {mid}")
+                continue
             headers = gmail.headers_map(msg)
             first, last, email = counterpart_from_headers(
                 headers.get("from", ""),
@@ -542,7 +691,7 @@ def scan_people(
                 headers.get("cc", ""),
             )
             email = (email or "").strip().lower()
-            if not email or is_josh_address(email):
+            if not email or is_josh_address(email) or is_system_address(email):
                 continue
             if email in seen_emails:
                 continue

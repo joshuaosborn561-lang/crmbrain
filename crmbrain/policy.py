@@ -5,7 +5,17 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
 
-from crmbrain.config import JOSH_DOMAINS, JOSH_EMAILS, STAGE, is_client_context, now_utc
+from crmbrain.config import (
+    JOSH_DOMAINS,
+    JOSH_EMAILS,
+    STAGE,
+    Settings,
+    has_not_deal_note,
+    is_client_context,
+    is_excluded_contact,
+    is_zoom_room_address,
+    now_utc,
+)
 from crmbrain.intelligence import stage_id
 from crmbrain.models import Engagement
 from crmbrain.names import (
@@ -144,6 +154,88 @@ def is_client_context_ev(ev: Engagement) -> bool:
     return is_client_context(ev.display_name(), ev.company, ev.raw_subject)
 
 
+def is_silent_meeting(ev: Engagement) -> bool:
+    """Fireflies silent_meeting / no sentences is not a held call."""
+    extra = ev.extra or {}
+    if extra.get("silent_meeting") is True:
+        return True
+    status = str(extra.get("summary_status") or "").lower()
+    if "silent" in status:
+        return True
+    if extra.get("sentence_count") == 0 or extra.get("has_sentences") is False:
+        return True
+    return False
+
+
+CALL_SCREENER_HINTS = (
+    "call screen",
+    "call screener",
+    "google call screen",
+    "this call is being screened",
+    "please state your name and reason",
+    "the person you are calling is using",
+    "unknown caller screening",
+    "you've reached the google call screen",
+    "hi, you've reached",
+)
+
+
+def is_call_screener(ev: Engagement) -> bool:
+    """Voicemail / Google Call Screen / Silence Unknown Callers is not a held meeting."""
+    extra = ev.extra or {}
+    if extra.get("call_screener") is True or extra.get("screener") is True:
+        return True
+    blob = f"{ev.raw_subject or ''} {ev.summary or ''} {ev.transcript or ''}".lower()
+    return any(h in blob for h in CALL_SCREENER_HINTS)
+
+
+def is_closed_won_client(ev: Engagement, deals: list[dict] | None = None, company_deals: list[dict] | None = None) -> bool:
+    """Paid/Signed at the person or company. Open pipeline is not a client."""
+    extra = ev.extra or {}
+    if extra.get("closed_won") or extra.get("company_closed_won") or extra.get("company_has_paid"):
+        return True
+    return person_or_company_closed_won(deals, company_deals, extra)
+
+
+def call_supports_proposal_sent(ev: Engagement, facts: dict | None = None) -> bool:
+    """Held, priced call with a proposal promised or sent."""
+    if ev.source not in {"fireflies", "cube_acr"}:
+        return False
+    if is_silent_meeting(ev) or not is_meeting_held(ev):
+        return False
+    facts = facts or {}
+    terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
+    from crmbrain.intelligence import tcv_from_terms
+
+    amount = (
+        str(facts.get("amount_hint") or facts.get("deal_amount") or "").strip()
+        or tcv_from_terms(terms)
+    )
+    if not amount:
+        return False
+    status = str(terms.get("status") or "").strip().lower()
+    if status in {"quoted", "accepted"}:
+        return True
+    blob = " ".join(
+        [
+            ev.summary or "",
+            ev.transcript or "",
+            ev.raw_subject or "",
+            str(terms.get("quote") or ""),
+            str(facts.get("stage_hint") or ""),
+        ]
+    ).lower()
+    return any(h in blob for h in ("proposal", "sow", "statement of work", "pricing", "quote"))
+
+
+def requires_josh_meeting_to_open_deal(ev: Engagement) -> bool:
+    """HeyReach / client-campaign prospects need a held or scheduled meeting with Josh."""
+    extra = ev.extra or {}
+    if ev.source in NEVER_OPEN_DEAL_SOURCES or extra.get("client_campaign") or extra.get("heyreach"):
+        return not (is_meeting_held(ev) or is_meeting_scheduled(ev))
+    return False
+
+
 def is_salesglider_intro(ev: Engagement) -> bool:
     blob = _blob(ev)
     return any(h in blob for h in SALESGLIDER_INTRO_HINTS)
@@ -247,11 +339,41 @@ def has_paperwork_evidence(ev: Engagement) -> bool:
     return False
 
 
-def closed_won_notes_only(ev: Engagement, deals: list[dict] | None) -> bool:
-    """Paid/Signed contacts: Cube/Fireflies notes only unless new paperwork."""
-    if ev.source not in {"cube_acr", "fireflies"}:
+def is_new_completed_paperwork(ev: Engagement) -> bool:
+    """Completed PandaDoc / DocuSign for a new engagement — the only create on a Paid client."""
+    extra = ev.extra or {}
+    if extra.get("payment") or extra.get("amount_source") == "payment":
         return False
-    return has_closed_won_deal(deals)
+    if ev.source != "gmail":
+        return False
+    stage = ev.stage_hint or extra.get("stage") or ""
+    if stage not in {STAGE["signed"], "signed", "closedwon"}:
+        return False
+    return bool(extra.get("document_id") or extra.get("document_name") or extra.get("completed_doc"))
+
+
+def is_payment_event(ev: Engagement) -> bool:
+    extra = ev.extra or {}
+    if extra.get("payment") or extra.get("amount_source") == "payment":
+        return True
+    return ev.stage_hint == STAGE["paid"]
+
+
+def closed_won_notes_only(
+    ev: Engagement,
+    deals: list[dict] | None,
+    contact: dict | None = None,
+    company_deals: list[dict] | None = None,
+) -> bool:
+    """Paid/Signed at the person or company: notes only. Never a new Gmail/call deal.
+
+    Payment may update an existing closed-won deal. New completed paperwork may
+    open a new engagement. Everything else is notes / review.
+    """
+    del contact
+    if is_new_completed_paperwork(ev) or is_payment_event(ev):
+        return False
+    return person_or_company_closed_won(deals, company_deals, ev.extra or {})
 
 
 def is_cube_business_discovery(ev: Engagement, *, already_prospect: bool | None = None) -> bool:
@@ -345,8 +467,10 @@ def is_allo_discovery(ev: Engagement) -> bool:
 
 
 def is_meeting_held(ev: Engagement) -> bool:
+    if is_call_screener(ev):
+        return False
     if ev.source == "fireflies":
-        return True
+        return not is_silent_meeting(ev)
     if ev.source == "cube_acr":
         return is_cube_business_discovery(ev)
     if ev.source == "allo":
@@ -423,18 +547,203 @@ def should_move_stage(current: str, target: str, *, back_signal: bool = False) -
     return target_rank > current_rank
 
 
+MANUAL_SOURCE_TYPES = frozenset({"CRM_UI", "USER"})
+INTEGRATION_SOURCE_TYPES = frozenset({"API", "INTEGRATION", "AUTOMATION_PLATFORM", "MERGE_OBJECTS"})
+
+
+def _parse_hs_datetime(value: object) -> datetime | None:
+    dt = parse_iso_datetime(value)
+    if dt:
+        return dt
+    raw = str(value or "").strip()
+    if not raw or not raw.isdigit():
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    if n > 10_000_000_000:
+        n = n / 1000.0
+    try:
+        return datetime.fromtimestamp(n, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def last_manual_modification(deal: dict | None) -> datetime | None:
+    """Last non-integration edit of stage or amount. Test hook: manual_modified_at."""
+    if not deal:
+        return None
+    props = deal.get("properties") or {}
+    hook = _parse_hs_datetime(props.get("manual_modified_at"))
+    if hook:
+        return hook
+    latest: datetime | None = None
+    history = deal.get("propertiesWithHistory") or {}
+    for key in ("dealstage", "amount"):
+        for row in history.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            source = str(row.get("sourceType") or "").upper()
+            user_id = row.get("updatedByUserId") or row.get("updatedByUser")
+            if source in INTEGRATION_SOURCE_TYPES and not user_id:
+                continue
+            if source in MANUAL_SOURCE_TYPES or user_id:
+                ts = _parse_hs_datetime(row.get("timestamp"))
+                if ts and (latest is None or ts > latest):
+                    latest = ts
+    if latest:
+        return latest
+    if props.get("hs_updated_by_user_id"):
+        return _parse_hs_datetime(props.get("hs_lastmodifieddate"))
+    return None
+
+
+def event_predates_manual_edit(ev: Engagement, deal: dict | None) -> bool:
+    manual = last_manual_modification(deal)
+    if not manual or not ev.occurred_at:
+        return False
+    occurred = _aware(ev.occurred_at)
+    return bool(occurred and occurred < manual)
+
+
+def deal_is_locked(deal: dict | None) -> bool:
+    """HubSpot crmbrain_locked checkbox — never change stage or amount."""
+    if not deal:
+        return False
+    raw = str((deal.get("properties") or {}).get("crmbrain_locked") or "").strip().lower()
+    return raw in {"true", "1", "yes"}
+
+
+def event_predates_freeze(ev: Engagement, settings: Settings | None) -> bool:
+    freeze = getattr(settings, "manual_freeze_at", None) if settings else None
+    if not freeze or not ev.occurred_at:
+        return False
+    occurred = _aware(ev.occurred_at)
+    freeze_at = _aware(freeze)
+    return bool(occurred and freeze_at and occurred < freeze_at)
+
+
+def is_unidentified_cube_phone(ev: Engagement, contact: dict | None) -> bool:
+    """Cube number with no HubSpot contact, no email, and no confident person name."""
+    if ev.source != "cube_acr" or contact:
+        return False
+    if ev.email:
+        return False
+    if is_confident_person_name(ev.display_name() or ev.name):
+        return False
+    return bool(ev.phone)
+
+
+def stamp_deal_context(
+    ev: Engagement,
+    contact: dict | None,
+    deals: list[dict] | None,
+    company_deals: list[dict] | None = None,
+) -> None:
+    """Mark HubSpot deal-holder flags before intent classification."""
+    extra = dict(ev.extra or {})
+    extra["closed_won"] = has_closed_won_deal(deals)
+    extra["company_closed_won"] = has_closed_won_deal(company_deals)
+    extra["company_has_paid"] = extra["company_closed_won"]
+    extra["already_prospect"] = contact_is_prospect(contact, deals)
+    extra["has_sg_deal"] = bool(
+        live_open_deals(deals) or has_closed_won_deal(deals) or has_closed_won_deal(company_deals)
+    )
+    ev.extra = extra
+
+
+def contact_has_any_deal(deals: list[dict] | None) -> bool:
+    return bool(deals)
+
+
+def may_mutate_existing_deal(
+    ev: Engagement, deal: dict | None, settings: Settings | None = None
+) -> bool:
+    """False when a lock, freeze, or later manual edit blocks stage/amount writes."""
+    if not deal:
+        return True
+    if deal_is_locked(deal):
+        return False
+    if event_predates_freeze(ev, settings):
+        return False
+    if event_predates_manual_edit(ev, deal):
+        return False
+    return True
+
+
+def may_open_new_deal(
+    ev: Engagement,
+    contact: dict | None,
+    deals: list[dict] | None,
+    settings: Settings | None = None,
+    company_deals: list[dict] | None = None,
+) -> tuple[bool, str]:
+    """Single create/restore gate used by cycle and reconcile (including dry-run)."""
+    if is_unidentified_cube_phone(ev, contact):
+        return False, "unknown_phone"
+    if is_excluded_contact(ev, contact):
+        return False, "not_deal"
+    if row_has_not_deal_note(contact):
+        return False, "not_deal"
+    if closed_won_notes_only(ev, deals, contact=contact, company_deals=company_deals):
+        return False, "closed_won"
+    if any(deal_is_locked(d) for d in (deals or [])):
+        return False, "locked"
+    if event_predates_freeze(ev, settings) and contact_has_any_deal(deals):
+        return False, "manual_freeze"
+    if not contact and not (is_meeting_held(ev) or is_meeting_scheduled(ev)):
+        return False, "no_contact_no_meeting"
+    if (
+        is_client_context_ev(ev)
+        and is_closed_won_client(ev, deals, company_deals)
+        and not is_new_completed_paperwork(ev)
+        and not is_payment_event(ev)
+    ):
+        return False, "client"
+    if ev.source in NEVER_OPEN_DEAL_SOURCES:
+        return False, "cold_source"
+    return True, ""
+
+
 def choose_deal_action(
-    current: str | None, requested: str, ev: Engagement, deal: dict | None = None
+    current: str | None,
+    requested: str,
+    ev: Engagement,
+    deal: dict | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
     """Stage to write, or None to leave the deal / skip create."""
     if not requested:
         return None
+    if deal and not may_mutate_existing_deal(ev, deal, settings):
+        return None
+    if requires_josh_meeting_to_open_deal(ev) and not current:
+        return None
     held = is_meeting_held(ev)
     target = requested
     if held and target in {STAGE["nurture"], STAGE["no_show"]}:
-        target = STAGE["discovery_completed"]
+        if current not in {STAGE["nurture"], STAGE["closed_lost"]}:
+            target = STAGE["discovery_completed"]
     if current == STAGE["replied"] and held:
         target = STAGE["discovery_completed"]
+    if current in {STAGE["nurture"], STAGE["closed_lost"]}:
+        call_forward = ev.source in {"fireflies", "cube_acr"} and target in {
+            STAGE["discovery_completed"],
+            STAGE["discovery_scheduled"],
+            STAGE["proposal_sent"],
+        }
+        if target == STAGE["discovery_completed"] or call_forward:
+            if target == STAGE["discovery_completed"] and not held:
+                return None
+            if call_forward and not held:
+                return None
+            # Manual edits win. No history → do not pull Nurture / Closed Lost.
+            manual = last_manual_modification(deal)
+            if not manual:
+                return None
+            if ev.occurred_at and _aware(ev.occurred_at) and _aware(ev.occurred_at) <= manual:
+                return None
     if not current:
         if ev.source in NEVER_OPEN_DEAL_SOURCES:
             return None
@@ -445,9 +754,12 @@ def choose_deal_action(
         return None
     if current == STAGE["paid"] and target != STAGE["paid"]:
         return None
-    if current == STAGE["signed"] and target == STAGE["proposal_sent"]:
-        if document_matches_deal(deal, ev):
-            return target
+    if current == STAGE["signed"] and target not in {STAGE["signed"], STAGE["paid"]}:
+        return None
+    if current == STAGE["proposal_sent"] and target in {
+        STAGE["discovery_completed"],
+        STAGE["discovery_scheduled"],
+    }:
         return None
     back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
     if not should_move_stage(current, target, back_signal=back):
@@ -458,12 +770,17 @@ def choose_deal_action(
 def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     """Only set a stage when evidence warrants it. No HeyReach/RVM Replied. No Smartlead Nurture."""
     facts = facts or {}
-    if is_client_context(ev.display_name(), ev.company, ev.raw_subject):
+    if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and is_closed_won_client(ev):
         return ""
     hint = facts.get("stage_hint") or ev.stage_hint
     stage = stage_id(hint) if hint else ""
+    if ev.source == "fireflies" and is_silent_meeting(ev):
+        return ""
     if ev.source != "gmail" and stage in MONEY_STAGES:
-        stage = ""
+        if stage == STAGE["proposal_sent"] and call_supports_proposal_sent(ev, facts):
+            pass
+        else:
+            stage = ""
     if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
         return STAGE["discovery_completed"]
     if stage:
@@ -473,6 +790,10 @@ def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
     if ev.source == "calendly":
         return STAGE["discovery_scheduled"]
     if ev.source == "fireflies":
+        if is_silent_meeting(ev):
+            return ""
+        if call_supports_proposal_sent(ev, facts):
+            return STAGE["proposal_sent"]
         return STAGE["discovery_completed"]
     if ev.source == "cube_acr" and is_cube_business_discovery(ev):
         return STAGE["discovery_completed"]
@@ -600,6 +921,8 @@ def is_system_address_local(email: str) -> bool:
         return True
     domain = _domain_of(low)
     if domain in {"calendar.google.com", "googlemail.com"}:
+        return True
+    if is_zoom_room_address(low):
         return True
     local = low.split("@", 1)[0]
     if local.startswith("noreply") or local.startswith("no-reply") or local.startswith("donotreply"):
@@ -775,6 +1098,25 @@ def has_closed_won_deal(deals: list[dict] | None) -> bool:
     return False
 
 
+def row_has_not_deal_note(row: dict | None) -> bool:
+    if not row:
+        return False
+    props = row.get("properties") or {}
+    blob = " ".join(str(v) for v in list(props.values()) + [row.get("not_deal_note")] if v is not None)
+    return has_not_deal_note(blob)
+
+
+def person_or_company_closed_won(
+    deals: list[dict] | None,
+    company_deals: list[dict] | None = None,
+    extra: dict | None = None,
+) -> bool:
+    extra = extra or {}
+    if has_closed_won_deal(deals) or has_closed_won_deal(company_deals):
+        return True
+    return bool(extra.get("closed_won") or extra.get("company_closed_won") or extra.get("company_has_paid"))
+
+
 def blocks_no_show_create(deals: list[dict] | None, stage: str) -> bool:
     """Do not open a No Show deal when the contact already has Paid/Signed."""
     return stage == STAGE["no_show"] and has_closed_won_deal(deals)
@@ -798,6 +1140,8 @@ def no_show_write_stage(
     A stale processed no_show event must not re-fire or re-promote.
     """
     held = matching_held_event(prospect, contact, held_events, scheduled_at)
+    if held and not is_meeting_held(held):
+        held = None
     completed_or_better = STAGE_RANK.get(current_stage, 0) >= STAGE_RANK[STAGE["discovery_completed"]]
     if already_processed:
         if held:
@@ -900,6 +1244,15 @@ def live_open_deals(deals: list[dict] | None) -> list[dict]:
         if stage not in {STAGE["closed_lost"], STAGE["paid"]}:
             live.append(deal)
     return live
+
+
+def closed_won_deals(deals: list[dict] | None) -> list[dict]:
+    won = []
+    for deal in deals or []:
+        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        if stage in CLOSED_WON_STAGES:
+            won.append(deal)
+    return won
 
 
 def deal_richness(deal: dict) -> tuple:
