@@ -122,23 +122,63 @@ _MONEY_RE = re.compile(
 )
 _RANGE_MO_RE = re.compile(
     r"\$?\s*(\d+(?:\.\d+)?)\s*([kK])?\s*[-–to]{1,3}\s*\$?\s*(\d+(?:\.\d+)?)\s*([kK])?"
-    r"\s*(?:k\b)?\s*(?:/\s*mo|/month|per month|a month|monthly)",
+    r"\s*(?:k\b)?\s*(?:/\s*mo|/month|per\s*month|a\s*month|monthly)",
     re.I,
 )
 _TIMES_RE = re.compile(
-    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:x|×)\s*(\d+)\b",
+    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:x|×)\s*(\d+)(?:\s*(?:month|mo)s?)?\b",
     re.I,
 )
 _MONTHLY_FEE_RE = re.compile(
-    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:/\s*mo|/month|per month|a month|monthly)",
+    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:/\s*mo|/month|per\s*month|a\s*month|monthly)",
     re.I,
 )
+_WORD_MONTHS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
 _TERM_RE = re.compile(
-    r"(\d+)\s*[- ]?(?:month|mo)s?\s*(?:minimum|min\.?|term|commit|agreement|retainer)?",
+    r"(?<![\d,.])(?P<term>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"\s*[- ]?(?:month|mo)s?\s*(?:minimum|min\.?|term|commit|agreement|retainer)?",
     re.I,
+)
+_PITCH_TERM_PREFIX_RE = re.compile(
+    r"(?:in\s+(?:his|her|their|the)\s+)?first\s+$",
+    re.I,
+)
+_PACKAGE_FOR_RE = re.compile(
+    r"\$?\s*(?P<amt>\d[\d,]*(?:\.\d+)?)\s*(?P<k>[kK])?\s+for\s+"
+    r"(?P<term>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"\s+(?:month|mo)s?\b",
+    re.I,
+)
+_GENERIC_CLIENT_RANGE_HINTS = (
+    "most of my clients",
+    "most clients",
+    "my clients pay",
+    "clients pay between",
+    "typically pay",
+    "usually pay",
+    "between 3 and 4",
+    "3 and 4 grand",
 )
 _ONE_TIME_RE = re.compile(
     r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:one[ -]?time|package|flat|upfront)",
+    re.I,
+)
+_STATED_TOTAL_RE = re.compile(
+    r"(?:engagement|package|total|investment|agreement)\s+(?:is|of|:)?\s*\$?\s*"
+    r"(\d[\d,]*(?:\.\d+)?)\s*([kK])?",
     re.I,
 )
 PROPOSAL_PROMISE_HINTS = (
@@ -242,6 +282,126 @@ def _as_amount(raw: object) -> str:
         return ""
 
 
+def _term_months_from_match(match: re.Match[str]) -> int | None:
+    raw = ""
+    if "term" in match.re.groupindex:
+        raw = str(match.group("term") or "")
+    elif match.lastindex:
+        raw = str(match.group(1) or "")
+    raw = raw.strip().lower()
+    if raw in _WORD_MONTHS:
+        return _WORD_MONTHS[raw]
+    try:
+        val = int(raw)
+    except ValueError:
+        return None
+    if val < 1 or val > 60:
+        return None
+    return val
+
+
+def _is_pitch_term(text: str, match: re.Match[str]) -> bool:
+    """Skip case-study language like 'first 3 months' / 'in his first 3 months'."""
+    prefix = text[max(0, match.start() - 24) : match.start()]
+    return bool(_PITCH_TERM_PREFIX_RE.search(prefix))
+
+
+def _term_near_offer(text: str, offer: re.Match[str] | None = None) -> int | None:
+    """Prefer a term next to the priced offer, not the first pitch mention."""
+    best = None
+    best_dist = None
+    for match in _TERM_RE.finditer(text):
+        if _is_pitch_term(text, match):
+            continue
+        months = _term_months_from_match(match)
+        if not months:
+            continue
+        if offer is None:
+            return months
+        # Terms just after the fee ('5,000 a month for four months') win.
+        if match.start() >= offer.start() - 8:
+            dist = match.start() - offer.start()
+        else:
+            dist = offer.start() - match.start() + 10_000
+        if best_dist is None or dist < best_dist:
+            best = months
+            best_dist = dist
+    return best
+
+
+def _money_from_quote(quote: str) -> str:
+    hits: list[str] = []
+    for match in _MONEY_RE.finditer(quote or ""):
+        num = match.group(1) or match.group(3) or match.group(5)
+        suffix = match.group(2) or match.group(4) or match.group(6) or ""
+        val = _money_value(num, suffix)
+        if val is None:
+            continue
+        formatted = format_amount(val)
+        if formatted:
+            hits.append(formatted)
+    unique = list(dict.fromkeys(hits))
+    return unique[0] if len(unique) == 1 else ""
+
+
+def _is_generic_client_range(quote: str) -> bool:
+    low = (quote or "").lower()
+    return any(h in low for h in _GENERIC_CLIENT_RANGE_HINTS)
+
+
+def _is_stated_package_total(quote: str) -> bool:
+    """'$8500 for three months' is a package total, not $8500/mo * 3."""
+    match = _PACKAGE_FOR_RE.search(quote or "")
+    if not match:
+        return False
+    return _MONTHLY_FEE_RE.search(match.group(0)) is None
+
+
+def quote_is_monthly_only(quote: str) -> bool:
+    """Monthly/range with no literal term, times, or package total — never invent TCV."""
+    q = quote or ""
+    has_monthly = bool(_MONTHLY_FEE_RE.search(q) or _RANGE_MO_RE.search(q))
+    if not has_monthly:
+        return False
+    if _TERM_RE.search(q) or _TIMES_RE.search(q) or _is_stated_package_total(q):
+        return False
+    return True
+
+
+def quote_states_priced_offer(quote: str) -> bool:
+    """True when the quote itself has monthly+term or a stated total for this prospect."""
+    q = (quote or "").strip()
+    if not q:
+        return False
+    if _is_generic_client_range(q) and not _TERM_RE.search(q) and not _TIMES_RE.search(q):
+        return False
+    if quote_is_monthly_only(q):
+        return False
+    if _TIMES_RE.search(q):
+        return True
+    has_monthly = bool(_MONTHLY_FEE_RE.search(q) or _RANGE_MO_RE.search(q))
+    has_term = bool(_TERM_RE.search(q))
+    if has_monthly and has_term:
+        return True
+    if _is_stated_package_total(q):
+        return True
+    if re.search(
+        r"(?:package|engagement|total|investment|retainer|agreement)\s+(?:is|of|:)?\s*\$?\s*\d",
+        q,
+        re.I,
+    ):
+        return True
+    if re.search(
+        r"\$?\s*\d[\d,]*(?:\.\d+)?\s*(?:k\b)?\s*(?:package|engagement|total|investment|one[ -]?time)\b",
+        q,
+        re.I,
+    ):
+        return True
+    if _MONEY_RE.search(q) or re.search(r"\$\s*\d", q):
+        return True
+    return False
+
+
 def _as_int(raw: object) -> int | None:
     text = str(raw or "").strip()
     if not text:
@@ -277,13 +437,8 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
     if not text:
         return terms
     low = text.lower()
+    offer_match: re.Match[str] | None = None
     term = None
-    tm = _TERM_RE.search(text)
-    if tm:
-        try:
-            term = int(tm.group(1))
-        except ValueError:
-            term = None
     times = _TIMES_RE.search(text)
     if times:
         val = _money_value(times.group(1), times.group(2) or "")
@@ -295,13 +450,13 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
             formatted = format_amount(val)
             if formatted:
                 terms["monthly_fee"] = formatted
-            if not term:
-                term = n
+            term = n
+            offer_match = times
             start = max(0, times.start() - 20)
             end = min(len(text), times.end() + 20)
             terms["quote"] = text[start:end].strip()
     rng = _RANGE_MO_RE.search(text)
-    if rng:
+    if rng and not terms["monthly_fee"]:
         low_v = _money_value(rng.group(1), rng.group(2) or "k" if "k" in rng.group(0).lower() else "")
         high_v = _money_value(rng.group(3), rng.group(4) or "k" if "k" in rng.group(0).lower() else "")
         # $3-4k/mo — the k often applies to both sides.
@@ -315,19 +470,29 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
             terms["monthly_fee"] = terms["monthly_fee"] or terms["range_low"]
         if high_v is not None:
             terms["range_high"] = format_amount(high_v) or terms["range_high"]
+        offer_match = offer_match or rng
         start = max(0, rng.start() - 12)
         end = min(len(text), rng.end() + 24)
         terms["quote"] = terms["quote"] or text[start:end].strip()
-    if not terms["monthly_fee"]:
-        monthly = _MONTHLY_FEE_RE.search(text)
-        if monthly:
-            val = _money_value(monthly.group(1), monthly.group(2) or "")
-            if val is not None:
-                terms["monthly_fee"] = format_amount(val) or ""
-                start = max(0, monthly.start() - 12)
-                end = min(len(text), monthly.end() + 16)
-                terms["quote"] = terms["quote"] or text[start:end].strip()
-    one = _ONE_TIME_RE.search(text)
+    monthly = _MONTHLY_FEE_RE.search(text)
+    if monthly and not terms["monthly_fee"]:
+        val = _money_value(monthly.group(1), monthly.group(2) or "")
+        if val is not None:
+            terms["monthly_fee"] = format_amount(val) or ""
+            offer_match = monthly
+            start = max(0, monthly.start() - 12)
+            end = min(len(text), monthly.end() + 40)
+            terms["quote"] = terms["quote"] or text[start:end].strip()
+    if not term:
+        term = _term_near_offer(text, offer_match)
+    pkg = _PACKAGE_FOR_RE.search(text)
+    if pkg and not _MONTHLY_FEE_RE.search(pkg.group(0)):
+        val = _money_value(pkg.group("amt"), pkg.group("k") or "")
+        if val is not None:
+            terms["one_time_fee"] = format_amount(val) or ""
+            terms["quote"] = terms["quote"] or pkg.group(0).strip()
+            term = None
+    one = _ONE_TIME_RE.search(text) or _STATED_TOTAL_RE.search(text)
     if one:
         val = _money_value(one.group(1), one.group(2) or "")
         if val is not None:
@@ -355,20 +520,38 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
 
 
 def tcv_from_terms(terms: dict[str, Any] | None) -> str:
-    """Amount = TCV: tcv, else monthly*term, else range_low*min term."""
+    """Amount = TCV only when the quote states monthly+term or a package total."""
     terms = terms or {}
-    direct = _as_amount(terms.get("tcv"))
-    if direct:
-        return direct
+    quote = str(terms.get("quote") or "").strip()
+    if quote and not quote_states_priced_offer(quote):
+        return ""
+    if quote and _is_stated_package_total(quote):
+        return (
+            _money_from_quote(quote)
+            or _as_amount(terms.get("one_time_fee"))
+            or (
+                _as_amount(terms.get("tcv"))
+                if amount_literal_in_text(quote, str(terms.get("tcv") or ""))
+                else ""
+            )
+        )
     monthly = _as_amount(terms.get("monthly_fee"))
     term = _as_int(terms.get("term_months"))
-    if monthly and term:
+    quote_allows_multiply = bool(
+        not quote
+        or _TIMES_RE.search(quote)
+        or (
+            (_MONTHLY_FEE_RE.search(quote) or _RANGE_MO_RE.search(quote))
+            and _TERM_RE.search(quote)
+        )
+    )
+    if monthly and term and quote_allows_multiply:
         try:
             return format_amount(float(monthly) * term)
         except ValueError:
             pass
     low = _as_amount(terms.get("range_low"))
-    if low and term:
+    if low and term and quote_allows_multiply:
         try:
             return format_amount(float(low) * term)
         except ValueError:
@@ -376,6 +559,14 @@ def tcv_from_terms(terms: dict[str, Any] | None) -> str:
     one = _as_amount(terms.get("one_time_fee")) or _as_amount(terms.get("poc_fee"))
     if one:
         return one
+    if quote:
+        direct = _as_amount(terms.get("tcv"))
+        if direct and amount_literal_in_text(quote, direct):
+            return direct
+        lone = _money_from_quote(quote)
+        if lone and not (_MONTHLY_FEE_RE.search(quote) or _RANGE_MO_RE.search(quote)):
+            return lone
+        return ""
     if monthly:
         return monthly
     if low:
@@ -521,8 +712,8 @@ def quote_matches_source(quote: str, source: str) -> bool:
     return found / len(tokens) >= 0.7
 
 
-def amount_attested_in_text(text: str, amount: str) -> bool:
-    """Digits, $Nk, or a monthly*term / range that equals amount."""
+def amount_literal_in_text(text: str, amount: str) -> bool:
+    """True when this exact total appears as digits or $Nk in the text."""
     if not text or not amount:
         return False
     compact = text.replace(",", "")
@@ -531,12 +722,23 @@ def amount_attested_in_text(text: str, amount: str) -> bool:
     except ValueError:
         return False
     n_int = int(n) if abs(n - round(n)) < 0.001 else None
-    if n_int is not None and re.search(rf"\$?\s*{n_int}(?:\.0+)?\b", compact):
+    if n_int is None:
+        return False
+    if re.search(rf"\$?\s*{n_int}(?:\.0+)?\b", compact):
         return True
-    if n_int is not None and n_int >= 1000 and n_int % 1000 == 0 and re.search(
+    if n_int >= 1000 and n_int % 1000 == 0 and re.search(
         rf"\$?\s*{n_int // 1000}\s*k\b", compact, re.I
     ):
         return True
+    return False
+
+
+def amount_attested_in_text(text: str, amount: str) -> bool:
+    """Digits, $Nk, or a monthly*term / range that equals amount."""
+    if amount_literal_in_text(text, amount):
+        return True
+    if not text or not amount:
+        return False
     terms = heuristic_deal_terms(text)
     computed = tcv_from_terms(terms)
     if computed and amounts_equal(computed, amount):
@@ -771,18 +973,14 @@ CALL_SOURCES = frozenset({"fireflies", "cube_acr", "allo"})
 
 
 def _call_amount_from_gemini(facts: dict[str, Any], text: str) -> str:
-    """Call amounts require a Gemini deal_terms result with a validated quote."""
+    """Call amounts require a Gemini quote that states monthly+term or a total."""
     terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
     quote = str(terms.get("quote") or "")
     if not quote or not quote_matches_source(quote, text):
         return ""
-    amount = (
-        tcv_from_terms(terms)
-        or _as_amount(facts.get("amount_hint"))
-        or _as_amount(facts.get("deal_amount"))
-        or _as_amount(terms.get("tcv"))
-    )
-    return amount or ""
+    if not quote_states_priced_offer(quote):
+        return ""
+    return tcv_from_terms(terms)
 
 
 def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:

@@ -561,6 +561,11 @@ def is_non_deal_person(
         return True
     if is_partner_or_investor(name=name, company=company, title=title):
         return True
+    from crmbrain.names import is_room_or_bot_name, looks_like_meeting_title
+
+    titled = is_room_or_bot_name(name or "") or looks_like_meeting_title(name or "")
+    if titled and not email_l and not (phone or "").strip():
+        return True
     if not blob.strip():
         return False
     for token in non_deal_names():

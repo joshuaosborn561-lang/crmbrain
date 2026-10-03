@@ -12,6 +12,7 @@ from crmbrain.calendar_events import contact_on_calendar
 from crmbrain.config import STAGE
 from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport
+from crmbrain.deal_write import commit_deal_archive, commit_deal_move
 from crmbrain.policy import (
     DEFAULT_PIPELINE,
     MEETING_STAGES,
@@ -124,7 +125,9 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
     Associated emails are not meeting evidence and never promote Replied.
     """
     scanned = 0
-    for deal in hs.iter_deals(["dealname", "dealstage", "pipeline"], stage=STAGE["replied"]):
+    for deal in hs.iter_deals(
+        ["dealname", "dealstage", "pipeline", "crmbrain_locked"], stage=STAGE["replied"]
+    ):
         if scanned >= limit:
             break
         scanned += 1
@@ -154,20 +157,25 @@ def prune_replied_deals(hs: HubSpot, report: CycleReport, limit: int = DEAL_LIMI
                     props.get("email") or ""
                 )
             cleaned = clean_deal_name(name, fallback=fallback)
-            hs.move_deal(
-                deal_id,
+            if commit_deal_move(
+                hs,
+                deal,
                 promote,
                 evidence="prune:meeting-evidence",
                 dealname=cleaned if cleaned and cleaned != name else "",
-            )
-            report.deals_moved.append(f"prune {cleaned} -> {promote}")
+                settings=getattr(hs, "settings", None),
+                report=report,
+            ):
+                report.deals_moved.append(f"prune {cleaned} -> {promote}")
             continue
         if keep:
             continue
-        hs.archive_deal(deal_id)
-        report.deals_pruned.append(name)
-        for contact in contacts:
-            _archive_deal_contact_if_junk(hs, contact, deal_id, report)
+        if commit_deal_archive(
+            hs, deal, settings=getattr(hs, "settings", None), report=report
+        ):
+            report.deals_pruned.append(name)
+            for contact in contacts:
+                _archive_deal_contact_if_junk(hs, contact, deal_id, report)
 
 
 def prune_blank_contacts(hs: HubSpot, report: CycleReport, limit: int = CONTACT_LIMIT) -> None:
@@ -229,10 +237,12 @@ def _archive_notetaker(hs: HubSpot, contact: dict, report: CycleReport) -> None:
             continue
         if may_archive_notetaker_deal(hs, deal, str(cid)):
             try:
-                hs.archive_deal(deal_id)
-                report.deals_pruned.append(
-                    (deal.get("properties") or {}).get("dealname") or deal_id
-                )
+                if commit_deal_archive(
+                    hs, deal, settings=getattr(hs, "settings", None), report=report
+                ):
+                    report.deals_pruned.append(
+                        (deal.get("properties") or {}).get("dealname") or deal_id
+                    )
             except Exception as exc:
                 report.errors.append(f"prune notetaker deal {deal_id}: {exc}")
             continue

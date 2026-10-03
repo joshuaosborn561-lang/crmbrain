@@ -47,8 +47,14 @@ class PersonTimeline:
     deals: list[dict] = field(default_factory=list)
 
     def display_name(self) -> str:
+        from crmbrain.names import looks_like_meeting_title
+
         built = f"{self.first_name} {self.last_name}".strip()
-        return built or self.name or self.email or self.phone or self.key
+        if built and not looks_like_meeting_title(built):
+            return built
+        if self.name and not looks_like_meeting_title(self.name):
+            return self.name
+        return self.email or self.phone or self.key
 
     def kinds(self) -> set[str]:
         return {e.kind for e in self.events}

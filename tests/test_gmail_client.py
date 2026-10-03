@@ -9,6 +9,8 @@ from crmbrain.gmail_client import (
     READ_TIMEOUT,
     Gmail,
     _retry_after_seconds,
+    is_gmail_rate_limit,
+    is_gmail_scope_error,
 )
 from crmbrain.models import CycleReport
 from crmbrain.sources import gmail_scan
@@ -156,6 +158,71 @@ def test_retry_after_http_date():
     resp = FakeResp(429, headers={"Retry-After": header})
     delay = _retry_after_seconds(resp, 99.0)
     assert 5 <= delay <= 8
+
+
+def test_search_retries_403_user_rate_limit_then_succeeds(monkeypatch):
+    gmail = _gmail()
+    slept = []
+    monkeypatch.setattr("crmbrain.gmail_client._sleep", slept.append)
+    calls = {"n": 0}
+    payload = {
+        "error": {
+            "code": 403,
+            "message": "User-rate limit exceeded",
+            "errors": [{"reason": "userRateLimitExceeded", "message": "User-rate limit exceeded"}],
+            "status": "RESOURCE_EXHAUSTED",
+        }
+    }
+
+    def fake_request(method, url, timeout=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResp(403, payload, text="User-rate limit exceeded")
+        return FakeResp(200, {"messages": [{"id": "m1"}]})
+
+    gmail.session.request = fake_request
+    assert gmail.search("after:2026/09/18 in:inbox -category:promotions") == [{"id": "m1"}]
+    assert calls["n"] == 2
+    assert slept
+
+
+def test_search_403_missing_scope_is_not_retried(monkeypatch):
+    gmail = _gmail()
+    slept = []
+    monkeypatch.setattr("crmbrain.gmail_client._sleep", slept.append)
+    calls = {"n": 0}
+    payload = {
+        "error": {
+            "code": 403,
+            "message": "Request had insufficient authentication scopes.",
+            "status": "PERMISSION_DENIED",
+            "details": [{"reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}],
+        }
+    }
+
+    def fake_request(method, url, timeout=None, **kwargs):
+        calls["n"] += 1
+        return FakeResp(
+            403,
+            payload,
+            text="Request had insufficient authentication scopes. ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+        )
+
+    gmail.session.request = fake_request
+    resp = FakeResp(
+        403,
+        payload,
+        text="Request had insufficient authentication scopes. ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+    )
+    assert is_gmail_rate_limit(resp) is False
+    assert is_gmail_scope_error(resp) is True
+    try:
+        gmail.search("after:2026/09/18 in:inbox")
+        raise AssertionError("expected HTTPError")
+    except Exception as exc:
+        assert "403" in str(exc)
+    assert calls["n"] == 1
+    assert slept == []
 
 
 def test_scan_people_timeout_then_success_stays_ok(monkeypatch):

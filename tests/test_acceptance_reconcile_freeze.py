@@ -576,7 +576,7 @@ def test_production_deal_writes_go_through_single_gate():
         Path("crmbrain/deal_write.py").resolve(),
         Path("crmbrain/hubspot.py").resolve(),
     }
-    forbidden_calls = {"upsert_deal", "fill_deal_amount"}
+    forbidden_calls = {"upsert_deal", "fill_deal_amount", "archive_deal", "move_deal"}
     offenders: list[str] = []
     roots = [Path("crmbrain"), Path("scripts")]
     for root in roots:

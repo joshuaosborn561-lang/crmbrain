@@ -26,6 +26,17 @@ MAX_READ_RETRIES = 3
 BACKOFF_BASE = 1.0
 BACKOFF_CAP = 16.0
 RETRYABLE_STATUS = frozenset({429, 503})
+GMAIL_RATE_LIMIT_REASONS = frozenset(
+    {
+        "ratelimitexceeded",
+        "userratelimitexceeded",
+        "userratelimitexceededunreg",
+        "quotaexceeded",
+        "dailylimitexceeded",
+        "resource_exhausted",
+        "resourceexhausted",
+    }
+)
 
 
 def _sleep(seconds: float) -> None:
@@ -51,6 +62,60 @@ def _retry_after_seconds(resp: requests.Response, fallback: float) -> float:
         return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
     except (TypeError, ValueError, OverflowError):
         return fallback
+
+
+def _gmail_error_reason(resp: requests.Response) -> str:
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {}
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, dict):
+        for item in err.get("errors") or []:
+            reason = str((item or {}).get("reason") or "").strip()
+            if reason:
+                return reason
+        status = str(err.get("status") or "").strip()
+        if status:
+            return status
+        return str(err.get("message") or "").strip()
+    if isinstance(err, str):
+        return err
+    return (resp.text or "")[:240]
+
+
+def _normalize_reason(reason: str) -> str:
+    return "".join(ch for ch in (reason or "").lower() if ch.isalnum())
+
+
+def is_gmail_rate_limit(resp: requests.Response) -> bool:
+    """Gmail often returns 403 + userRateLimitExceeded for concurrent quota, not 429."""
+    if resp.status_code == 429:
+        return True
+    if resp.status_code != 403:
+        return False
+    reason = _normalize_reason(_gmail_error_reason(resp))
+    if reason in GMAIL_RATE_LIMIT_REASONS or any(r in reason for r in GMAIL_RATE_LIMIT_REASONS):
+        return True
+    blob = f"{_gmail_error_reason(resp)} {resp.text or ''}".lower()
+    return "rate limit" in blob or "too many" in blob or "quota exceeded" in blob
+
+
+def is_gmail_scope_error(resp: requests.Response) -> bool:
+    if resp.status_code != 403 or is_gmail_rate_limit(resp):
+        return False
+    blob = f"{_gmail_error_reason(resp)} {resp.text or ''}".lower()
+    return any(
+        token in blob
+        for token in (
+            "insufficientpermissions",
+            "insufficient permission",
+            "access_token_scope_insufficient",
+            "access not granted",
+            "requiredaccessnotgranted",
+            "insufficient authentication scopes",
+        )
+    )
 
 
 def _backoff_with_jitter(attempt: int) -> float:
@@ -117,19 +182,28 @@ class Gmail:
                 )
                 _sleep(delay)
                 continue
-            if retry and resp.status_code in RETRYABLE_STATUS and attempt + 1 < attempts:
+            rate_limited = is_gmail_rate_limit(resp)
+            if retry and (resp.status_code in RETRYABLE_STATUS or rate_limited) and attempt + 1 < attempts:
                 delay = min(BACKOFF_CAP, _retry_after_seconds(resp, _backoff_with_jitter(attempt)))
                 logger.warning(
-                    "gmail %s %s HTTP %s, retry %s/%s in %.2fs",
+                    "gmail %s %s HTTP %s (%s), retry %s/%s in %.2fs",
                     method,
                     url,
                     resp.status_code,
+                    _gmail_error_reason(resp) or resp.reason,
                     attempt + 1,
                     MAX_READ_RETRIES,
                     delay,
                 )
                 _sleep(delay)
                 continue
+            if is_gmail_scope_error(resp):
+                logger.error(
+                    "gmail %s %s HTTP 403 missing scope: %s",
+                    method,
+                    url,
+                    _gmail_error_reason(resp) or resp.text[:200],
+                )
             return resp
         raise last_exc or RuntimeError("gmail request failed")
 

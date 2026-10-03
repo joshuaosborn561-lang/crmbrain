@@ -247,13 +247,13 @@ class HubSpot:
                     return rows[0]
         return self._find_contact_by_name(name)
 
-    def _find_contact_by_name(self, name: str) -> dict | None:
-        """Exact first+last match. Skip if zero or multiple hits."""
+    def find_contacts_by_name(self, name: str) -> list[dict]:
+        """Every exact first+last match. Caller decides unique vs attach-to-richest."""
         parts = [p for p in (name or "").strip().split() if p]
         if len(parts) < 2:
-            return None
+            return []
         first, last = parts[0], " ".join(parts[1:])
-        rows = self._search(
+        return self._search(
             "contacts",
             [
                 {"propertyName": "firstname", "operator": "EQ", "value": first},
@@ -261,16 +261,18 @@ class HubSpot:
             ],
             CONTACT_SEARCH_PROPS,
         )
-        if len(rows) == 1:
-            return rows[0]
-        return None
 
-    def find_contact_fuzzy(self, name: str = "", company: str = "") -> dict | None:
-        """Company plus fuzzy person name (MacAntosh / McAntosh at Emcor)."""
+    def _find_contact_by_name(self, name: str) -> dict | None:
+        """Exact first+last match. Skip if zero or multiple hits."""
+        rows = self.find_contacts_by_name(name)
+        return rows[0] if len(rows) == 1 else None
+
+    def find_contacts_fuzzy(self, name: str = "", company: str = "") -> list[dict]:
+        """Every company plus fuzzy person-name hit."""
         raw_company = (company or "").strip()
         raw_name = (name or "").strip()
         if not raw_name or len(raw_company) < 3:
-            return None
+            return []
         rows = self._search(
             "contacts",
             [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw_company}],
@@ -282,9 +284,12 @@ class HubSpot:
             full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
             if names_fuzzy_match(raw_name, full):
                 hits.append(row)
-        if len(hits) == 1:
-            return hits[0]
-        return None
+        return hits
+
+    def find_contact_fuzzy(self, name: str = "", company: str = "") -> dict | None:
+        """Company plus fuzzy person name (MacAntosh / McAntosh at Emcor)."""
+        hits = self.find_contacts_fuzzy(name, company)
+        return hits[0] if len(hits) == 1 else None
 
     def in_crm(self, email: str = "", phone: str = "") -> bool:
         return self.find_contact(email=email, phone=phone) is not None
@@ -317,7 +322,13 @@ class HubSpot:
         if self._is_excluded(ev):
             logger.info("skip hubspot contact write for excluded person")
             return {"id": "", "properties": {}, "skipped": "non_deal"}
-        existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+        existing = policy.resolve_engagement_contact(self, ev)
+        if not existing and (ev.extra or {}).get("name_ambiguous"):
+            return {"id": "", "properties": {}, "skipped": "ambiguous_name"}
+        if not existing and (ev.extra or {}).get("non_person"):
+            return {"id": "", "properties": {}, "skipped": "non_person"}
+        if not existing:
+            existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         existing_props = (existing or {}).get("properties") or {}
         first = prefer_contact_name(
             existing_props.get("firstname") or "",
@@ -440,12 +451,21 @@ class HubSpot:
                 deals.append(d.json())
         return deals
 
-    def _archive_duplicate_deals(self, deals: list[dict]) -> list[dict]:
+    def _archive_duplicate_deals(self, deals: list[dict], ev: Engagement | None = None) -> list[dict]:
         """Soft-archive same-stage, no-amount duplicates. Keep the richer deal."""
+        from crmbrain.deal_write import authorize_deal_lifecycle, record_lifecycle_refusal
+
         archived_ids: set[str] = set()
+        report = getattr(self, "report", None)
         for _keep, dup in policy.duplicate_open_deal_pairs(deals):
             dup_id = str(dup.get("id") or "")
             if not dup_id or dup_id in archived_ids:
+                continue
+            ok, reason = authorize_deal_lifecycle(
+                dup, ev=ev, settings=self.settings, action="archive"
+            )
+            if not ok:
+                record_lifecycle_refusal(dup, reason, "archive", report=report)
                 continue
             try:
                 self.archive_deal(dup_id)
@@ -540,13 +560,21 @@ class HubSpot:
         if policy.is_weak_deal_name(current_name) and wanted:
             cleaned = wanted
         if target:
-            self.move_deal(
-                deal["id"],
-                target,
-                evidence=f"{ev.source}:{ev.external_id}",
-                dealname=cleaned if cleaned and cleaned != current_name else "",
+            from crmbrain.deal_write import authorize_deal_lifecycle, record_lifecycle_refusal
+
+            ok, reason = authorize_deal_lifecycle(
+                deal, ev=ev, settings=self.settings, action="move"
             )
-            deal.setdefault("properties", {})["dealstage"] = target
+            if not ok:
+                record_lifecycle_refusal(deal, reason, "move", report=getattr(self, "report", None))
+            else:
+                self.move_deal(
+                    deal["id"],
+                    target,
+                    evidence=f"{ev.source}:{ev.external_id}",
+                    dealname=cleaned if cleaned and cleaned != current_name else "",
+                )
+                deal.setdefault("properties", {})["dealstage"] = target
         elif cleaned and cleaned != current_name:
             self.patch_deal(str(deal["id"]), {"dealname": cleaned})
         if cleaned and cleaned != current_name:
@@ -559,7 +587,7 @@ class HubSpot:
             logger.info("skip hubspot deal write for excluded person")
             return {}
         contact_id = contact["id"]
-        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id), ev=ev)
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)
@@ -577,7 +605,7 @@ class HubSpot:
         if not target:
             return {}
         # HubSpot workflows can create a deal between the first read and POST.
-        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id), ev=ev)
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)
