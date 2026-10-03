@@ -236,7 +236,7 @@ def has_meeting_qualification(
     return False
 
 
-def may_enroll_from_engagement(ev: Engagement) -> tuple[bool, str]:
+def may_enroll_from_engagement(ev: Engagement, reason: str = "") -> tuple[bool, str]:
     blocked = is_not_deal_candidate(
         name=ev.display_name() or ev.name,
         email=ev.email,
@@ -246,7 +246,12 @@ def may_enroll_from_engagement(ev: Engagement) -> tuple[bool, str]:
     )
     if blocked:
         return False, blocked
-    if has_meeting_qualification(source=ev.source, ev=ev, extra=ev.extra or {}, reason=ev.ticker_reason):
+    if has_meeting_qualification(
+        source=ev.source,
+        ev=ev,
+        extra=ev.extra or {},
+        reason=reason or ev.ticker_reason,
+    ):
         return True, ""
     return False, "reply_only"
 

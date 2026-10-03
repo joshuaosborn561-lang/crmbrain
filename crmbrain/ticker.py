@@ -243,7 +243,7 @@ def enroll(memory: Memory, ev: Engagement, reason: str, hs_contact_id: str = "",
         return {}
     from crmbrain.nurture import may_enroll_from_engagement
 
-    ok, _skip = may_enroll_from_engagement(ev)
+    ok, _skip = may_enroll_from_engagement(ev, reason=reason)
     if not ok:
         return {}
     if already_enrolled(
