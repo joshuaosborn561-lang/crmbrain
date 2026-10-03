@@ -21,6 +21,7 @@ from crmbrain.models import Engagement
 from crmbrain.names import (
     format_deal_name,
     is_confident_person_name,
+    is_room_or_bot_name,
     is_weak_deal_name,
     looks_like_meeting_title,
     parse_attendee_token,
@@ -657,6 +658,110 @@ def contact_has_any_deal(deals: list[dict] | None) -> bool:
     return bool(deals)
 
 
+def is_non_person_engagement(ev: Engagement) -> bool:
+    """Meet rooms, bots, and calendar leftovers never get a deal.
+
+    Only identity fields — a real person's meeting title in raw_subject
+    is not a non-person. A Fireflies leftover title on a real email/phone
+    still resolves to that person.
+    """
+    bits = (
+        ev.display_name(),
+        ev.name,
+        f"{ev.first_name} {ev.last_name}".strip(),
+    )
+    titled = any(is_room_or_bot_name(bit) or looks_like_meeting_title(bit) for bit in bits if bit)
+    if not titled:
+        return False
+    if ev.email or ev.phone:
+        return False
+    return True
+
+
+def _dedupe_contacts(rows: list[dict] | None) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for row in rows or []:
+        cid = str(row.get("id") or "")
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        out.append(row)
+    return out
+
+
+def _name_contact_matches(hs, name: str, company: str = "") -> list[dict]:
+    matches: list[dict] = []
+    by_name = getattr(hs, "find_contacts_by_name", None)
+    if callable(by_name):
+        matches.extend(by_name(name) or [])
+    fuzzy = getattr(hs, "find_contacts_fuzzy", None)
+    if callable(fuzzy) and name and (company or "").strip():
+        matches.extend(fuzzy(name, company) or [])
+    return _dedupe_contacts(matches)
+
+
+def _richest_deal_contact(hs, contacts: list[dict]) -> dict | None:
+    best: dict | None = None
+    best_score: tuple | None = None
+    for contact in contacts:
+        cid = contact.get("id")
+        if not cid or not hasattr(hs, "open_deals_for_contact"):
+            continue
+        try:
+            deals = hs.open_deals_for_contact(cid) or []
+        except Exception:
+            deals = []
+        scored = []
+        for deal in deals:
+            stage = str((deal.get("properties") or {}).get("dealstage") or "")
+            if stage == STAGE["closed_lost"]:
+                continue
+            scored.append(deal)
+        if not scored:
+            continue
+        deal = max(scored, key=deal_richness)
+        score = deal_richness(deal)
+        if best_score is None or score > best_score:
+            best = contact
+            best_score = score
+    return best
+
+
+def resolve_engagement_contact(hs, ev: Engagement) -> dict | None:
+    """Email/phone plus name. Any deal-holder wins; multiple no-deal names are review."""
+    extra = dict(ev.extra or {})
+    extra.pop("name_ambiguous", None)
+    extra.pop("non_person", None)
+    ev.extra = extra
+    if is_non_person_engagement(ev):
+        extra["non_person"] = True
+        ev.extra = extra
+        return None
+    identity = None
+    if hasattr(hs, "find_contact"):
+        try:
+            identity = hs.find_contact(email=ev.email, phone=ev.phone, name="")
+        except Exception:
+            identity = None
+    matches = _name_contact_matches(hs, ev.display_name() or ev.name, ev.company)
+    pooled = _dedupe_contacts(([identity] if identity else []) + matches)
+    richest = _richest_deal_contact(hs, pooled)
+    if richest:
+        extra["attached_via"] = "richest_deal"
+        ev.extra = extra
+        return richest
+    if identity:
+        return identity
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        extra["name_ambiguous"] = True
+        ev.extra = extra
+        return None
+    return None
+
+
 def may_mutate_existing_deal(
     ev: Engagement, deal: dict | None, settings: Settings | None = None
 ) -> bool:
@@ -682,6 +787,10 @@ def may_open_new_deal(
     """Single create/restore gate used by cycle and reconcile (including dry-run)."""
     if is_unidentified_cube_phone(ev, contact):
         return False, "unknown_phone"
+    if is_non_person_engagement(ev) or (ev.extra or {}).get("non_person"):
+        return False, "non_person"
+    if (ev.extra or {}).get("name_ambiguous"):
+        return False, "ambiguous_name"
     if is_excluded_contact(ev, contact):
         return False, "not_deal"
     if row_has_not_deal_note(contact):

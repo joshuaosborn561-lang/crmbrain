@@ -167,6 +167,8 @@ def propose_deal_write(
     deal_id: str = "",
     reason: str = "",
 ) -> None:
+    if action in {"create", "restore"} and not stage:
+        return
     report.proposed_writes.append(
         ProposedWrite(
             action=action,

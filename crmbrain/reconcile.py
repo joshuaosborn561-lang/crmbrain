@@ -143,23 +143,26 @@ def _company_deals(hs: HubSpot, timeline: PersonTimeline) -> list[dict]:
 def _resolve_contact(hs: HubSpot, timeline: PersonTimeline, ev: Engagement) -> dict | None:
     if timeline.contact:
         return timeline.contact
-    found = None
-    if hasattr(hs, "find_contact"):
-        try:
-            found = hs.find_contact(
-                email=timeline.email or ev.email,
-                phone=timeline.phone or ev.phone,
-                name=timeline.display_name() or ev.display_name(),
-            )
-        except Exception:
-            found = None
-    if not found:
-        finder = getattr(hs, "find_contact_fuzzy", None)
-        if callable(finder):
-            try:
-                found = finder(timeline.display_name() or ev.display_name(), timeline.company or ev.company)
-            except Exception:
-                found = None
+    probe = Engagement(
+        source=ev.source,
+        external_id=ev.external_id,
+        occurred_at=ev.occurred_at,
+        first_name=ev.first_name or timeline.first_name,
+        last_name=ev.last_name or timeline.last_name,
+        name=ev.name or timeline.name,
+        email=timeline.email or ev.email,
+        phone=timeline.phone or ev.phone,
+        company=timeline.company or ev.company,
+        extra=dict(ev.extra or {}),
+    )
+    found = policy.resolve_engagement_contact(hs, probe)
+    ev.extra = dict(ev.extra or {})
+    if (probe.extra or {}).get("name_ambiguous"):
+        ev.extra["name_ambiguous"] = True
+    if (probe.extra or {}).get("non_person"):
+        ev.extra["non_person"] = True
+    if (probe.extra or {}).get("attached_via"):
+        ev.extra["attached_via"] = probe.extra["attached_via"]
     if found:
         timeline.contact = found
         if hasattr(hs, "open_deals_for_contact") and found.get("id"):
@@ -1173,33 +1176,16 @@ def run(
 
 
 def _attach_hubspot(hs: HubSpot, timelines: dict[str, PersonTimeline]) -> None:
-    if not hasattr(hs, "find_contact"):
-        return
     for timeline in timelines.values():
         if timeline.contact:
             continue
-        try:
-            found = hs.find_contact(email=timeline.email, phone=timeline.phone, name=timeline.display_name())
-        except Exception:
-            found = None
-        if not found:
-            finder = getattr(hs, "find_contact_fuzzy", None)
-            if callable(finder):
-                try:
-                    found = finder(timeline.display_name(), timeline.company)
-                except Exception:
-                    found = None
+        ev = representative_engagement(timeline)
+        found = _resolve_contact(hs, timeline, ev)
         if not found:
             continue
-        timeline.contact = found
-        if hasattr(hs, "open_deals_for_contact") and found.get("id"):
-            try:
-                timeline.deals = hs.open_deals_for_contact(found["id"])
-            except Exception:
-                timeline.deals = []
         company_deals = _company_deals(hs, timeline)
-        for ev in timeline.engagements:
-            policy.stamp_deal_context(ev, found, timeline.deals, company_deals)
+        for item in timeline.engagements:
+            policy.stamp_deal_context(item, found, timeline.deals, company_deals)
 
 
 def _restore_archived_deal(hs: HubSpot, contact: dict, ev: Engagement, stage: str) -> dict | None:

@@ -8,7 +8,12 @@ import re
 _TITLE_MARKERS = (
     "(google calendar)",
     "google calendar",
+    "google meeting",
+    "google meet",
+    "gmeet",
+    "meet.google",
     "zoom meeting",
+    "zoom room",
     "ms teams",
     "microsoft teams",
     "discovery call",
@@ -17,6 +22,21 @@ _TITLE_MARKERS = (
     "salesglider intro",
     "pipeline review",
     "sync:",
+    "notetaker",
+    "conference room",
+    "meeting room",
+)
+_ROOM_BOT_TOKENS = (
+    "gmeet",
+    "google meeting",
+    "google meet",
+    "meet.google",
+    "zoom room",
+    "notetaker",
+    "otter.ai",
+    "fireflies.ai",
+    "conference room",
+    "meeting room",
 )
 _TITLE_SEPARATORS = (" — ", " – ", " | ")
 _CONFIDENT_LOCAL = re.compile(r"^[A-Za-z]{2,}[._-][A-Za-z]{2,}(?:[._-][A-Za-z]{2,})?$")
@@ -29,6 +49,8 @@ def looks_like_meeting_title(name: str) -> bool:
     if not text:
         return False
     low = text.lower()
+    if is_room_or_bot_name(text):
+        return True
     if any(marker in low for marker in _TITLE_MARKERS):
         return True
     if any(sep in text for sep in _TITLE_SEPARATORS) and len(text.split()) >= 4:
@@ -38,6 +60,14 @@ def looks_like_meeting_title(name: str) -> bool:
     if len(text) > 48:
         return True
     return False
+
+
+def is_room_or_bot_name(name: str) -> bool:
+    """Google Meet rooms, Zoom rooms, and notetaker bots are never a person."""
+    low = " ".join((name or "").lower().split())
+    if not low:
+        return False
+    return any(token in low for token in _ROOM_BOT_TOKENS)
 
 
 def is_confident_person_name(name: str) -> bool:

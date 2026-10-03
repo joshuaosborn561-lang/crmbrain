@@ -117,13 +117,49 @@ class FakeHubSpot:
                 hits.append(row)
         return hits[0] if len(hits) == 1 else None
 
+    def find_contacts_by_name(self, name=""):
+        wanted = (name or "").strip().lower()
+        if not wanted or len(wanted.split()) < 2:
+            return []
+        matches = []
+        for row in self.contacts:
+            props = row.get("properties") or {}
+            full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip().lower()
+            if full and full == wanted:
+                matches.append(row)
+        return matches
+
+    def find_contacts_fuzzy(self, name="", company=""):
+        from crmbrain.names import names_fuzzy_match
+
+        raw = (company or "").strip().lower()
+        if len(raw) < 3 or not (name or "").strip():
+            return []
+        hits = []
+        for row in self.contacts:
+            props = row.get("properties") or {}
+            other = (props.get("company") or "").strip().lower()
+            if not other or (raw not in other and other not in raw):
+                continue
+            full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+            if names_fuzzy_match(name, full):
+                hits.append(row)
+        return hits
+
     def in_crm(self, email="", phone=""):
         return self.find_contact(email=email, phone=phone) is not None
 
     def upsert_contact(self, ev):
         from crmbrain.names import prefer_contact_name
+        from crmbrain.policy import resolve_engagement_contact
 
-        existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+        existing = resolve_engagement_contact(self, ev)
+        if not existing and (ev.extra or {}).get("name_ambiguous"):
+            return {"id": "", "properties": {}, "skipped": "ambiguous_name"}
+        if not existing and (ev.extra or {}).get("non_person"):
+            return {"id": "", "properties": {}, "skipped": "non_person"}
+        if not existing:
+            existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         self.writes.append(("upsert_contact", ev.source, ev.email or ev.phone))
         first = ev.first_name or (ev.display_name().split(" ")[0] if ev.display_name() else "")
         last = ev.last_name or (" ".join(ev.display_name().split(" ")[1:]) if ev.display_name() else "")
@@ -775,11 +811,9 @@ def test_fireflies_3000_per_month_patches_deal_amount(tmp_path, monkeypatch):
         raw_subject="Laura Klein and Joshua Osborn",
     )
     hs, _, report = _handle(tmp_path, ev, settings=make_settings(gemini_key="fake"))
-    assert any(w[0] == "patch_deal" and w[2].get("amount") == "3000" for w in hs.writes) or (
-        hs.deals and hs.deals[0]["properties"].get("amount") == "3000"
-    )
-    assert hs.deals[0]["properties"]["amount"] == "3000"
-    assert any("3000" in a for a in report.amounts_set)
+    assert hs.deals
+    assert not (hs.deals[0]["properties"].get("amount") or "")
+    assert not any("3000" in a for a in report.amounts_set)
 
 
 def test_fireflies_gemini_failure_writes_no_amount(tmp_path, monkeypatch):

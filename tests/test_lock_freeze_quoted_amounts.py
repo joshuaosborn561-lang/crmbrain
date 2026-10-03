@@ -2,24 +2,35 @@
 
 from datetime import datetime, timezone
 
-from crmbrain.config import STAGE
+from crmbrain.config import STAGE, is_non_deal_person
+from crmbrain.cycle import _handle_budget_kind, _handle_engagement, _propose_engagement
 from crmbrain.deal_write import (
     authorize_deal_lifecycle,
     authorize_deal_write,
     commit_deal_archive,
     commit_deal_move,
+    propose_deal_write,
 )
+from crmbrain.evidence import build_timelines
 from crmbrain.hubspot import HubSpot
 from crmbrain.intelligence import (
+    _TERM_RE,
     _call_amount_from_gemini,
     heuristic_deal_terms,
     quote_states_priced_offer,
     tcv_from_terms,
 )
 from crmbrain.intent import classify, normalize_client_ops
+from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement, IntentDecision
-from crmbrain.policy import stamp_deal_context
+from crmbrain.policy import (
+    is_non_person_engagement,
+    may_open_new_deal,
+    resolve_engagement_contact,
+    stamp_deal_context,
+)
 from crmbrain.prune import prune_replied_deals
+from crmbrain.reconcile import _attach_hubspot, restore_missing_deals
 from tests.test_crm_gating import FakeHubSpot, make_settings
 
 FREEZE = datetime(2026, 10, 3, 1, 30, tzinfo=timezone.utc)
@@ -271,3 +282,190 @@ def test_dave_cube_open_proposal_sent_is_not_client_ops():
         settings=settings,
     )
     assert frozen == "frozen"
+
+
+def _dave_contacts_and_deal():
+    goliath = {
+        "id": "531508756184",
+        "properties": {
+            "firstname": "Dave",
+            "lastname": "Ackley",
+            "company": "Goliath Cyber Security Group",
+        },
+    }
+    goliathsec = {
+        "id": "544365383381",
+        "properties": {
+            "firstname": "Dave",
+            "lastname": "Ackley",
+            "company": "Goliathsec",
+            "phone": "+15551234001",
+        },
+    }
+    deal = {
+        "id": "340447563471",
+        "contact_id": "531508756184",
+        "properties": {
+            "dealstage": STAGE["proposal_sent"],
+            "dealname": "Dave Ackley - Goliath",
+            "amount": "21000",
+        },
+    }
+    return goliath, goliathsec, deal
+
+
+def _dave_cube_sep24(**kwargs):
+    fields = dict(
+        source="cube_acr",
+        external_id="cube-dave-sep24",
+        occurred_at=SEP_24,
+        first_name="Dave",
+        last_name="Ackley",
+        name="Dave Ackley",
+        phone="+15559876543",
+        raw_subject="Dave Ackley",
+        transcript=(
+            "Discovery intro with Dave. Walked through the proposal and pricing "
+            "for the campaign. He wants to keep the existing Goliath deal."
+        ),
+        extra={"has_sentences": True, "sentence_count": 14},
+    )
+    fields.update(kwargs)
+    return Engagement(**fields)
+
+
+def test_ambiguous_dave_attaches_to_existing_goliath_deal(tmp_path):
+    goliath, goliathsec, deal = _dave_contacts_and_deal()
+    hs = FakeHubSpot([goliath, goliathsec])
+    hs.deals.append(deal)
+    ev = _dave_cube_sep24()
+    assert hs.find_contact(phone=ev.phone, name=ev.display_name()) is None
+    attached = resolve_engagement_contact(hs, ev)
+    assert attached is not None
+    assert attached["id"] == "531508756184"
+    assert ev.extra.get("attached_via") == "richest_deal"
+
+    settings = make_settings(dry_run=True, manual_freeze_at=FREEZE)
+    report = CycleReport(dry_run=True)
+    _handle_engagement(ev, settings, hs, Memory(settings, data_dir=tmp_path), None, report)
+    actions = [w.get("action") for w in report.proposed_writes if isinstance(w, dict)]
+    assert "create" not in actions
+    assert "restore" not in actions
+    assert hs.deals[0]["id"] == "340447563471"
+    assert len(hs.deals) == 1
+    assert len(hs.contacts) == 2
+
+    timelines = build_timelines([_dave_cube_sep24(external_id="cube-dave-sep24-b")])
+    _attach_hubspot(hs, timelines)
+    timeline = next(iter(timelines.values()))
+    assert timeline.contact and timeline.contact["id"] == "531508756184"
+    assert any(d["id"] == "340447563471" for d in timeline.deals)
+    restore_missing_deals(
+        hs,
+        settings,
+        Memory(settings, data_dir=tmp_path),
+        CycleReport(dry_run=True),
+        timelines,
+        dry_run=True,
+    )
+    assert hs.deals[0]["id"] == "340447563471"
+    assert len(hs.deals) == 1
+
+
+def test_phone_match_on_deal_less_dave_still_attaches_to_goliath_deal():
+    goliath, goliathsec, deal = _dave_contacts_and_deal()
+    hs = FakeHubSpot([goliath, goliathsec])
+    hs.deals.append(deal)
+    ev = _dave_cube_sep24(phone="+15551234001")
+    attached = resolve_engagement_contact(hs, ev)
+    assert attached["id"] == "531508756184"
+    assert ev.extra.get("attached_via") == "richest_deal"
+    assert any(d["id"] == "340447563471" for d in hs.open_deals_for_contact(attached["id"]))
+
+
+def test_ambiguous_name_with_no_deals_is_review_not_create(tmp_path):
+    hs = FakeHubSpot(
+        [
+            {"id": "a1", "properties": {"firstname": "Pat", "lastname": "Smith", "company": "Acme"}},
+            {"id": "a2", "properties": {"firstname": "Pat", "lastname": "Smith", "company": "Other"}},
+        ]
+    )
+    ev = Engagement(
+        source="cube_acr",
+        external_id="cube-pat",
+        occurred_at=OCT_4,
+        first_name="Pat",
+        last_name="Smith",
+        name="Pat Smith",
+        transcript="Discovery intro. Pricing and a proposal for their roofing campaign.",
+        extra={"has_sentences": True, "sentence_count": 10},
+    )
+    assert resolve_engagement_contact(hs, ev) is None
+    assert ev.extra.get("name_ambiguous") is True
+    ok, reason = may_open_new_deal(ev, None, [])
+    assert ok is False
+    assert reason == "ambiguous_name"
+    settings = make_settings(dry_run=True)
+    report = CycleReport(dry_run=True)
+    _handle_engagement(ev, settings, hs, Memory(settings, data_dir=tmp_path), None, report)
+    assert not any(w.get("action") == "create" for w in report.proposed_writes if isinstance(w, dict))
+    assert hs.deals == []
+    assert any("ambiguous_name" in line for line in report.review_queue + report.skipped)
+
+
+def test_never_propose_create_with_empty_stage():
+    report = CycleReport()
+    propose_deal_write(report, action="create", label="Dave Ackley", stage="")
+    propose_deal_write(report, action="restore", label="Dave Ackley", stage="")
+    assert report.proposed_writes == []
+    ev = Engagement(
+        source="fireflies",
+        external_id="silent-create",
+        first_name="Pat",
+        last_name="Lee",
+        extra={"silent_meeting": True},
+    )
+    hs = FakeHubSpot()
+    assert _handle_budget_kind(ev, None, hs) is None
+    decision = IntentDecision(verdict="yes", intent="sales", stage="", reason="empty")
+    _propose_engagement(report, ev, decision, None)
+    assert report.proposed_writes == []
+
+
+def test_google_meeting_gmeet_is_never_a_deal(tmp_path):
+    ev = Engagement(
+        source="fireflies",
+        external_id="gmeet-1",
+        occurred_at=datetime(2026, 9, 1, 16, 0, tzinfo=timezone.utc),
+        first_name="Google",
+        last_name="meeting gmeet",
+        name="Google meeting gmeet",
+        raw_subject="Google meeting gmeet",
+        transcript="Room notes from the Meet bot. Discovery completed.",
+        extra={"has_sentences": True, "sentence_count": 6},
+    )
+    assert is_non_person_engagement(ev)
+    assert is_non_deal_person(name=ev.name)
+    assert may_open_new_deal(ev, None, []) == (False, "non_person")
+    settings = make_settings(dry_run=True)
+    report = CycleReport(dry_run=True)
+    hs = FakeHubSpot()
+    _handle_engagement(ev, settings, hs, Memory(settings, data_dir=tmp_path), None, report)
+    assert hs.deals == []
+    assert hs.contacts == []
+    assert not any(
+        w.get("action") in {"create", "restore"} for w in report.proposed_writes if isinstance(w, dict)
+    )
+
+
+def test_monthly_only_quote_never_invents_total():
+    q1 = "I can do $3,000 a month"
+    assert _TERM_RE.search(q1) is None
+    t1 = {"monthly_fee": "3000", "term_months": "12", "tcv": "36000", "quote": q1}
+    assert quote_states_priced_offer(q1) is False
+    assert tcv_from_terms(t1) == ""
+
+    q2 = "3k a month"
+    t2 = {"monthly_fee": "3000", "term_months": "36", "tcv": "108000", "quote": q2}
+    assert quote_states_priced_offer(q2) is False
+    assert tcv_from_terms(t2) == ""

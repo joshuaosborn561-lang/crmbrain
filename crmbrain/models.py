@@ -29,14 +29,12 @@ class Engagement:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def display_name(self) -> str:
-        built = f"{self.first_name} {self.last_name}".strip()
-        if built:
-            return built
-        if self.name:
-            from crmbrain.names import looks_like_meeting_title
+        from crmbrain.names import looks_like_meeting_title
 
-            if looks_like_meeting_title(self.name):
-                return ""
+        built = f"{self.first_name} {self.last_name}".strip()
+        if built and not looks_like_meeting_title(built):
+            return built
+        if self.name and not looks_like_meeting_title(self.name):
             return self.name
         return ""
 

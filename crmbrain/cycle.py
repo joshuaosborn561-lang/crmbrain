@@ -140,19 +140,7 @@ def _is_unidentified_cube_phone(ev: Engagement, contact: dict | None) -> bool:
 
 
 def _find_hubspot_contact(hs: HubSpot, ev: Engagement) -> dict | None:
-    try:
-        found = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
-    except Exception:
-        found = None
-    if found:
-        return found
-    finder = getattr(hs, "find_contact_fuzzy", None)
-    if not callable(finder):
-        return None
-    try:
-        return finder(ev.display_name() or ev.name, ev.company)
-    except Exception:
-        return None
+    return policy.resolve_engagement_contact(hs, ev)
 
 
 def _annotate_sales_context(ev: Engagement, settings: Settings, hs: HubSpot, already: dict | None = None) -> dict | None:
@@ -177,15 +165,12 @@ def _handle_budget_kind(ev: Engagement, already: dict | None, hs: HubSpot, setti
         return None
     stage = policy.resolve_stage(ev)
     live = policy.live_open_deals(deals)
-    creating_contact = already is None and policy.may_create_hubspot_contact(ev)
+    creating_contact = already is None and bool(stage) and policy.may_create_hubspot_contact(ev)
     creating_deal = bool(stage) and not live
     if ev.source in {"cube_acr", "fireflies"} and creating_deal and not policy.held_call_may_open_deal(ev):
         creating_deal = False
         creating_contact = False
     if creating_contact or creating_deal:
-        ok, _reason = policy.may_open_new_deal(ev, already, deals, settings, company_deals)
-        if not ok:
-            return None
         return "create"
     if stage and live:
         current = (max(live, key=policy.deal_richness).get("properties") or {}).get("dealstage") or ""
@@ -294,11 +279,15 @@ def _propose_engagement(
     decision,
     already: dict | None,
 ) -> None:
+    stage = decision.stage or ev.stage_hint or policy.resolve_stage(ev)
+    action = "create" if not already else "update"
+    if action == "create" and not stage:
+        return
     propose_deal_write(
         report,
-        action="create" if not already else "update",
+        action=action,
         label=ev.display_name() or ev.email or ev.phone,
-        stage=decision.stage or ev.stage_hint,
+        stage=stage,
         reason=decision.reason,
         contact_id=str((already or {}).get("id") or ""),
     )
@@ -327,7 +316,7 @@ def _handle_engagement(
         memory.mark_processed(ev.source, ev.external_id, {"skip": "system_email"})
         return
     if is_non_deal_person(
-        name=ev.display_name() or ev.name,
+        name=ev.display_name() or ev.name or f"{ev.first_name} {ev.last_name}".strip(),
         email=ev.email,
         company=ev.company,
         phone=ev.phone,
@@ -350,6 +339,13 @@ def _handle_engagement(
         return
     already = _find_hubspot_contact(hs, ev)
     _mark_closed_won_context(ev, hs, already)
+    if (ev.extra or {}).get("name_ambiguous"):
+        line = f"{ev.display_name() or ev.name or ev.phone} ambiguous_name"
+        if line not in report.review_queue:
+            report.review_queue.append(line)
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} ambiguous_name")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "ambiguous_name"})
+        return
     if is_excluded_contact(ev, already):
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
@@ -576,8 +572,11 @@ def _handle_engagement(
             )
             if not ok:
                 report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {reason}")
-                if reason == "unknown_phone":
-                    line = f"{ev.phone} unknown phone"
+                if reason in {"unknown_phone", "ambiguous_name", "non_person"}:
+                    if reason == "unknown_phone":
+                        line = f"{ev.phone} unknown phone"
+                    else:
+                        line = f"{ev.display_name() or ev.name or ev.phone} {reason}"
                     if line not in report.review_queue:
                         report.review_queue.append(line)
                 return
@@ -595,8 +594,11 @@ def _handle_engagement(
         )
         if not ok:
             report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {reason}")
-            if reason == "unknown_phone":
-                line = f"{ev.phone} unknown phone"
+            if reason in {"unknown_phone", "ambiguous_name", "non_person"}:
+                if reason == "unknown_phone":
+                    line = f"{ev.phone} unknown phone"
+                else:
+                    line = f"{ev.display_name() or ev.name or ev.phone} {reason}"
                 if line not in report.review_queue:
                     report.review_queue.append(line)
             memory.mark_processed(ev.source, ev.external_id, {"skip": reason})
@@ -1104,7 +1106,7 @@ def apply_gmail_stage_update(
             memory.mark_processed(ev.source, ev.external_id, {"skip": "josh_address"})
         return
     if is_non_deal_person(
-        name=ev.display_name() or ev.name,
+        name=ev.display_name() or ev.name or f"{ev.first_name} {ev.last_name}".strip(),
         email=ev.email,
         company=ev.company,
         phone=ev.phone,

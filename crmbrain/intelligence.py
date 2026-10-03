@@ -148,7 +148,7 @@ _WORD_MONTHS = {
     "twelve": 12,
 }
 _TERM_RE = re.compile(
-    r"(?P<term>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"(?<![\d,.])(?P<term>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"\s*[- ]?(?:month|mo)s?\s*(?:minimum|min\.?|term|commit|agreement|retainer)?",
     re.I,
 )
@@ -324,12 +324,25 @@ def _is_stated_package_total(quote: str) -> bool:
     return _MONTHLY_FEE_RE.search(match.group(0)) is None
 
 
+def quote_is_monthly_only(quote: str) -> bool:
+    """Monthly/range with no literal term, times, or package total — never invent TCV."""
+    q = quote or ""
+    has_monthly = bool(_MONTHLY_FEE_RE.search(q) or _RANGE_MO_RE.search(q))
+    if not has_monthly:
+        return False
+    if _TERM_RE.search(q) or _TIMES_RE.search(q) or _is_stated_package_total(q):
+        return False
+    return True
+
+
 def quote_states_priced_offer(quote: str) -> bool:
     """True when the quote itself has monthly+term or a stated total for this prospect."""
     q = (quote or "").strip()
     if not q:
         return False
     if _is_generic_client_range(q) and not _TERM_RE.search(q) and not _TIMES_RE.search(q):
+        return False
+    if quote_is_monthly_only(q):
         return False
     if _TIMES_RE.search(q):
         return True
@@ -482,7 +495,11 @@ def tcv_from_terms(terms: dict[str, Any] | None) -> str:
         return (
             _money_from_quote(quote)
             or _as_amount(terms.get("one_time_fee"))
-            or _as_amount(terms.get("tcv"))
+            or (
+                _as_amount(terms.get("tcv"))
+                if amount_literal_in_text(quote, str(terms.get("tcv") or ""))
+                else ""
+            )
         )
     monthly = _as_amount(terms.get("monthly_fee"))
     term = _as_int(terms.get("term_months"))
@@ -510,8 +527,11 @@ def tcv_from_terms(terms: dict[str, Any] | None) -> str:
         return one
     if quote:
         direct = _as_amount(terms.get("tcv"))
-        if direct and quote_states_priced_offer(quote):
+        if direct and amount_literal_in_text(quote, direct):
             return direct
+        lone = _money_from_quote(quote)
+        if lone and not (_MONTHLY_FEE_RE.search(quote) or _RANGE_MO_RE.search(quote)):
+            return lone
         return ""
     if monthly:
         return monthly
@@ -658,8 +678,8 @@ def quote_matches_source(quote: str, source: str) -> bool:
     return found / len(tokens) >= 0.7
 
 
-def amount_attested_in_text(text: str, amount: str) -> bool:
-    """Digits, $Nk, or a monthly*term / range that equals amount."""
+def amount_literal_in_text(text: str, amount: str) -> bool:
+    """True when this exact total appears as digits or $Nk in the text."""
     if not text or not amount:
         return False
     compact = text.replace(",", "")
@@ -668,12 +688,23 @@ def amount_attested_in_text(text: str, amount: str) -> bool:
     except ValueError:
         return False
     n_int = int(n) if abs(n - round(n)) < 0.001 else None
-    if n_int is not None and re.search(rf"\$?\s*{n_int}(?:\.0+)?\b", compact):
+    if n_int is None:
+        return False
+    if re.search(rf"\$?\s*{n_int}(?:\.0+)?\b", compact):
         return True
-    if n_int is not None and n_int >= 1000 and n_int % 1000 == 0 and re.search(
+    if n_int >= 1000 and n_int % 1000 == 0 and re.search(
         rf"\$?\s*{n_int // 1000}\s*k\b", compact, re.I
     ):
         return True
+    return False
+
+
+def amount_attested_in_text(text: str, amount: str) -> bool:
+    """Digits, $Nk, or a monthly*term / range that equals amount."""
+    if amount_literal_in_text(text, amount):
+        return True
+    if not text or not amount:
+        return False
     terms = heuristic_deal_terms(text)
     computed = tcv_from_terms(terms)
     if computed and amounts_equal(computed, amount):
