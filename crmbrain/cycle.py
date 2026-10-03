@@ -30,7 +30,6 @@ from crmbrain.config import (
     now_utc,
     settings_lookback_start,
 )
-from crmbrain.names import is_confident_person_name
 from crmbrain.gmail_client import Gmail
 from crmbrain.google_auth import drive_auth_detail, has_drive_access
 from crmbrain.heyreach import HeyReach
@@ -130,46 +129,50 @@ def _company_deals(hs: HubSpot, ev: Engagement, contact: dict | None) -> list[di
 
 def _mark_closed_won_context(ev: Engagement, hs: HubSpot, contact: dict | None, deals: list[dict] | None = None) -> list[dict]:
     deals = deals if deals is not None else _contact_deals(hs, contact)
-    ev.extra = dict(ev.extra or {})
-    ev.extra["closed_won"] = policy.has_closed_won_deal(deals)
     company_deals = _company_deals(hs, ev, contact)
-    ev.extra["company_closed_won"] = policy.has_closed_won_deal(company_deals)
-    ev.extra["company_has_paid"] = ev.extra["company_closed_won"]
+    policy.stamp_deal_context(ev, contact, deals, company_deals)
     return deals
 
 
 def _is_unidentified_cube_phone(ev: Engagement, contact: dict | None) -> bool:
-    if ev.source != "cube_acr" or contact:
-        return False
-    if ev.email:
-        return False
-    if is_confident_person_name(ev.display_name() or ev.name):
-        return False
-    return bool(ev.phone)
+    return policy.is_unidentified_cube_phone(ev, contact)
+
+
+def _find_hubspot_contact(hs: HubSpot, ev: Engagement) -> dict | None:
+    try:
+        found = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+    except Exception:
+        found = None
+    if found:
+        return found
+    finder = getattr(hs, "find_contact_fuzzy", None)
+    if not callable(finder):
+        return None
+    try:
+        return finder(ev.display_name() or ev.name, ev.company)
+    except Exception:
+        return None
 
 
 def _annotate_sales_context(ev: Engagement, settings: Settings, hs: HubSpot, already: dict | None = None) -> dict | None:
     """Set intent flags / already_prospect from one cached classify + open pre-sale deals."""
+    if already is None:
+        already = _find_hubspot_contact(hs, ev)
+    deals = _mark_closed_won_context(ev, hs, already)
     if ev.source not in {"cube_acr", "fireflies"}:
-        if already:
-            _mark_closed_won_context(ev, hs, already)
         return already
     decision = intent.classify(settings, ev)
+    intent.apply_deal_holder_veto(ev, decision)
     ev.extra["intent_yes"] = policy.cube_has_sales_intent(ev, decision, settings.intent_min_confidence)
-    if already is None:
-        try:
-            already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
-        except Exception:
-            already = None
-    deals = _mark_closed_won_context(ev, hs, already)
     ev.extra["already_prospect"] = policy.contact_is_prospect(already, deals)
     return already
 
 
-def _handle_budget_kind(ev: Engagement, already: dict | None, hs: HubSpot) -> str | None:
+def _handle_budget_kind(ev: Engagement, already: dict | None, hs: HubSpot, settings: Settings | None = None) -> str | None:
     """One create slot per new contact/deal; stage_move for an existing live deal."""
     deals = _mark_closed_won_context(ev, hs, already)
-    if policy.closed_won_notes_only(ev, deals, contact=already, company_deals=_company_deals(hs, ev, already)):
+    company_deals = _company_deals(hs, ev, already)
+    if policy.closed_won_notes_only(ev, deals, contact=already, company_deals=company_deals):
         return None
     stage = policy.resolve_stage(ev)
     live = policy.live_open_deals(deals)
@@ -179,10 +182,14 @@ def _handle_budget_kind(ev: Engagement, already: dict | None, hs: HubSpot) -> st
         creating_deal = False
         creating_contact = False
     if creating_contact or creating_deal:
+        ok, _reason = policy.may_open_new_deal(ev, already, deals, settings, company_deals)
+        if not ok:
+            return None
         return "create"
     if stage and live:
         current = (max(live, key=policy.deal_richness).get("properties") or {}).get("dealstage") or ""
-        if policy.choose_deal_action(current, stage, ev):
+        deal = max(live, key=policy.deal_richness)
+        if policy.choose_deal_action(current, stage, ev, deal=deal, settings=settings):
             return "stage_move"
     return None
 
@@ -341,7 +348,14 @@ def _handle_engagement(
         report.skipped.append(f"cube_acr {ev.external_id} audio has no transcript yet")
         memory.mark_processed(ev.source, ev.external_id, {"skip": "no_transcript"})
         return
+    already = _find_hubspot_contact(hs, ev)
+    _mark_closed_won_context(ev, hs, already)
+    if is_excluded_contact(ev, already):
+        report.skipped.append(f"{ev.source}:{ev.display_name() or ev.email} excluded")
+        memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
+        return
     decision = intent.classify(settings, ev)
+    intent.apply_deal_holder_veto(ev, decision)
     if is_personal_family_intent(decision.intent):
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {decision.intent}")
         memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent or "personal"})
@@ -359,7 +373,6 @@ def _handle_engagement(
         _record_person_intent_no(
             report, memory, ev, ev._person_intent, mark_processed=False
         )
-    already = hs.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
     already = _annotate_sales_context(ev, settings, hs, already)
     if _is_unidentified_cube_phone(ev, already):
         line = f"{ev.phone} unknown phone"
@@ -492,7 +505,9 @@ def _handle_engagement(
                 current_stage = str((deal_row.get("properties") or {}).get("dealstage") or "") if deal_row else ""
                 current_amount = str((deal_row.get("properties") or {}).get("amount") or "") if deal_row else ""
                 write_stage = (
-                    policy.choose_deal_action(current_stage or None, requested, ev, deal=deal_row)
+                    policy.choose_deal_action(
+                        current_stage or None, requested, ev, deal=deal_row, settings=settings
+                    )
                     if requested
                     else None
                 )
@@ -551,15 +566,43 @@ def _handle_engagement(
         return
 
     if settings.dry_run:
-        kind = _handle_budget_kind(ev, already, hs)
+        kind = _handle_budget_kind(ev, already, hs, settings)
+        if not kind:
+            report.skipped.append(
+                f"{ev.source}:{ev.display_name() or ev.email or ev.phone} no hubspot write"
+            )
+            return
+        if kind == "create":
+            ok, reason = policy.may_open_new_deal(
+                ev, already, _contact_deals(hs, already), settings, _company_deals(hs, ev, already)
+            )
+            if not ok:
+                report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {reason}")
+                if reason == "unknown_phone":
+                    line = f"{ev.phone} unknown phone"
+                    if line not in report.review_queue:
+                        report.review_queue.append(line)
+                return
         if not _reserve_budget(budget, kind, memory, report, ev):
             return
         _propose_engagement(report, ev, decision, already)
         return
 
-    kind = _handle_budget_kind(ev, already, hs)
+    kind = _handle_budget_kind(ev, already, hs, settings)
     if not _reserve_budget(budget, kind, memory, report, ev):
         return
+    if kind == "create" or not already:
+        ok, reason = policy.may_open_new_deal(
+            ev, already, _contact_deals(hs, already), settings, _company_deals(hs, ev, already)
+        )
+        if not ok:
+            report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {reason}")
+            if reason == "unknown_phone":
+                line = f"{ev.phone} unknown phone"
+                if line not in report.review_queue:
+                    report.review_queue.append(line)
+            memory.mark_processed(ev.source, ev.external_id, {"skip": reason})
+            return
 
     ev = enrichment.enrich(settings, ev)
     contact = hs.upsert_contact(ev)
@@ -702,7 +745,7 @@ def _apply_transcript_intelligence(
                 extra_kind = "create"
             elif stage and live:
                 current = (max(live, key=policy.deal_richness).get("properties") or {}).get("dealstage") or ""
-                if policy.choose_deal_action(current, stage, ev):
+                if policy.choose_deal_action(current, stage, ev, settings=settings):
                     extra_kind = "stage_move"
             if extra_kind and not _reserve_budget(budget, extra_kind, memory, report, ev):
                 return facts
@@ -1183,7 +1226,9 @@ def apply_gmail_stage_update(
             if won:
                 deal_row = max(won, key=policy.deal_richness)
                 current = (deal_row.get("properties") or {}).get("dealstage") or ""
-        write_stage = policy.choose_deal_action(current or None, ev.stage_hint, ev, deal=deal_row)
+        write_stage = policy.choose_deal_action(
+            current or None, ev.stage_hint, ev, deal=deal_row, settings=settings
+        )
         if not write_stage:
             report.skipped.append(
                 f"{ev.email or ev.display_name() or ev.external_id} gmail stage blocked"

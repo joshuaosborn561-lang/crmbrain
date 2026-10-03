@@ -141,7 +141,9 @@ NOT_DEAL_NOTE_RE = re.compile(
     r"\bnot[- ]a[- ]deal\b|\bnot[- ]deal\b|\bnon[- ]deal\b|\bdo not (?:create|reopen|restore)\b",
     re.I,
 )
-SEEDED_NON_DEAL_EMAILS: tuple[str, ...] = ()
+SEEDED_NON_DEAL_EMAILS: tuple[str, ...] = (
+    "bobcbobc@gmail.com",
+)
 PERSONAL_FAMILY_INTENTS = frozenset({"personal", "family"})
 JOSH_EMAILS = {
     "joshua@salesglidergrowth.com",
@@ -261,6 +263,7 @@ class Settings:
     max_amount_writes: int = 20
     max_change_fraction: float = 0.15
     reextract_since: datetime | None = None
+    manual_freeze_at: datetime | None = None
     google_api_key: str = ""
     cube_lookback_days: int = 14
 
@@ -305,6 +308,7 @@ class Settings:
             max_amount_writes=int(os.getenv("MAX_AMOUNT_WRITES", "20")),
             max_change_fraction=float(os.getenv("MAX_CHANGE_FRACTION", "0.15")),
             reextract_since=_parse_lookback_start(os.getenv("CRMBRAIN_REEXTRACT_SINCE", "")),
+            manual_freeze_at=_parse_lookback_start(os.getenv("CRMBRAIN_MANUAL_FREEZE_AT", "")),
             google_api_key=os.getenv("GOOGLE_API_KEY", ""),
             cube_lookback_days=int(os.getenv("CUBE_LOOKBACK_DAYS", "14")),
         )

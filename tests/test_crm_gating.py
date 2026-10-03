@@ -100,6 +100,23 @@ class FakeHubSpot:
                 return matches[0]
         return None
 
+    def find_contact_fuzzy(self, name="", company=""):
+        from crmbrain.names import names_fuzzy_match
+
+        raw = (company or "").strip().lower()
+        if len(raw) < 3 or not (name or "").strip():
+            return None
+        hits = []
+        for row in self.contacts:
+            props = row.get("properties") or {}
+            other = (props.get("company") or "").strip().lower()
+            if not other or (raw not in other and other not in raw):
+                continue
+            full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+            if names_fuzzy_match(name, full):
+                hits.append(row)
+        return hits[0] if len(hits) == 1 else None
+
     def in_crm(self, email="", phone=""):
         return self.find_contact(email=email, phone=phone) is not None
 
@@ -304,7 +321,11 @@ class FakeHubSpot:
         if live:
             deal = max(live, key=policy.deal_richness)
             current = (deal.get("properties") or {}).get("dealstage") or ""
-            target = choose_deal_action(current, stage, ev, deal=deal) if stage else None
+            target = (
+                choose_deal_action(current, stage, ev, deal=deal, settings=getattr(self, "settings", None))
+                if stage
+                else None
+            )
             current_name = deal["properties"].get("dealname") or ""
             cleaned = policy.prefer_deal_name(
                 clean_deal_name(current_name, fallback=wanted or ev.display_name()),
@@ -319,7 +340,7 @@ class FakeHubSpot:
                 self.patch_deal(deal["id"], {"dealname": cleaned})
             self.fill_deal_amount(deal, amount, ev=ev, contact=contact)
             return deal
-        target = choose_deal_action(None, stage, ev) if stage else None
+        target = choose_deal_action(None, stage, ev, settings=getattr(self, "settings", None)) if stage else None
         if not target:
             return {}
         props = {"dealstage": target, "dealname": wanted or ev.display_name() or ev.email or "SalesGlider deal"}

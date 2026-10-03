@@ -11,7 +11,7 @@ import requests
 
 from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact, is_zoom_room_address
 from crmbrain.models import Engagement
-from crmbrain.names import prefer_contact_name
+from crmbrain.names import names_fuzzy_match, prefer_contact_name
 from crmbrain import intelligence, policy
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,17 @@ CONTACT_PROPS = [
         "type": "string",
         "fieldType": "textarea",
         "groupName": "contactinformation",
+    },
+]
+
+DEAL_PROPS = [
+    {
+        "name": "crmbrain_locked",
+        "label": "CRMBrain locked",
+        "type": "bool",
+        "fieldType": "booleancheckbox",
+        "groupName": "dealinformation",
+        "description": "When true, CRMBrain will not change stage or amount on this deal.",
     },
 ]
 
@@ -186,6 +197,16 @@ class HubSpot:
                 )
                 if created.status_code >= 400:
                     raise RuntimeError(f"create prop {prop['name']}: {created.text[:300]}")
+        for prop in DEAL_PROPS:
+            resp = self._request(
+                "GET", f"/crm/v3/properties/deals/{prop['name']}", retry=True, timeout=20
+            )
+            if resp.status_code == 404:
+                created = self._request(
+                    "POST", "/crm/v3/properties/deals", json=prop, timeout=WRITE_TIMEOUT
+                )
+                if created.status_code >= 400:
+                    logger.warning("create deal prop %s: %s", prop["name"], created.text[:300])
 
     def _search(self, object_name: str, filters: list[dict], properties: list[str]) -> list[dict]:
         payload = {
@@ -242,6 +263,27 @@ class HubSpot:
         )
         if len(rows) == 1:
             return rows[0]
+        return None
+
+    def find_contact_fuzzy(self, name: str = "", company: str = "") -> dict | None:
+        """Company plus fuzzy person name (MacAntosh / McAntosh at Emcor)."""
+        raw_company = (company or "").strip()
+        raw_name = (name or "").strip()
+        if not raw_name or len(raw_company) < 3:
+            return None
+        rows = self._search(
+            "contacts",
+            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw_company}],
+            CONTACT_SEARCH_PROPS,
+        )
+        hits = []
+        for row in rows:
+            props = row.get("properties") or {}
+            full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+            if names_fuzzy_match(raw_name, full):
+                hits.append(row)
+        if len(hits) == 1:
+            return hits[0]
         return None
 
     def in_crm(self, email: str = "", phone: str = "") -> bool:
@@ -386,7 +428,8 @@ class HubSpot:
                     "properties": (
                         "dealname,dealstage,pipeline,amount,dealtype,"
                         "hs_mrr,hs_arr,hs_acv,hs_tcv,hs_is_closed_won,"
-                        "hs_lastmodifieddate,hs_updated_by_user_id,description"
+                        "hs_lastmodifieddate,hs_updated_by_user_id,description,"
+                        "crmbrain_locked"
                     ),
                     "propertiesWithHistory": "dealstage,amount",
                 },
@@ -483,7 +526,11 @@ class HubSpot:
 
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
         current = (deal.get("properties") or {}).get("dealstage") or ""
-        target = policy.choose_deal_action(current, stage, ev, deal=deal) if stage else None
+        target = (
+            policy.choose_deal_action(current, stage, ev, deal=deal, settings=self.settings)
+            if stage
+            else None
+        )
         current_name = (deal.get("properties") or {}).get("dealname") or ""
         wanted = policy.deal_name_for(ev, contact)
         cleaned = policy.prefer_deal_name(
@@ -526,7 +573,7 @@ class HubSpot:
             return {}
         if policy.blocks_no_show_create(existing, stage):
             return {}
-        target = policy.choose_deal_action(None, stage, ev) if stage else None
+        target = policy.choose_deal_action(None, stage, ev, settings=self.settings) if stage else None
         if not target:
             return {}
         # HubSpot workflows can create a deal between the first read and POST.
@@ -586,6 +633,10 @@ class HubSpot:
         """PATCH amount by source priority. Paid only from doc/payment evidence."""
         if self._is_excluded(ev, contact):
             logger.info("skip hubspot amount write for excluded person")
+            return False
+        if ev and not policy.may_mutate_existing_deal(ev, deal, self.settings):
+            return False
+        if not ev and policy.deal_is_locked(deal):
             return False
         hint = intelligence.deal_amount_to_write(deal, amount, ev=ev)
         if not hint or not deal.get("id"):

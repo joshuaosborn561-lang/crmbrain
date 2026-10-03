@@ -9,8 +9,10 @@ from crmbrain.config import (
     JOSH_DOMAINS,
     JOSH_EMAILS,
     STAGE,
+    Settings,
     has_not_deal_note,
     is_client_context,
+    is_excluded_contact,
     is_zoom_room_address,
     now_utc,
 )
@@ -573,15 +575,113 @@ def event_predates_manual_edit(ev: Engagement, deal: dict | None) -> bool:
     return bool(occurred and occurred < manual)
 
 
+def deal_is_locked(deal: dict | None) -> bool:
+    """HubSpot crmbrain_locked checkbox — never change stage or amount."""
+    if not deal:
+        return False
+    raw = str((deal.get("properties") or {}).get("crmbrain_locked") or "").strip().lower()
+    return raw in {"true", "1", "yes"}
+
+
+def event_predates_freeze(ev: Engagement, settings: Settings | None) -> bool:
+    freeze = getattr(settings, "manual_freeze_at", None) if settings else None
+    if not freeze or not ev.occurred_at:
+        return False
+    occurred = _aware(ev.occurred_at)
+    freeze_at = _aware(freeze)
+    return bool(occurred and freeze_at and occurred < freeze_at)
+
+
+def is_unidentified_cube_phone(ev: Engagement, contact: dict | None) -> bool:
+    """Cube number with no HubSpot contact, no email, and no confident person name."""
+    if ev.source != "cube_acr" or contact:
+        return False
+    if ev.email:
+        return False
+    if is_confident_person_name(ev.display_name() or ev.name):
+        return False
+    return bool(ev.phone)
+
+
+def stamp_deal_context(
+    ev: Engagement,
+    contact: dict | None,
+    deals: list[dict] | None,
+    company_deals: list[dict] | None = None,
+) -> None:
+    """Mark HubSpot deal-holder flags before intent classification."""
+    extra = dict(ev.extra or {})
+    extra["closed_won"] = has_closed_won_deal(deals)
+    extra["company_closed_won"] = has_closed_won_deal(company_deals)
+    extra["company_has_paid"] = extra["company_closed_won"]
+    extra["already_prospect"] = contact_is_prospect(contact, deals)
+    extra["has_sg_deal"] = bool(
+        live_open_deals(deals) or has_closed_won_deal(deals) or has_closed_won_deal(company_deals)
+    )
+    ev.extra = extra
+
+
+def contact_has_any_deal(deals: list[dict] | None) -> bool:
+    return bool(deals)
+
+
+def may_mutate_existing_deal(
+    ev: Engagement, deal: dict | None, settings: Settings | None = None
+) -> bool:
+    """False when a lock, freeze, or later manual edit blocks stage/amount writes."""
+    if not deal:
+        return True
+    if deal_is_locked(deal):
+        return False
+    if event_predates_freeze(ev, settings):
+        return False
+    if event_predates_manual_edit(ev, deal):
+        return False
+    return True
+
+
+def may_open_new_deal(
+    ev: Engagement,
+    contact: dict | None,
+    deals: list[dict] | None,
+    settings: Settings | None = None,
+    company_deals: list[dict] | None = None,
+) -> tuple[bool, str]:
+    """Single create/restore gate used by cycle and reconcile (including dry-run)."""
+    if is_unidentified_cube_phone(ev, contact):
+        return False, "unknown_phone"
+    if is_excluded_contact(ev, contact):
+        return False, "not_deal"
+    if row_has_not_deal_note(contact):
+        return False, "not_deal"
+    if closed_won_notes_only(ev, deals, contact=contact, company_deals=company_deals):
+        return False, "closed_won"
+    if any(deal_is_locked(d) for d in (deals or [])):
+        return False, "locked"
+    if event_predates_freeze(ev, settings) and contact_has_any_deal(deals):
+        return False, "manual_freeze"
+    if not contact and not (is_meeting_held(ev) or is_meeting_scheduled(ev)):
+        return False, "no_contact_no_meeting"
+    if is_client_context_ev(ev) and not is_new_completed_paperwork(ev) and not is_payment_event(ev):
+        return False, "client"
+    if ev.source in NEVER_OPEN_DEAL_SOURCES:
+        return False, "cold_source"
+    return True, ""
+
+
 def choose_deal_action(
-    current: str | None, requested: str, ev: Engagement, deal: dict | None = None
+    current: str | None,
+    requested: str,
+    ev: Engagement,
+    deal: dict | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
     """Stage to write, or None to leave the deal / skip create."""
     if not requested:
         return None
-    if requires_josh_meeting_to_open_deal(ev) and not current:
+    if deal and not may_mutate_existing_deal(ev, deal, settings):
         return None
-    if deal and event_predates_manual_edit(ev, deal):
+    if requires_josh_meeting_to_open_deal(ev) and not current:
         return None
     held = is_meeting_held(ev)
     target = requested
@@ -591,8 +691,15 @@ def choose_deal_action(
     if current == STAGE["replied"] and held:
         target = STAGE["discovery_completed"]
     if current in {STAGE["nurture"], STAGE["closed_lost"]}:
-        if target == STAGE["discovery_completed"]:
-            if not held:
+        call_forward = ev.source in {"fireflies", "cube_acr"} and target in {
+            STAGE["discovery_completed"],
+            STAGE["discovery_scheduled"],
+            STAGE["proposal_sent"],
+        }
+        if target == STAGE["discovery_completed"] or call_forward:
+            if target == STAGE["discovery_completed"] and not held:
+                return None
+            if call_forward and not held:
                 return None
             # Manual edits win. No history → do not pull Nurture / Closed Lost.
             manual = last_manual_modification(deal)

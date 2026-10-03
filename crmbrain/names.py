@@ -156,3 +156,55 @@ def parse_attendee_token(raw: str) -> tuple[str, str]:
     if "@" in text and " " not in text:
         return "", text.lower()
     return text, ""
+
+
+def _levenshtein(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    prev = list(range(len(right) + 1))
+    for i, ca in enumerate(left, 1):
+        curr = [i]
+        for j, cb in enumerate(right, 1):
+            insert = curr[j - 1] + 1
+            delete = prev[j] + 1
+            replace = prev[j - 1] + (0 if ca == cb else 1)
+            curr.append(min(insert, delete, replace))
+        prev = curr
+    return prev[-1]
+
+
+def _mac_mc_key(last: str) -> str:
+    """Treat MacAntosh / McAntosh as the same last-name key."""
+    low = (last or "").strip().lower()
+    if low.startswith("mac") and len(low) > 3:
+        return "mc" + low[3:]
+    return low
+
+
+def names_fuzzy_match(left: str, right: str) -> bool:
+    """True when two display names are the same person (prefix / Mac-Mc / typo)."""
+    a = " ".join((left or "").lower().split())
+    b = " ".join((right or "").lower().split())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    first_a, last_a = split_person_name(a)
+    first_b, last_b = split_person_name(b)
+    if not first_a or not last_a or not first_b or not last_b:
+        return False
+    first_ok = first_a == first_b or first_a.startswith(first_b) or first_b.startswith(first_a)
+    if not first_ok or min(len(first_a), len(first_b)) < 2:
+        return False
+    if last_a == last_b or last_a in last_b or last_b in last_a:
+        return True
+    mac_a, mac_b = _mac_mc_key(last_a), _mac_mc_key(last_b)
+    if mac_a == mac_b and len(mac_a) >= 4:
+        return True
+    if min(len(last_a), len(last_b)) >= 5 and _levenshtein(last_a, last_b) <= 2:
+        return True
+    return False
