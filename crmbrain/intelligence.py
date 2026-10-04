@@ -26,8 +26,10 @@ Return ONLY JSON with this shape:
   "buying_committee": "",
   "gift_ideas": "",
   "birthday": "YYYY-MM-DD or empty",
-  "stage_hint": "discovery_scheduled|discovery_completed|proposal_sent|signed|paid|no_show|nurture|closed_lost|",
-  // Use signed when THIS person is in an active paid POC/pilot/kickoff/onboarding.
+  "stage_hint": "meeting_booked|discovery_held|proposal_sent|needs_stakeholder_approval|contract_signed_unpaid|poc|closed_won|nurture|closed_lost|initial_interest|",
+  // contract_signed_unpaid = e-sign/contract sent or signed, not yet paid.
+  // closed_won = payment received. poc = signed pilot running unpaid.
+  // Do not emit no_show as a stage — that is a no_show_count increment.
   "ticker_reason": "kicked_can|no_show|never_booked|deal_died|",
   "amount_hint": "",
   "deal_amount": "",
@@ -51,7 +53,7 @@ Rules:
 - Only facts the person actually said or that are obvious from the meeting.
 - Birthday, kids, spouse, school, sports, city, hobbies matter.
 - stage_hint only with clear evidence.
-- Never set stage_hint to no_show for a meeting that has a transcript. A held call is discovery_completed.
+- Never set stage_hint to no_show. A held call is discovery_held. A no-show increments no_show_count and stays in meeting_booked.
 - Use proposal_sent when a proposal/SOW/pricing was promised or sent on a held, priced call.
 - ticker_reason if they punted, no-showed, or the deal died.
 - deal_terms / amount_hint / deal_amount: THIS deal's price only.
@@ -397,7 +399,8 @@ def quote_states_priced_offer(quote: str) -> bool:
         re.I,
     ):
         return True
-    if _MONEY_RE.search(q) or re.search(r"\$\s*\d", q):
+    # A dollar figure in the quote is a priced term. Bare digits (83234) are not.
+    if "$" in q and _MONEY_RE.search(q):
         return True
     return False
 
@@ -857,9 +860,37 @@ def amount_to_write(
     return ""
 
 
+def amount_forbidden_from_engagement(ev: Engagement | None) -> bool:
+    """Intro emails never set an amount. Unquoted Gmail figures are gated separately."""
+    if ev is None:
+        return False
+    extra = ev.extra or {}
+    if extra.get("josh_sent_proposal"):
+        return False
+    if ev.source == "calendly":
+        return True
+    blob = f"{ev.raw_subject or ''} {ev.summary or ''} {ev.transcript or ''}".lower()
+    if ev.source in {"gmail", "gmail_person"} and re.search(
+        r"\b(?:sg intro|intro call|intro)\b", blob
+    ):
+        return True
+    return False
+
+
 def deal_amount_to_write(deal: dict | None, amount: str, ev: Engagement | None = None) -> str:
+    if not amount:
+        return ""
+    if amount_forbidden_from_engagement(ev):
+        return ""
     props = (deal or {}).get("properties") or {}
     extra = (ev.extra if ev else {}) or {}
+    terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
+    quote = str(terms.get("quote") or "")
+    if ev is not None and not quote_states_priced_offer(quote):
+        tcv = tcv_from_terms(terms)
+        if not tcv:
+            return ""
+        amount = tcv
     return amount_to_write(
         props.get("amount"),
         amount,
@@ -1008,23 +1039,30 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
     silent = _is_silent_source(ev)
     if ev.source in CALL_SOURCES and not silent:
         hint = str(facts.get("stage_hint") or "").strip().lower()
-        if hint in {"no_show", STAGE["no_show"]}:
-            facts["stage_hint"] = "discovery_completed"
+        if hint in {"no_show", "no_show_count"}:
+            facts["stage_hint"] = "discovery_held"
         if str(facts.get("ticker_reason") or "").strip().lower() == "no_show":
             facts["ticker_reason"] = ""
     terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
-    if ev.source in CALL_SOURCES:
+    if amount_forbidden_from_engagement(ev):
+        amount = ""
+    elif ev.source in CALL_SOURCES:
         amount = _call_amount_from_gemini(facts, text) if gemini_ok else ""
     elif extra.get("josh_sent_proposal"):
         amount = latest_proposal_figure(text)
         if not amount and gemini_ok:
             amount = _call_amount_from_gemini(facts, text)
+        if amount and not quote_states_priced_offer(str(terms.get("quote") or text or "")):
+            if not tcv_from_terms(terms):
+                amount = ""
     else:
         amount = ""
         if gemini_ok:
             amount = _call_amount_from_gemini(facts, text)
-        if not amount:
+        if not amount and quote_states_priced_offer(str(terms.get("quote") or "")):
             amount = parse_deal_amount(text)
+        if amount and ev.source == "gmail" and not quote_states_priced_offer(str(terms.get("quote") or "")):
+            amount = ""
     facts["amount_hint"] = amount
     facts["deal_amount"] = amount
     if amount and isinstance(terms, dict) and not terms.get("tcv"):

@@ -396,9 +396,9 @@ def test_heyreach_and_client_campaign_need_josh_meeting():
         email="lead@roof.com",
         extra={"client_campaign": True, "campaign_name": "Peterson HVAC"},
     )
-    assert requires_josh_meeting_to_open_deal(hey)
+    assert not requires_josh_meeting_to_open_deal(hey)
     assert requires_josh_meeting_to_open_deal(client)
-    assert choose_deal_action(None, STAGE["discovery_completed"], hey) is None
+    assert choose_deal_action(None, STAGE["discovery_completed"], hey) == STAGE["initial_interest"]
     assert choose_deal_action(None, STAGE["discovery_completed"], client) is None
 
 

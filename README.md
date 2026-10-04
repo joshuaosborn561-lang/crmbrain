@@ -26,27 +26,28 @@ Personal phones/names are skipped (Sarah, Jeremy Ciotola, Dad, Cayden, Diana Bur
 
 ## Deal stages (forecasting)
 
-Only move a deal when evidence warrants it. Never open a deal from Smartlead / HeyReach / RVM.
+Only move a deal when evidence warrants it. See `docs/crmbrain_stage_spec.md`.
 
-**Forward**
+**Sales Pipeline (`default`)**
 
-- Calendly / GCal booked → Discovery Scheduled (`qualifiedtobuy`)
-- Meeting held (Fireflies / Cube disco) → Discovery Completed (`presentationscheduled`)
+- Smartlead / HeyReach / Allo positive reply → Initial Interest (`appointmentscheduled`)
+- Calendly / GCal booked → Meeting Booked (`qualifiedtobuy`)
+- Meeting held (Fireflies / Cube disco) → Discovery Held (`presentationscheduled`)
 - Proposal sent (PandaDoc / Gmail) → Proposal Sent (`decisionmakerboughtin`)
-- Signed → Signed (`closedwon`)
-- Paid (Stripe / payment) → Paid (`3482933986`)
+- Partner/board/leadership sign-off → Needs Stakeholder Approval (`4391745240`)
+- E-sign / contract / invoice sent or signed, unpaid → Contract Sent / Signed Not Yet Paid (`4391699184`)
+- Signed pilot running unpaid → POC (`4391745241`)
+- First payment received → Closed Won (`closedwon`)
+- Nurture only with a concrete `nurture_reason` (`3486952153`, closed)
+- Closed Lost is review-only (`closedlost`, set `lost_reason`)
 
-**Back** (explicit signal only — never a default)
+No-shows increment `no_show_count` and leave the stage. Old Paid (`3482933986`) and No Show (`3557889773`) stages are deleted — never write those IDs. Never move a Closed Won deal to lost; churn lives on Client Renewals (`2604181234`).
 
-- No-show → No Show (`3557889773`)
-- Disco flake / never booked after a meeting → Nurture (`3486952153`) — not fake Replied
-- Clear not interested → Closed Lost (`closedlost`)
-
-The cycle will not regress a more advanced open stage to Replied or Nurture without that back-signal. If a contact has meeting-held evidence and only a Replied deal exists, it is moved to Discovery Completed.
+The cycle will not regress a more advanced open stage to Initial Interest or Nurture without that back-signal. If a contact has meeting-held evidence and only an Initial Interest deal exists, it is moved to Discovery Held.
 
 Fireflies and Cube `*-transcript.docx` always run extract → `merge_contact_props` so relational notes (family, school, hooks) land on the contact. If the transcript clearly states **this deal's** price (monthly retainer, proposal $, package), the cycle PATCHes HubSpot deal `amount` when that field is empty. It never invents an amount and never copies Josh's case-study stats ($2M pipeline, $100K closed, meeting guarantee).
 
-Each cycle **reconciles** HubSpot to a per-person evidence timeline (Calendar upcoming events are always scanned, not just the email lookback). Low-confidence meetings go to `crmbrain.review_queue` and the cycle report — they do not open a deal. Paid/Signed deals are never archived.
+Each cycle **reconciles** HubSpot to a per-person evidence timeline (Calendar upcoming events are always scanned, not just the email lookback). Low-confidence meetings go to `crmbrain.review_queue` and the cycle report — they do not open a deal. Closed Won deals are never archived.
 
 Each cycle also **prunes** junk:
 
@@ -84,7 +85,10 @@ To enroll historical 90-day nurture ticker rows (dry-run by default; never email
 ```bash
 python scripts/backfill_nurture_ticker.py
 python scripts/backfill_nurture_ticker.py --apply
+python scripts/nurture_dry_run_samples.py
 ```
+
+Josh rule: enroll only people who met or booked a real meeting. A positive reply alone does not qualify. Cards post to `#nurture` (`C0BHBDTMRFY`) as Block Kit with Approve / Edit / Remove. Approve and Edit send a 1:1 Gmail thread reply from `joshua@salesglidergrowth.com` only when `NURTURE_SEND_ENABLED=1`. Posting cards requires `NURTURE_POST_ENABLED=1`. Slack interactivity is a **separate** Railway service (`POST /slack/interactions`) — see `docs/nurture-railway.md`. The cron start command stays `python -m crmbrain cycle`.
 
 ## Railway
 
@@ -108,7 +112,7 @@ Full cycle:
 8. Extracts relational notes onto the contact (Fireflies / Cube every cycle, including a notes refresh if the transcript was already processed)
 9. Fills empty deal `amount` when the transcript states a retainer / proposal / package price
 10. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
-11. Enrolls cold leads on a repeating 90-day ticker; Slack gets a draft, nothing sends
+11. Enrolls **met/booked** contacts on a repeating 90-day ticker; Slack gets a Block Kit card (when `NURTURE_POST_ENABLED`), nothing sends unless Josh clicks Approve/Edit and `NURTURE_SEND_ENABLED` is on
 12. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 13. Reconciles HubSpot to the per-person evidence timeline (create / restore / advance / regress). Upcoming Calendar events are always scanned (next 30 days), not just the email lookback. Low-confidence meetings go to `crmbrain.review_queue`.
 14. Alarms in the cycle report when Gmail, Fireflies, Calendar, Cube ACR, or Smartlead has not produced data in more than two business days. Allo is not in the cycle (calls live in Cube).
@@ -139,6 +143,6 @@ Gemini 2.5 Flash when `GEMINI_API_KEY` is set. Heuristics still run without it.
 
 ## Not this job
 
-- Emailing prospects
+- Emailing prospects except Josh-approved #nurture thread replies (gated, never Smartlead)
 - Creating HubSpot tasks
 - Using the master SmartLead key

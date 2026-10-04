@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from crmbrain.config import STAGE, digits_phone
+from crmbrain.config import NO_SHOW_HINT, STAGE, digits_phone
 from crmbrain.models import Engagement
 from crmbrain.policy import POC_HINT_RE, is_meeting_held, is_meeting_scheduled
 
@@ -88,11 +88,11 @@ def kind_for(ev: Engagement) -> str:
     extra = ev.extra or {}
     if extra.get("canceled") or extra.get("cancelled"):
         return KIND_CANCELED
-    if ev.stage_hint == STAGE["no_show"]:
+    if ev.stage_hint in {NO_SHOW_HINT, "no_show"}:
         return KIND_NO_SHOW
-    if ev.stage_hint == STAGE["paid"]:
+    if ev.stage_hint in {STAGE["paid"], STAGE["closed_won"]}:
         return KIND_PAYMENT
-    if ev.stage_hint == STAGE["signed"]:
+    if ev.stage_hint in {STAGE["signed"], STAGE["contract_signed_unpaid"]}:
         return KIND_SIGNED
     if ev.stage_hint == STAGE["proposal_sent"]:
         return KIND_PROPOSAL

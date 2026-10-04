@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import random
+import re
 import time
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -11,7 +12,7 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import Settings
+from crmbrain.config import Settings, is_client_context, is_josh_address
 from crmbrain.google_auth import CALENDAR_READONLY
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,31 @@ MAX_READ_RETRIES = 3
 BACKOFF_BASE = 1.0
 BACKOFF_CAP = 16.0
 RETRYABLE_STATUS = frozenset({429, 503})
+CALENDAR_NOTIFY_ADDR = "calendar-notification@google.com"
+CALENDAR_SUBJECT_PREFIXES = (
+    "accepted:",
+    "declined:",
+    "invitation:",
+    "updated invitation",
+    "canceled",
+    "cancelled",
+)
+_SCHEDULING_ONLY_RE = re.compile(
+    r"^(?:re:\s*)?(?:"
+    r"call at\s+\d|"
+    r"meeting today|"
+    r"meeting tomorrow|"
+    r"meet(?:ing)? at\s+\d"
+    r")",
+    re.I,
+)
+_TJ_SUBJECT_RE = re.compile(r"\btj\b", re.I)
+_MEETING_SUBJECT_RE = re.compile(r"meeting recap|invitation|call with|and joshua", re.I)
+_PERSON_IN_SUBJECT_RE = re.compile(
+    r"\b([A-Z][a-zA-Z'’.\-]{1,20})\s+([A-Z][a-zA-Z'’.\-]{1,30})\b"
+)
+_JOSH_NAME_TOKENS = frozenset({"joshua", "josh", "osborn"})
+
 GMAIL_RATE_LIMIT_REASONS = frozenset(
     {
         "ratelimitexceeded",
@@ -37,6 +63,10 @@ GMAIL_RATE_LIMIT_REASONS = frozenset(
         "resourceexhausted",
     }
 )
+
+
+class GmailRateLimitError(RuntimeError):
+    """Gmail 429/403 quota. Do not skip the message or mark it processed."""
 
 
 def _sleep(seconds: float) -> None:
@@ -101,6 +131,22 @@ def is_gmail_rate_limit(resp: requests.Response) -> bool:
     return "rate limit" in blob or "too many" in blob or "quota exceeded" in blob
 
 
+def is_gmail_rate_limit_exc(exc: BaseException | None) -> bool:
+    """True when a raised error is a Gmail quota 403/429 — never skip or mark processed."""
+    if exc is None:
+        return False
+    if isinstance(exc, GmailRateLimitError):
+        return True
+    resp = getattr(exc, "response", None)
+    if resp is not None and is_gmail_rate_limit(resp):
+        return True
+    blob = _normalize_reason(str(exc))
+    text = str(exc).lower()
+    if any(r in blob for r in GMAIL_RATE_LIMIT_REASONS):
+        return True
+    return "403" in text and ("ratelimit" in blob or "rate limit" in text)
+
+
 def is_gmail_scope_error(resp: requests.Response) -> bool:
     if resp.status_code != 403 or is_gmail_rate_limit(resp):
         return False
@@ -121,6 +167,75 @@ def is_gmail_scope_error(resp: requests.Response) -> bool:
 def _backoff_with_jitter(attempt: int) -> float:
     base = min(BACKOFF_CAP, BACKOFF_BASE * (2**attempt))
     return min(BACKOFF_CAP, base * (0.5 + random.random()))
+
+
+def _norm_addr(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def header_has_contact_email(headers: dict | None, email: str) -> bool:
+    """True when the contact is an actual From/To participant (not Cc-only / body hit)."""
+    addr = _norm_addr(email)
+    if not addr or "@" not in addr:
+        return False
+    headers = headers or {}
+    blob = f"{headers.get('from') or ''} {headers.get('to') or ''}".lower()
+    return addr in blob
+
+
+def subject_is_calendar_noise(subject: str) -> bool:
+    low = (subject or "").strip().lower()
+    return any(low.startswith(prefix) for prefix in CALENDAR_SUBJECT_PREFIXES)
+
+
+def subject_is_scheduling_only(subject: str) -> bool:
+    return bool(_SCHEDULING_ONLY_RE.match((subject or "").strip()))
+
+
+def subject_is_tj_thread(subject: str) -> bool:
+    return bool(_TJ_SUBJECT_RE.search(subject or ""))
+
+
+def subject_names_other_meeting_guest(subject: str, contact_name: str = "") -> bool:
+    """Skip meeting-style subjects that name someone other than this contact / Josh."""
+    text = subject or ""
+    if not _MEETING_SUBJECT_RE.search(text) and "your meeting recap" not in text.lower():
+        return False
+    own = {p.lower() for p in re.split(r"[^A-Za-z]+", contact_name or "") if len(p) > 1}
+    own |= _JOSH_NAME_TOKENS
+    for match in _PERSON_IN_SUBJECT_RE.finditer(text):
+        first, last = match.group(1).lower(), match.group(2).lower()
+        if first in _JOSH_NAME_TOKENS or last in _JOSH_NAME_TOKENS:
+            continue
+        if first in own or last in own:
+            continue
+        return True
+    return False
+
+
+def should_skip_nurture_thread(
+    headers: dict | None,
+    contact_email: str,
+    contact_name: str = "",
+) -> bool:
+    """Calendar / TJ / other-person / client / missing-participant threads are unusable."""
+    headers = {str(k).lower(): (v or "") for k, v in (headers or {}).items()}
+    subject = headers.get("subject") or ""
+    frm = headers.get("from") or ""
+    if CALENDAR_NOTIFY_ADDR in frm.lower():
+        return True
+    if subject_is_calendar_noise(subject) or subject_is_scheduling_only(subject):
+        return True
+    if subject_is_tj_thread(subject):
+        return True
+    if not header_has_contact_email(headers, contact_email):
+        return True
+    if subject_names_other_meeting_guest(subject, contact_name):
+        return True
+    if is_client_context(title=subject) and not is_josh_address(contact_email):
+        if any(token in subject.lower() for token in ("goliath", "peterson", "vasco", "parlay")):
+            return True
+    return False
 
 
 class Gmail:
@@ -183,7 +298,26 @@ class Gmail:
                 _sleep(delay)
                 continue
             rate_limited = is_gmail_rate_limit(resp)
-            if retry and (resp.status_code in RETRYABLE_STATUS or rate_limited) and attempt + 1 < attempts:
+            if rate_limited:
+                if retry and attempt + 1 < attempts:
+                    delay = min(BACKOFF_CAP, _retry_after_seconds(resp, _backoff_with_jitter(attempt)))
+                    logger.warning(
+                        "gmail %s %s HTTP %s (%s), retry %s/%s in %.2fs",
+                        method,
+                        url,
+                        resp.status_code,
+                        _gmail_error_reason(resp) or resp.reason,
+                        attempt + 1,
+                        MAX_READ_RETRIES,
+                        delay,
+                    )
+                    _sleep(delay)
+                    continue
+                raise GmailRateLimitError(
+                    f"gmail {method} {url} HTTP {resp.status_code} "
+                    f"{_gmail_error_reason(resp) or resp.reason}"
+                )
+            if retry and resp.status_code in RETRYABLE_STATUS and attempt + 1 < attempts:
                 delay = min(BACKOFF_CAP, _retry_after_seconds(resp, _backoff_with_jitter(attempt)))
                 logger.warning(
                     "gmail %s %s HTTP %s (%s), retry %s/%s in %.2fs",
@@ -218,6 +352,43 @@ class Gmail:
         )
         resp.raise_for_status()
         return resp.json().get("messages", [])
+
+    def find_contact_thread(self, email: str, name: str = "") -> dict[str, str] | None:
+        """Most recent substantive 1:1 thread. Skips calendar, TJ, and other-person recaps."""
+        addr = (email or "").strip()
+        if not addr or "@" not in addr:
+            return None
+        query = f"(from:{addr} OR to:{addr}) (in:inbox OR in:sent) -in:chats"
+        try:
+            stubs = self.search(query, max_results=15)
+        except Exception as exc:
+            logger.warning("gmail find_contact_thread search failed: %s", exc)
+            return None
+        for stub in stubs or []:
+            mid = str((stub or {}).get("id") or "")
+            if not mid:
+                continue
+            try:
+                msg = self.get(mid)
+            except Exception as exc:
+                if is_gmail_rate_limit_exc(exc):
+                    raise
+                logger.warning("gmail find_contact_thread get %s failed: %s", mid, exc)
+                continue
+            headers = self.headers_map(msg)
+            if should_skip_nurture_thread(headers, addr, name):
+                continue
+            thread_id = str(msg.get("threadId") or stub.get("threadId") or "")
+            if not thread_id:
+                continue
+            return {
+                "thread_id": thread_id,
+                "message_id": mid,
+                "original_subject": headers.get("subject") or "",
+                "in_reply_to": headers.get("message-id") or "",
+                "references": headers.get("references") or headers.get("message-id") or "",
+            }
+        return None
 
     def get(self, message_id: str) -> dict[str, Any]:
         resp = self._request(
@@ -286,6 +457,10 @@ class Gmail:
             retry=True,
             timeout=READ_TIMEOUT,
         )
+        if is_gmail_rate_limit(resp):
+            raise GmailRateLimitError(
+                f"calendar api {resp.status_code} {_gmail_error_reason(resp) or resp.reason}"
+            )
         if resp.status_code in {401, 403}:
             logger.info("calendar api %s — falling back to Gmail invites", resp.status_code)
             raise PermissionError(
@@ -295,17 +470,40 @@ class Gmail:
         resp.raise_for_status()
         return resp.json().get("items") or []
 
-    def send(self, to: str, subject: str, body: str) -> None:
+    def send(self, to: str, subject: str, body: str) -> dict[str, Any]:
+        return self.send_thread_reply(to, subject, body, thread_id="")
+
+    def send_thread_reply(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        thread_id: str,
+        in_reply_to: str = "",
+        references: str = "",
+    ) -> dict[str, Any]:
+        """Send a 1:1 reply in the original Gmail thread. Needs gmail.send."""
+        from crmbrain.nurture import thread_reply_headers
+
+        headers = thread_reply_headers(subject, in_reply_to=in_reply_to, references=references)
         msg = MIMEText(body)
         msg["to"] = to
         msg["from"] = "joshua@salesglidergrowth.com"
-        msg["subject"] = subject
+        msg["subject"] = headers["Subject"]
+        if headers.get("In-Reply-To"):
+            msg["In-Reply-To"] = headers["In-Reply-To"]
+        if headers.get("References"):
+            msg["References"] = headers["References"]
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        payload: dict[str, Any] = {"raw": raw}
+        if thread_id:
+            payload["threadId"] = thread_id
         resp = self._request(
             "POST",
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
             headers={**self._headers(), "Content-Type": "application/json"},
-            json={"raw": raw},
+            json=payload,
             timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
+        return resp.json() if resp.content else {}

@@ -80,7 +80,7 @@ def test_stage_signals():
     assert facts["ticker_reason"] == "kicked_can"
     assert "Baylor" in (facts["relationship_hooks"] or "")
     assert "son" in (facts["family_notes"] or "").lower()
-    assert stage_id("paid") == "3482933986"
+    assert stage_id("paid") == "closedwon"
     loose = heuristic_extract("If they signed and said let's do it, that still is not a closed deal.")
     assert loose.get("stage_hint") != "signed"
 
@@ -141,9 +141,9 @@ def test_empty_gemini_does_not_wipe_heuristic_notes():
 
 
 def test_gmail_pandadoc_and_calendly():
-    assert _stage_from_mail("Document completed", "PandaDoc", "has been signed") == "closedwon"
+    assert _stage_from_mail("Document completed", "PandaDoc", "has been signed") == "4391699184"
     assert _stage_from_mail("New Event", "Calendly", "accepted") == "qualifiedtobuy"
-    assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == "3557889773"
+    assert _stage_from_mail("Invitee no-show", "Calendly", "no-show") == "no_show"
     assert _stage_from_mail("Invitation: SalesGlider Intro", "calendar-notification@google.com", "scheduled") == (
         "qualifiedtobuy"
     )
@@ -279,7 +279,7 @@ def test_nurture_roofing_uses_roi_case_study():
     assert "$2M" in body
     assert "$100K" in body
     assert "14+" in body
-    assert "AirPods" in body
+    assert "AirPods" not in body
     assert MEETING_GUARANTEE in body
     assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
@@ -312,12 +312,16 @@ def test_nurture_generalized_when_industry_unknown():
     subject, body = draft_email("Pat Lee", "Acme Holdings", "never_booked")
     assert subject == "Quick update"
     assert infer_industry("Acme Holdings") is None
+    assert infer_industry("RLP Mechanical")["key"] == "hvac"
+    assert infer_industry("Talent Unify")["key"] == "staffing"
+    assert infer_industry("IntegriBuilt")["key"] == "construction"
+    assert infer_industry("RDS Fire Systems")["key"] == "construction"
     assert "$2M" in body and "pipeline last quarter" in body
     assert "$100K" in body and "first 3 months" in body
     assert "14+" in body
-    assert "Loom" in body
+    assert "Loom" not in body
     assert MEETING_GUARANTEE in body
-    assert "AirPods" in body
+    assert "AirPods" not in body
     assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
     assert "HVAC" not in body

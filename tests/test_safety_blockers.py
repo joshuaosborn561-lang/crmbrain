@@ -128,10 +128,18 @@ def test_write_budget_thirty_discovery_scheduled_caps_at_ten(tmp_path):
         calendar_api_ok=True,
         budget=WriteBudget(max_archives_regressions=10, max_creates=10, max_stage_moves=20),
     )
-    noshows = [d for d in hs.deals if (d.get("properties") or {}).get("dealstage") == STAGE["no_show"]]
-    still = [d for d in hs.deals if (d.get("properties") or {}).get("dealstage") == STAGE["discovery_scheduled"]]
-    assert len(noshows) == 10
+    incremented = [
+        d for d in hs.deals if int(float((d.get("properties") or {}).get("no_show_count") or 0)) > 0
+    ]
+    still = [
+        d
+        for d in hs.deals
+        if int(float((d.get("properties") or {}).get("no_show_count") or 0)) == 0
+        and (d.get("properties") or {}).get("dealstage") == STAGE["discovery_scheduled"]
+    ]
+    assert len(incremented) == 10
     assert len(still) == 20
+    assert all((d.get("properties") or {}).get("dealstage") == STAGE["discovery_scheduled"] for d in hs.deals)
     assert sum(1 for x in report.review_queue if "cap" in x) == 20
 
 
@@ -234,7 +242,8 @@ def test_crm_source_never_counts_as_held(tmp_path):
         held_events=[],
         calendar_api_ok=True,
     )
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
+    assert hs.deals[0]["properties"].get("no_show_count") == "1"
 
 
 def test_signed_not_moved_to_proposal_without_matching_document():
@@ -276,8 +285,8 @@ def test_never_create_deal_when_contact_already_paid_or_signed(tmp_path):
 
 
 def test_paid_never_downgraded():
-    ev = Engagement(source="gmail", external_id="x", stage_hint=STAGE["no_show"])
-    assert choose_deal_action(STAGE["paid"], STAGE["no_show"], ev) is None
+    ev = Engagement(source="gmail", external_id="x", stage_hint="no_show")
+    assert choose_deal_action(STAGE["paid"], "no_show", ev) is None
     assert choose_deal_action(STAGE["paid"], STAGE["discovery_scheduled"], ev) is None
 
 
@@ -298,7 +307,19 @@ def test_poc_hint_word_boundaries_and_no_gmail_query():
 
 
 def test_cold_sources_are_no_before_sales_hints():
-    for source in ("smartlead", "heyreach", "rvm", "gmail_person"):
+    for source in ("smartlead", "heyreach"):
+        ev = Engagement(
+            source=source,
+            external_id=source,
+            email="pat@acme.com",
+            first_name="Pat",
+            last_name="Lee",
+            raw_subject="SalesGlider discovery proposal pricing",
+            summary="Interested in a SalesGlider intro",
+        )
+        decision = heuristic_intent(ev)
+        assert decision.verdict == "yes", source
+    for source in ("rvm", "gmail_person"):
         ev = Engagement(
             source=source,
             external_id=source,
