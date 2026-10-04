@@ -1,6 +1,7 @@
 import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from crmbrain.config import STAGE, Settings
 from crmbrain.cycle import _fire_ticker, integration_status, run as cycle_run
@@ -265,7 +266,12 @@ def test_fire_ticker_posts_subject_and_body_for_approval(tmp_path: Path, monkeyp
         }
     ]
     report = CycleReport()
-    _fire_ticker(settings, memory, report)
+    _fire_ticker(
+        settings,
+        memory,
+        report,
+        now=datetime(2026, 10, 5, 7, 0, tzinfo=ZoneInfo("America/Chicago")),
+    )
     assert posted == []
     assert report.nurture_cards
     card = report.nurture_cards[0]
