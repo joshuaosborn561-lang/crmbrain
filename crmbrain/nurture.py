@@ -88,6 +88,53 @@ NURTURE_EXCLUDE_EMAILS = frozenset({"kevin@kevinhagemoser.com"})
 HELD_MEETING_SOURCES = frozenset({"fireflies", "cube_acr", "cube", "allo"})
 HELD_NEAR_DAYS = 2
 WANT_CONFIDENCE_MIN = 0.7
+TRUSTED_MEETING_DATE_SOURCES = frozenset(
+    {
+        "fireflies",
+        "cube",
+        "cube_acr",
+        "allo",
+        "calendly",
+        "gmail_booking",
+        "gmail_followup",
+        "hs_meeting",
+    }
+)
+_FORBIDDEN_DATE_KEYS = (
+    "createdate",
+    "hs_createdate",
+    "hs_lastmodifieddate",
+    "lastmodifieddate",
+    "imported_at",
+    "import_date",
+    "notes_last_contacted",
+    "notes_last_updated",
+    "hs_last_sales_activity_timestamp",
+)
+_MEETING_DATE_KEYS = (
+    "held_at",
+    "fireflies_at",
+    "cube_at",
+    "meeting_held_at",
+    "occurred_at",
+    "gmail_held_at",
+    "followup_meeting_at",
+    "gmail_followup_at",
+    "gmail_booking_at",
+    "booking_at",
+    "calendly_at",
+    "hs_meeting_start",
+    "meeting_at",
+    "call_at",
+    "engagements_last_meeting_booked",
+    "last_meeting_at",
+)
+_FOLLOWUP_INVITE_RE = re.compile(r"salesglider\s+follow[- ]?up", re.I)
+_WEB_BOOKING_RE = re.compile(r"salesglider\s+web\s+booking", re.I)
+_DECK_OR_RECAP_RE = re.compile(
+    r"growth playbook|\bplaybook\b|\bdeck\b|meeting recap|your meeting recap",
+    re.I,
+)
 NURTURE_THREAD_PROP = "nurture_thread_id"
 NURTURE_SUBJECT_PROP = "nurture_thread_subject"
 OPENER_MAX_WORDS = 20
@@ -904,8 +951,187 @@ def _no_show_count_of(extra: dict | None) -> int:
         return 0
 
 
+def _same_calendar_day(left, right) -> bool:
+    a = parse_signal_at(left) if not isinstance(left, datetime) else left
+    b = parse_signal_at(right) if not isinstance(right, datetime) else right
+    if not a or not b:
+        return False
+    if a.tzinfo is None:
+        a = a.replace(tzinfo=timezone.utc)
+    if b.tzinfo is None:
+        b = b.replace(tzinfo=timezone.utc)
+    return a.astimezone(timezone.utc).date() == b.astimezone(timezone.utc).date()
+
+
+def _forbidden_meeting_stamps(row: dict | None) -> list[datetime]:
+    extra = _row_extra(row)
+    props = extra.get("properties") if isinstance(extra.get("properties"), dict) else {}
+    out: list[datetime] = []
+    for src in ((row or {}), extra, props):
+        if not isinstance(src, dict):
+            continue
+        for key in _FORBIDDEN_DATE_KEYS:
+            dt = parse_signal_at(src.get(key))
+            if dt:
+                out.append(dt)
+    return out
+
+
+def _iter_gmail_messages(row: dict | None) -> list[dict]:
+    extra = _row_extra(row)
+    raw = (row or {}).get("gmail_messages") or extra.get("gmail_messages") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _sender_is_josh(sender: str) -> bool:
+    blob = sender or ""
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", blob)
+    if any(is_josh_address(email) for email in emails):
+        return True
+    return "salesglidergrowth.com" in blob.lower()
+
+
+def _message_meeting_at(msg: dict) -> datetime | None:
+    from crmbrain.sources.gmail_scan import parse_meeting_at
+
+    subject = str(msg.get("subject") or "")
+    body = str(msg.get("body") or msg.get("snippet") or "")
+    stamp = parse_meeting_at(subject, body)
+    if stamp:
+        return stamp
+    return parse_signal_at(msg.get("meeting_at") or msg.get("held_at") or msg.get("date"))
+
+
+def gmail_meeting_evidence(row: dict | None, *, now: datetime | None = None) -> dict[str, Any]:
+    """Booking/held dates from Gmail confirmations, follow-up invites, and Josh decks."""
+    now = now or now_utc()
+    extra = _row_extra(row)
+    structured_followup = parse_signal_at(
+        (row or {}).get("gmail_followup_at") or extra.get("gmail_followup_at")
+    )
+    followup_at = structured_followup
+    booking_at = parse_signal_at(
+        (row or {}).get("gmail_booking_at")
+        or extra.get("gmail_booking_at")
+        or (row or {}).get("calendly_at")
+        or extra.get("calendly_at")
+    )
+    if (row or {}).get("gmail_followup_accepted") is not None:
+        followup_accepted = bool((row or {}).get("gmail_followup_accepted"))
+    elif extra.get("gmail_followup_accepted") is not None:
+        followup_accepted = bool(extra.get("gmail_followup_accepted"))
+    else:
+        followup_accepted = bool(structured_followup)
+    has_deck = bool(
+        (row or {}).get("gmail_deck")
+        or extra.get("gmail_deck")
+        or (row or {}).get("gmail_recap")
+        or extra.get("gmail_recap")
+    )
+    followup_subj = str(
+        (row or {}).get("gmail_followup_subject") or extra.get("gmail_followup_subject") or ""
+    )
+    booking_subj = str(
+        (row or {}).get("gmail_booking_subject") or extra.get("gmail_booking_subject") or ""
+    )
+    deck_subj = str((row or {}).get("gmail_deck_subject") or extra.get("gmail_deck_subject") or "")
+    if _FOLLOWUP_INVITE_RE.search(followup_subj):
+        followup_accepted = followup_accepted or "accepted" in followup_subj.lower()
+        if not followup_accepted and followup_at:
+            followup_accepted = True
+    if _DECK_OR_RECAP_RE.search(deck_subj) or _MEETING_RECAP_RE.search(deck_subj):
+        has_deck = True
+    if booking_subj and not booking_at:
+        booking_at = parse_signal_at((row or {}).get("gmail_booking_at") or extra.get("gmail_booking_at"))
+    for msg in _iter_gmail_messages(row):
+        subject = str(msg.get("subject") or "")
+        body = str(msg.get("body") or msg.get("snippet") or "")
+        blob = f"{subject} {body}"
+        stamp = _message_meeting_at(msg)
+        if _FOLLOWUP_INVITE_RE.search(blob):
+            if stamp:
+                followup_at = stamp
+            if "accepted" in subject.lower() or msg.get("accepted"):
+                followup_accepted = True
+            elif followup_at and msg.get("accepted") is not False:
+                followup_accepted = True
+        if _sender_is_josh(str(msg.get("from") or msg.get("sender") or "")) and (
+            _DECK_OR_RECAP_RE.search(blob) or _MEETING_RECAP_RE.search(blob)
+        ):
+            has_deck = True
+        if _WEB_BOOKING_RE.search(blob) or (
+            "salesglider" in blob.lower()
+            and any(h in blob.lower() for h in ("new event", "invitee", "web booking", "confirmed"))
+        ):
+            if stamp:
+                booking_at = booking_at or stamp
+    met = bool(followup_at and followup_accepted and followup_at <= now and has_deck)
+    booked = bool(booking_at or followup_at)
+    source = "gmail_followup" if met or (followup_at and followup_accepted) else "gmail_booking" if booking_at else ""
+    return {
+        "met": met,
+        "booked": booked,
+        "held_at": followup_at if met else None,
+        "booking_at": followup_at if (followup_at and followup_accepted) else booking_at,
+        "source": source,
+    }
+
+
+def lookup_gmail_meeting_messages(gmail, *, email: str) -> list[dict]:
+    """Read booking / follow-up / playbook mail for this contact. Never used as a reply thread."""
+    addr = str(email or "").strip()
+    if gmail is None or not addr or "@" not in addr:
+        return []
+    search = getattr(gmail, "search", None)
+    if not callable(search):
+        return []
+    query = (
+        f"(from:{addr} OR to:{addr}) "
+        f'(SalesGlider OR Calendly OR "Growth Playbook" OR "meeting recap" OR "Web Booking" OR Followup)'
+    )
+    try:
+        stubs = search(query, max_results=12) or []
+    except Exception as exc:
+        logger.warning("gmail meeting evidence search failed: %s", exc)
+        return []
+    getter = getattr(gmail, "get", None)
+    out: list[dict] = []
+    for stub in stubs:
+        if not isinstance(stub, dict):
+            continue
+        mid = str(stub.get("id") or "")
+        subject = str(stub.get("subject") or "")
+        body = str(stub.get("body") or stub.get("snippet") or "")
+        sender = str(stub.get("from") or stub.get("sender") or "")
+        if callable(getter) and mid:
+            try:
+                msg = getter(mid)
+            except Exception as exc:
+                logger.warning("gmail meeting evidence get %s failed: %s", mid, exc)
+                msg = stub
+            headers = {}
+            if hasattr(gmail, "headers_map"):
+                try:
+                    headers = gmail.headers_map(msg) or {}
+                except Exception:
+                    headers = {}
+            subject = subject or str(headers.get("subject") or "")
+            sender = sender or str(headers.get("from") or "")
+            if hasattr(gmail, "body_text"):
+                try:
+                    body = body or str(gmail.body_text(msg) or "")
+                except Exception:
+                    pass
+            body = body or str((msg or {}).get("snippet") or "")
+        if subject or body:
+            out.append({"id": mid, "subject": subject, "body": body, "from": sender})
+    return out
+
+
 def meeting_evidence_from_extra(extra: dict | None) -> tuple[bool, bool]:
-    """Derive (met, booked) from Fireflies/Cube, recap, calendar, HS meeting, no-show count."""
+    """Derive (met, booked) from Fireflies/Cube, recap, calendar, HS meeting, Gmail, no-show count."""
     extra = extra or {}
     blob = " ".join(
         str(extra.get(k) or "")
@@ -922,6 +1148,7 @@ def meeting_evidence_from_extra(extra: dict | None) -> tuple[bool, bool]:
         extra.get("meeting_source") or extra.get("evidence_source") or extra.get("source") or ""
     )
     held_source = source in {"fireflies", "cube_acr", "cube", "allo"}
+    gmail_ev = gmail_meeting_evidence(extra)
     met = bool(
         extra.get("met")
         or extra.get("meeting_held")
@@ -932,6 +1159,7 @@ def meeting_evidence_from_extra(extra: dict | None) -> tuple[bool, bool]:
         or extra.get("cube")
         or extra.get("cube_recording")
         or held_source
+        or gmail_ev.get("met")
         or _MEETING_RECAP_RE.search(blob)
     )
     booked = bool(
@@ -944,6 +1172,7 @@ def meeting_evidence_from_extra(extra: dict | None) -> tuple[bool, bool]:
         or extra.get("meeting_at")
         or extra.get("engagements_last_meeting_booked")
         or extra.get("last_meeting_at")
+        or gmail_ev.get("booked")
         or _no_show_count_of(extra) > 0
     )
     return met, booked
@@ -1222,8 +1451,9 @@ def _row_meeting_flags(row: dict | None) -> tuple[bool, bool]:
     extra = row.get("extra") if isinstance(row.get("extra"), dict) else row
     why = str(row.get("reason") or "").strip().lower()
     ev_met, ev_booked = meeting_evidence_from_extra(extra)
-    met = bool(ev_met or row.get("met") or why == "met")
-    booked = bool(ev_booked or row.get("booked") or why in {"booked", "no_show"})
+    gmail_ev = gmail_meeting_evidence(row)
+    met = bool(ev_met or gmail_ev.get("met") or row.get("met") or why == "met")
+    booked = bool(ev_booked or gmail_ev.get("booked") or row.get("booked") or why in {"booked", "no_show"})
     stage = str(row.get("deal_stage") or extra.get("deal_stage") or "")
     if stage in {
         STAGE.get("discovery_held"),
@@ -1249,26 +1479,56 @@ def _row_met_or_booked(row: dict | None) -> bool:
     return met or booked
 
 
-def _call_date_phrase(row: dict | None) -> str:
-    row = row or {}
+def _trusted_date_source(row: dict | None, key: str, explicit: str = "") -> str:
     extra = _row_extra(row)
-    for key in (
-        "meeting_at",
-        "call_at",
+    source = str(
+        explicit
+        or (row or {}).get("meeting_date_source")
+        or extra.get("meeting_date_source")
+        or ""
+    ).lower()
+    if source in TRUSTED_MEETING_DATE_SOURCES:
+        return source
+    if key in {
         "held_at",
         "fireflies_at",
         "cube_at",
         "meeting_held_at",
         "occurred_at",
-        "hs_meeting_start",
-        "engagements_last_meeting_booked",
-        "last_meeting_at",
-        "signal_at",
-    ):
+        "gmail_held_at",
+        "followup_meeting_at",
+        "gmail_followup_at",
+    }:
+        if _has_held_meeting_source(row) or key.startswith("gmail_") or "followup" in key:
+            return "fireflies" if _has_held_meeting_source(row) else "gmail_followup"
+    if key in {"gmail_booking_at", "booking_at", "calendly_at"}:
+        return "gmail_booking" if "gmail" in key or key == "booking_at" else "calendly"
+    if key in {"hs_meeting_start", "last_meeting_at"}:
+        return "hs_meeting"
+    return source or key
+
+
+def _call_date_phrase(row: dict | None) -> str:
+    """Date from a real booking/held meeting only. Never createdate or import stamps."""
+    row = row or {}
+    extra = _row_extra(row)
+    forbidden = _forbidden_meeting_stamps(row)
+    gmail_ev = gmail_meeting_evidence(row)
+    candidates: list[tuple[datetime, str]] = []
+    if gmail_ev.get("held_at"):
+        candidates.append((gmail_ev["held_at"], "gmail_followup"))
+    if gmail_ev.get("booking_at"):
+        candidates.append((gmail_ev["booking_at"], gmail_ev.get("source") or "gmail_booking"))
+    for key in _MEETING_DATE_KEYS:
         raw = row.get(key) or extra.get(key)
         dt = parse_signal_at(raw)
         if dt:
-            return dt.astimezone(CDT).strftime("%b %-d")
+            candidates.append((dt, _trusted_date_source(row, key)))
+    for dt, source in candidates:
+        matches_forbidden = any(_same_calendar_day(dt, stamp) for stamp in forbidden)
+        if matches_forbidden and source not in TRUSTED_MEETING_DATE_SOURCES:
+            continue
+        return dt.astimezone(CDT).strftime("%b %-d")
     return ""
 
 
@@ -1325,7 +1585,7 @@ def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict
     if booked:
         if date_phrase:
             return f"Hey {first}, circling back on the {date_phrase} meeting we had booked."
-        return f"Hey {first}, circling back on the meeting we had booked."
+        return f"Hey {first}, circling back on the call we had set up."
     topic = ""
     if campaign and not looks_like_deal_name(campaign, row) and not is_banned_opener_topic(campaign, row):
         topic = re.sub(r"salesglider\s*", "", campaign, flags=re.I).strip() or ""
@@ -2605,37 +2865,58 @@ def sample_hubspot_nurture_cards(
             if not key or key in seen:
                 continue
             cprops = contact.get("properties") or {}
+            createdate = str(props.get("createdate") or cprops.get("createdate") or "")
+            lastmod = str(
+                props.get("hs_lastmodifieddate")
+                or cprops.get("hs_lastmodifieddate")
+                or ""
+            )
             meeting_at = (
                 cprops.get("engagements_last_meeting_booked")
                 or props.get("engagements_last_meeting_booked")
                 or ""
             )
+            meeting_date_source = "hs_meeting_prop" if meeting_at else ""
             if callable(last_meeting) and contact.get("id"):
                 stamp = last_meeting(str(contact.get("id") or ""))
                 if stamp:
                     meeting_at = stamp.isoformat()
+                    meeting_date_source = "hs_meeting"
+            if (
+                meeting_at
+                and createdate
+                and meeting_date_source not in TRUSTED_MEETING_DATE_SOURCES
+                and _same_calendar_day(meeting_at, createdate)
+            ):
+                meeting_at = ""
+                meeting_date_source = ""
             snippet = (
                 fields["snippet"]
                 or str(props.get("description") or "")
                 or str(props.get("nurture_reason") or "")
             )
+            gmail_messages = lookup_gmail_meeting_messages(gmail, email=fields["email"])
             extra = {
                 "deal_stage": STAGE["nurture"],
                 "closed_won_domains": won_domains,
                 "has_renewal_deal": fields["email"].lower() in renewal_emails,
                 "closed_won": fields["email"].lower() in won_emails,
                 "archived": is_archived_hs_row(contact),
+                "createdate": createdate,
+                "hs_lastmodifieddate": lastmod,
                 "meeting_at": meeting_at,
+                "meeting_date_source": meeting_date_source,
                 "engagements_last_meeting_booked": meeting_at,
                 "no_show_count": props.get("no_show_count") or cprops.get("no_show_count"),
                 "last_touch_snippet": snippet,
-                "hs_meeting": bool(meeting_at),
+                "hs_meeting": bool(meeting_at) and meeting_date_source in TRUSTED_MEETING_DATE_SOURCES,
                 "fireflies": bool(cprops.get("crm_source") == "fireflies"),
                 "cube_acr": bool(cprops.get("crm_source") == "cube_acr"),
                 "fireflies_id": str(cprops.get("fireflies_id") or ""),
                 "cube_id": str(cprops.get("cube_id") or ""),
                 "transcript": str(cprops.get("transcript") or ""),
                 "summary": str(cprops.get("hs_call_summary") or cprops.get("meeting_summary") or ""),
+                "gmail_messages": gmail_messages,
                 "meeting_source": (
                     "fireflies"
                     if cprops.get("crm_source") == "fireflies"
@@ -2648,6 +2929,19 @@ def sample_hubspot_nurture_cards(
                 NURTURE_SUBJECT_PROP: fields["nurture_thread_subject"]
                 or str(props.get(NURTURE_SUBJECT_PROP) or ""),
             }
+            gmail_ev = gmail_meeting_evidence({"extra": extra, "gmail_messages": gmail_messages})
+            if gmail_ev.get("held_at"):
+                extra["held_at"] = gmail_ev["held_at"].isoformat()
+                extra["gmail_followup_at"] = extra["held_at"]
+                extra["met"] = True
+                extra["meeting_date_source"] = "gmail_followup"
+            elif gmail_ev.get("booking_at"):
+                extra["gmail_booking_at"] = gmail_ev["booking_at"].isoformat()
+                extra["booked"] = True
+                extra["meeting_date_source"] = extra.get("meeting_date_source") or "gmail_booking"
+                if not meeting_at:
+                    meeting_at = extra["gmail_booking_at"]
+                    extra["meeting_at"] = meeting_at
             blocked = is_not_deal_candidate(
                 name=fields["name"],
                 email=fields["email"],
@@ -2703,6 +2997,13 @@ def sample_hubspot_nurture_cards(
                         extra=extra,
                     ),
                     "meeting_at": meeting_at,
+                    "meeting_date_source": extra.get("meeting_date_source") or "",
+                    "createdate": createdate,
+                    "hs_lastmodifieddate": lastmod,
+                    "gmail_messages": gmail_messages,
+                    "gmail_followup_at": extra.get("gmail_followup_at") or "",
+                    "gmail_booking_at": extra.get("gmail_booking_at") or "",
+                    "held_at": extra.get("held_at") or "",
                     "last_touch_snippet": snippet,
                     "industry": industry,
                     "hs_industry": hs_industry,
@@ -2723,7 +3024,8 @@ def sample_hubspot_nurture_cards(
                         or ""
                     ),
                     "extra": extra,
-                    "met": extra.get("fireflies") or extra.get("cube_acr"),
+                    "met": extra.get("met") or extra.get("fireflies") or extra.get("cube_acr"),
+                    "booked": extra.get("booked"),
                 }
             )
     attached = [attach_gmail_thread(row) for row in candidates]

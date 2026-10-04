@@ -20,6 +20,7 @@ from crmbrain.nurture import (
     collect_s2_hubspot,
     compose_nurture_draft,
     extract_spoken_want,
+    infer_nurture_reason,
     is_not_deal_candidate,
     is_real_meeting_id,
     meeting_source_id,
@@ -795,15 +796,19 @@ def test_booked_opener_upgrades_to_held_when_fireflies_is_near_date():
             "name": "Hamdat Wahid",
             "email": "hamdat@example.com",
             "reason": "booked",
+            "createdate": "2026-09-03T12:00:00+00:00",
             "meeting_at": "2026-09-04T15:00:00+00:00",
             "fireflies_id": "ff-hamdat-sep4",
             "meeting_source": "fireflies",
             "held_at": "2026-09-04T15:20:00+00:00",
+            "meeting_date_source": "fireflies",
             "extra": {
                 "fireflies": True,
                 "fireflies_id": "ff-hamdat-sep4",
                 "held_at": "2026-09-04T15:20:00+00:00",
                 "booked": True,
+                "createdate": "2026-09-03T12:00:00+00:00",
+                "meeting_date_source": "fireflies",
             },
         }
     )
@@ -948,3 +953,237 @@ def test_brian_donigan_source_includes_its_date():
     assert "following up on our jul 15 call" in dated_opener
     assert dated.meeting_source_id == "01BRIANDONIGANMEETIDXX"
     assert dated.meeting_source_id != "fireflies"
+
+
+JO_GMAIL_MESSAGES = [
+    {
+        "subject": "New Event: Jo Fried - SalesGlider Intro",
+        "body": "Event Type: SalesGlider Intro\nInvitee: Jo Fried\nFriday, March 27, 2026 at 10:00 AM",
+        "from": "noreply@calendly.com",
+    },
+    {
+        "subject": "Accepted: SalesGlider Followup",
+        "body": "Wednesday, April 1, 2026 at 10:00 AM",
+        "from": "calendar-notification@google.com",
+        "accepted": True,
+    },
+    {
+        "subject": "IntegriBuilt Growth Playbook",
+        "body": "Deck from our call.",
+        "from": "Joshua Osborn <joshua@salesglidergrowth.com>",
+        "date": "2026-04-01T18:00:00+00:00",
+    },
+]
+
+JOSH_BROWN_GMAIL_MESSAGES = [
+    {
+        "subject": "New Event: Josh Brown - SalesGlider Web Booking",
+        "body": "Event Type: SalesGlider Web Booking\nInvitee: Josh Brown\nMonday, March 30, 2026 at 10:00 AM",
+        "from": "noreply@calendly.com",
+    },
+]
+
+
+def test_jo_fried_gmail_followup_is_held_apr_1():
+    row = {
+        "name": "Jo Fried",
+        "email": "jo@integribuilt.test",
+        "company": "IntegriBuilt",
+        "reason": "booked",
+        "deal_stage": STAGE["nurture"],
+        "createdate": "2026-09-03T12:00:00+00:00",
+        "meeting_at": "2026-09-03T12:00:00+00:00",
+        "signal_at": "2026-09-03T12:00:00+00:00",
+        "hs_lastmodifieddate": "2026-09-03T12:05:00+00:00",
+        "gmail_messages": JO_GMAIL_MESSAGES,
+        "extra": {
+            "createdate": "2026-09-03T12:00:00+00:00",
+            "gmail_messages": JO_GMAIL_MESSAGES,
+            "deal_stage": STAGE["nurture"],
+        },
+    }
+    assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "met"
+    draft = compose_nurture_draft(row)
+    opener = draft.body.split("\n", 1)[0].lower()
+    assert "following up on our apr 1 call" in opener
+    assert "sep" not in opener
+    assert "mar 27" not in opener
+    assert "meeting we had booked" not in opener
+
+
+def test_josh_brown_uses_web_booking_mar_30_not_createdate():
+    row = {
+        "name": "Josh Brown",
+        "email": "josh@ampmediasales.test",
+        "company": "AMP Media Sales",
+        "reason": "booked",
+        "deal_stage": STAGE["nurture"],
+        "createdate": "2026-09-03T12:00:00+00:00",
+        "meeting_at": "2026-09-03T12:00:00+00:00",
+        "signal_at": "2026-09-03T12:00:00+00:00",
+        "gmail_messages": JOSH_BROWN_GMAIL_MESSAGES,
+        "extra": {
+            "createdate": "2026-09-03T12:00:00+00:00",
+            "gmail_messages": JOSH_BROWN_GMAIL_MESSAGES,
+        },
+    }
+    assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "booked"
+    draft = compose_nurture_draft(row)
+    opener = draft.body.split("\n", 1)[0].lower()
+    assert "circling back on the mar 30 meeting we had booked" in opener
+    assert "sep" not in opener
+
+
+def test_undated_booked_uses_call_we_had_set_up():
+    draft = compose_nurture_draft(
+        {
+            "name": "Jo Fried",
+            "company": "IntegriBuilt",
+            "reason": "booked",
+            "createdate": "2026-09-03T12:00:00+00:00",
+            "meeting_at": "2026-09-03T12:00:00+00:00",
+            "signal_at": "2026-09-03T12:00:00+00:00",
+        }
+    )
+    opener = draft.body.split("\n", 1)[0].lower()
+    assert opener == "hey jo, circling back on the call we had set up."
+    assert "sep" not in opener
+    assert "meeting we had booked" not in opener
+
+
+def test_shaun_and_hamdat_dates_need_real_booking_events():
+    shaun_real = compose_nurture_draft(
+        {
+            "name": "Shaun Rodriquez",
+            "reason": "booked",
+            "createdate": "2026-09-03T12:00:00+00:00",
+            "gmail_messages": [
+                {
+                    "subject": "New Event: Shaun Rodriquez - SalesGlider Web Booking",
+                    "body": "Monday, September 23, 2026 at 10:00 AM",
+                    "from": "noreply@calendly.com",
+                }
+            ],
+        }
+    )
+    assert "sep 23" in shaun_real.body.split("\n", 1)[0].lower()
+
+    shaun_createdate = compose_nurture_draft(
+        {
+            "name": "Shaun Rodriquez",
+            "reason": "booked",
+            "createdate": "2026-09-23T12:00:00+00:00",
+            "meeting_at": "2026-09-23T12:00:00+00:00",
+            "signal_at": "2026-09-23T12:00:00+00:00",
+        }
+    )
+    shaun_opener = shaun_createdate.body.split("\n", 1)[0].lower()
+    assert "sep" not in shaun_opener
+    assert "call we had set up" in shaun_opener
+
+    hamdat = compose_nurture_draft(
+        {
+            "name": "Hamdat Wahid",
+            "reason": "booked",
+            "createdate": "2026-09-03T12:00:00+00:00",
+            "meeting_at": "2026-09-04T15:00:00+00:00",
+            "fireflies_id": "ff-hamdat-sep4",
+            "meeting_source": "fireflies",
+            "held_at": "2026-09-04T15:20:00+00:00",
+            "meeting_date_source": "fireflies",
+        }
+    )
+    assert "sep 4" in hamdat.body.split("\n", 1)[0].lower()
+    assert "following up on our" in hamdat.body.split("\n", 1)[0].lower()
+
+
+class _JoJoshHS:
+    def __init__(self):
+        self.deals = {
+            "nurture": [
+                {
+                    "id": "d-jo",
+                    "properties": {
+                        "dealname": "Jo Fried - IntegriBuilt",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-09-03T12:00:00Z",
+                    },
+                },
+                {
+                    "id": "d-jb",
+                    "properties": {
+                        "dealname": "Josh Brown - AMP Media Sales",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-09-03T12:00:00Z",
+                    },
+                },
+            ],
+            "closedwon": [],
+            "renewal": [],
+        }
+        self.contacts = {
+            "d-jo": [
+                {
+                    "id": "c-jo",
+                    "properties": {
+                        "firstname": "Jo",
+                        "lastname": "Fried",
+                        "email": "jo@integribuilt.test",
+                        "company": "IntegriBuilt",
+                    },
+                }
+            ],
+            "d-jb": [
+                {
+                    "id": "c-jb",
+                    "properties": {
+                        "firstname": "Josh",
+                        "lastname": "Brown",
+                        "email": "josh@ampmediasales.test",
+                        "company": "AMP Media Sales",
+                    },
+                }
+            ],
+        }
+
+    def search_objects(self, object_name, filters, properties, max_results=400, page_limit=100):
+        del object_name, properties, max_results, page_limit
+        for row in filters or []:
+            if row.get("propertyName") == "dealstage" and row.get("value") == STAGE["nurture"]:
+                return list(self.deals["nurture"])
+            if row.get("propertyName") == "dealstage" and row.get("value") == STAGE["closed_won"]:
+                return list(self.deals["closedwon"])
+            if row.get("propertyName") == "pipeline" and row.get("value") == RENEWAL_PIPELINE:
+                return list(self.deals["renewal"])
+        return []
+
+    def contacts_for_deal(self, deal_id):
+        return list(self.contacts.get(str(deal_id), []))
+
+
+class _MeetingGmail:
+    def search(self, query, max_results=12):
+        del max_results
+        q = (query or "").lower()
+        if "jo@integribuilt.test" in q:
+            return list(JO_GMAIL_MESSAGES)
+        if "josh@ampmediasales.test" in q:
+            return list(JOSH_BROWN_GMAIL_MESSAGES)
+        return []
+
+
+def test_sample_cards_use_gmail_booking_and_followup_dates(tmp_path):
+    settings = make_settings()
+    payload = sample_hubspot_nurture_cards(
+        settings, 10, hs=_JoJoshHS(), gmail=_MeetingGmail(), out_path=str(tmp_path / "cards.json")
+    )
+    jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
+    assert jo["reason"] == "met"
+    assert "following up on our apr 1 call" in jo["body"].split("\n", 1)[0].lower()
+    assert "sep" not in jo["body"].split("\n", 1)[0].lower()
+    josh = next(c for c in payload["cards"] if c["name"] == "Josh Brown")
+    assert josh["reason"] == "booked"
+    assert "mar 30" in josh["body"].split("\n", 1)[0].lower()
+    assert "sep" not in josh["body"].split("\n", 1)[0].lower()
