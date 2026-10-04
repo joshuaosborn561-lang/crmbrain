@@ -337,6 +337,27 @@ class Memory:
                 return []
         return local
 
+    def reschedule_ticker(self, ticker_id: str, next_fire_at: str) -> None:
+        """Move next_fire_at without counting the row as posted today."""
+        if self._skip_side_write("ticker"):
+            return
+        for t in self._local.get("ticker", []):
+            if str(t.get("id")) == str(ticker_id) or (
+                t.get("email") and t.get("email") == ticker_id
+            ):
+                t["next_fire_at"] = next_fire_at
+        self.save_local()
+        if self.use_supabase:
+            try:
+                self._sb_schema(
+                    "PATCH",
+                    "ticker",
+                    json_body={"next_fire_at": next_fire_at},
+                    params={"id": f"eq.{ticker_id}"},
+                )
+            except Exception as exc:
+                self._record_error("reschedule_ticker", exc)
+
     def bump_ticker(self, ticker_id: str, next_fire_at: str, last_fired_at: str) -> None:
         if self._skip_side_write("ticker"):
             return

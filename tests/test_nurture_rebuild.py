@@ -36,9 +36,11 @@ from crmbrain.nurture import (
     may_enroll_from_engagement,
     merge_candidates,
     next_fire_at_from_signal,
+    nurture_daily_cap,
     nurture_row_from_candidate,
     qualify_candidate,
     render_sample_cards,
+    count_posted_today,
     select_due_with_cap,
     snippet_of,
     spread_past_due,
@@ -506,6 +508,10 @@ def test_t27_t28_t32_cadence():
     assert len(posted) == 5
     assert len(rolled) == 3
     assert all(r["next_fire_at"].startswith("2026-10-13") for r in rolled)
+    none, leftover = select_due_with_cap(rows, now=now, already_posted=5)
+    assert none == []
+    assert len(leftover) == 8
+    assert all(r["next_fire_at"].startswith("2026-10-13") for r in leftover)
 
 
 def test_t29_t30_empty_means_empty(tmp_path: Path):
@@ -722,7 +728,12 @@ def test_fire_due_writes_cards_when_post_off(tmp_path: Path):
         }
     ]
     report = CycleReport()
-    cards = fire_due_rows(settings, memory, report)
+    cards = fire_due_rows(
+        settings,
+        memory,
+        report,
+        now=datetime(2026, 10, 5, 7, 0, tzinfo=CDT),
+    )
     assert cards
     assert report.nurture_cards
     assert cards[0]["subject"] != "Roofing?"
@@ -1046,3 +1057,65 @@ def test_company_name_keywords_pick_vertical_proof():
     assert GENERAL_PROOF.rstrip(".") in staffing.body
     assert TRADES_PROOF.rstrip(".") in built.body
     assert TRADES_PROOF.rstrip(".") in fire.body
+
+
+def _due_nurture_row(i: int, next_fire: str = "2020-01-01T00:00:00+00:00") -> dict:
+    return {
+        "id": f"t-cap-{i}",
+        "name": f"Pat Reyes {i}",
+        "email": f"pat{i}@summitroofs.test",
+        "company": "Summit Roofs",
+        "industry": "roofing",
+        "reason": "kicked_can",
+        "status": "active",
+        "next_fire_at": next_fire,
+        "signal_at": f"2026-03-{i + 1:02d}T00:00:00+00:00",
+        "last_touch_snippet": "Check back after our busy season.",
+    }
+
+
+def test_settings_daily_cap_default_five():
+    assert nurture_daily_cap(None) == 5
+    assert nurture_daily_cap(make_settings()) == 5
+    assert nurture_daily_cap(make_settings(nurture_max_per_weekday=3)) == 3
+
+
+def test_monday_7am_posts_five_5pm_posts_zero_leftovers_next_weekday(tmp_path: Path):
+    settings = make_settings(nurture_post_enabled=False, nurture_max_per_weekday=5)
+    memory = Memory(settings, data_dir=tmp_path)
+    memory._local["ticker"] = [_due_nurture_row(i) for i in range(8)]
+    monday_7am = datetime(2026, 10, 5, 7, 0, tzinfo=CDT)
+    monday_5pm = datetime(2026, 10, 5, 17, 0, tzinfo=CDT)
+    morning = fire_due_rows(settings, memory, CycleReport(), now=monday_7am, gmail=FakeGmail())
+    assert len(morning) == 5
+    assert count_posted_today(memory, now=monday_7am) == 5
+    leftover = [
+        row
+        for row in memory._local["ticker"]
+        if str(row.get("id") or "").startswith("t-cap-")
+        and (row.get("next_fire_at") or "").startswith("2026-10-06")
+    ]
+    assert len(leftover) == 3
+    assert all(not row.get("last_fired_at") for row in leftover)
+    evening = fire_due_rows(settings, memory, CycleReport(), now=monday_5pm, gmail=FakeGmail())
+    assert evening == []
+    assert count_posted_today(memory, now=monday_5pm) == 5
+    still_leftover = [
+        row
+        for row in memory._local["ticker"]
+        if (row.get("next_fire_at") or "").startswith("2026-10-06")
+    ]
+    assert len(still_leftover) == 3
+
+
+def test_saturday_fire_due_rows_posts_nothing(tmp_path: Path):
+    settings = make_settings(nurture_post_enabled=False)
+    memory = Memory(settings, data_dir=tmp_path)
+    memory._local["ticker"] = [_due_nurture_row(i) for i in range(5)]
+    saturday = datetime(2026, 10, 3, 7, 0, tzinfo=CDT)
+    cards = fire_due_rows(settings, memory, CycleReport(), now=saturday, gmail=FakeGmail())
+    assert cards == []
+    assert count_posted_today(memory, now=saturday) == 0
+    for row in memory._local["ticker"]:
+        assert row["next_fire_at"].startswith("2026-10-05")
+        assert not row.get("last_fired_at")

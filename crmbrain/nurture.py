@@ -373,6 +373,50 @@ def is_weekday(dt: datetime) -> bool:
     return local.weekday() < 5
 
 
+def is_chicago_weekend(dt: datetime) -> bool:
+    return not is_weekday(dt)
+
+
+def chicago_date(now: datetime):
+    return _aware(now).astimezone(CDT).date()
+
+
+def nurture_daily_cap(settings: Settings | None = None) -> int:
+    raw = getattr(settings, "nurture_max_per_weekday", None) if settings else None
+    try:
+        cap = int(raw) if raw is not None else NURTURE_MAX_PER_WEEKDAY
+    except (TypeError, ValueError):
+        cap = NURTURE_MAX_PER_WEEKDAY
+    return cap if cap > 0 else NURTURE_MAX_PER_WEEKDAY
+
+
+def next_weekday_midnight(now: datetime) -> datetime:
+    nxt = next_weekday(_aware(now).astimezone(CDT) + timedelta(days=1))
+    return datetime(nxt.year, nxt.month, nxt.day, tzinfo=CDT)
+
+
+def ticker_fired_on(row: dict, day) -> bool:
+    stamped = parse_signal_at(row.get("last_fired_at") or "")
+    if not stamped:
+        return False
+    return stamped.astimezone(CDT).date() == day
+
+
+def count_posted_today(source, *, now: datetime) -> int:
+    """Count ticker rows already fired on the America/Chicago calendar day."""
+    if hasattr(source, "list_ticker"):
+        try:
+            rows = list(source.list_ticker() or [])
+        except Exception:
+            rows = []
+        if not rows:
+            rows = list(getattr(source, "_local", {}).get("ticker", []) or [])
+    else:
+        rows = list(source or [])
+    day = chicago_date(now)
+    return sum(1 for row in rows if ticker_fired_on(row, day))
+
+
 def next_weekday(dt: datetime) -> datetime:
     local = _aware(dt).astimezone(CDT)
     while local.weekday() >= 5:
@@ -2282,6 +2326,7 @@ def select_due_with_cap(
     *,
     now: datetime,
     max_per_weekday: int = NURTURE_MAX_PER_WEEKDAY,
+    already_posted: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     due = [
         r
@@ -2290,15 +2335,14 @@ def select_due_with_cap(
         and str(r.get("next_fire_at") or "") <= now.isoformat()
     ]
     due.sort(key=lambda r: parse_signal_at(r.get("signal_at") or r.get("next_fire_at")) or now)
-    today_key = now.astimezone(CDT).date().isoformat()
-    posted = due[:max_per_weekday]
+    remaining = max(0, int(max_per_weekday) - max(0, int(already_posted)))
+    posted = due[:remaining]
     rolled = []
-    nxt = next_weekday(now.astimezone(CDT) + timedelta(days=1))
-    for row in due[max_per_weekday:]:
+    nxt = next_weekday_midnight(now)
+    for row in due[remaining:]:
         copy = dict(row)
-        copy["next_fire_at"] = datetime(nxt.year, nxt.month, nxt.day, tzinfo=CDT).isoformat()
+        copy["next_fire_at"] = nxt.isoformat()
         rolled.append(copy)
-    del today_key
     return posted, rolled
 
 
@@ -2327,11 +2371,21 @@ def fire_due_rows(
         if "ticker_supabase_unavailable" not in report.errors:
             report.errors.append("ticker_supabase_unavailable")
         return []
+    if is_chicago_weekend(now):
+        nxt = next_weekday_midnight(now).isoformat()
+        for row in due:
+            memory.reschedule_ticker(str(row.get("id") or row.get("email")), nxt)
+            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} weekend")
+        return []
     cards: list[dict] = []
     gmail = gmail_client_for_cards(settings, gmail)
-    posted, rolled = select_due_with_cap(due, now=now)
+    cap = nurture_daily_cap(settings)
+    already = count_posted_today(memory, now=now)
+    posted, rolled = select_due_with_cap(
+        due, now=now, max_per_weekday=cap, already_posted=already
+    )
     for row in rolled:
-        memory.bump_ticker(str(row.get("id") or row.get("email")), row["next_fire_at"], now.isoformat())
+        memory.reschedule_ticker(str(row.get("id") or row.get("email")), row["next_fire_at"])
         report.ticker_skipped.append(f"{row.get('email') or row.get('name')} rolled")
     post_on = bool(getattr(settings, "nurture_post_enabled", False))
     for row in posted:
@@ -2390,8 +2444,8 @@ def fire_due_rows(
                     )
             except Exception as exc:
                 report.errors.append(f"slack ticker: {exc}")
-            next_fire = (now + timedelta(days=TICKER_DAYS)).isoformat()
-            memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
+        next_fire = (now + timedelta(days=TICKER_DAYS)).isoformat()
+        memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
     return cards
 
 
