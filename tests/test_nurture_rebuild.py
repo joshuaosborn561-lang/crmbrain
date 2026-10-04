@@ -124,7 +124,8 @@ class FakeGmail:
                 }
         return {"id": message_id, "payload": {"headers": []}}
 
-    def find_contact_thread(self, email):
+    def find_contact_thread(self, email, name=""):
+        del name
         for key, hit in self.threads.items():
             if email and email in key and isinstance(hit, dict):
                 return hit
@@ -133,6 +134,7 @@ class FakeGmail:
         return None
 
     def send_thread_reply(self, to, subject, body, thread_id, in_reply_to="", references=""):
+        new_id = thread_id or f"th-nurture-{len(self.sent) + 1}"
         self.sent.append(
             {
                 "to": to,
@@ -143,7 +145,7 @@ class FakeGmail:
                 "references": references,
             }
         )
-        return {"id": f"msg-{len(self.sent)}"}
+        return {"id": f"msg-{len(self.sent)}", "threadId": new_id}
 
 
 class FakeSlack:
@@ -333,6 +335,18 @@ def test_t12_t15_industry():
     )
     assert (key, basis) == ("hvac", "website")
     assert infer_industry_resolved(email="casey@linholdings.test", company="Lin Holdings") == (None, None)
+    assert infer_industry_resolved(company="RLP Mechanical") == ("hvac", "website")
+    assert infer_industry_resolved(company="Talent Unify") == ("staffing", "website")
+    assert infer_industry_resolved(company="IntegriBuilt") == ("construction", "website")
+    assert infer_industry_resolved(company="RDS Fire Systems") == ("construction", "website")
+    assert infer_industry_resolved(company="Lin Holdings", hs_industry="Staffing and Recruiting") == (
+        "staffing",
+        "website",
+    )
+    assert infer_industry_resolved(company="Lin Holdings", hs_industry="Construction") == (
+        "construction",
+        "website",
+    )
 
 
 def test_t16_t21_gates():
@@ -395,7 +409,7 @@ def test_t22_t26_drafts():
     first = d.body.split("\n", 1)[0].lower()
     assert "q4" in first or "timing" in first
     assert d.subject != "Morgan?"
-    assert "q4" in d.subject.lower() or "timing" in d.subject.lower()
+    assert d.subject == "Following up"
 
     roof = compose_nurture_draft(
         {
@@ -407,7 +421,7 @@ def test_t22_t26_drafts():
     )
     assert roof.subject != "Roofing?"
     assert "MSP update" not in roof.subject
-    assert "spring" in roof.subject.lower() or "Summit" in roof.subject
+    assert roof.subject == "Summit Roofs follow up"
     assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
     assert MEETING_GUARANTEE in roof.body
     assert roof.body.strip().endswith("Josh Osborn")
@@ -416,7 +430,7 @@ def test_t22_t26_drafts():
         {"name": "Casey Lin", "company": "Lin Holdings", "last_touch_snippet": "Maybe later this year."}
     )
     assert gen.subject != "Casey?"
-    assert "later this year" in gen.subject.lower() or "Lin Holdings" in gen.subject
+    assert gen.subject == "Lin Holdings follow up"
     assert "$2M" in gen.body and "$100K" in gen.body and "14+" in gen.body
     assert "Quick update" not in gen.subject
 
@@ -588,7 +602,8 @@ def test_idempotent_send_and_90_day_cooldown(tmp_path: Path):
             "email": "jackie@kellyroofing.com",
             "status": "active",
             "nurture_state": "queued",
-            "gmail_thread_id": "thread-jackie",
+            "nurture_thread_id": "thread-jackie",
+            "nurture_thread_subject": "Kelly Roofing follow up",
             "in_reply_to": "<jackie-orig@mail>",
             "references": "<jackie-orig@mail>",
             "last_touch_snippet": "Check back after our busy season.",
@@ -679,6 +694,8 @@ def test_sample_cards_file_has_ten_mixed():
         assert card["subject"]
         assert card["body"].endswith("Josh Osborn")
         assert "—" not in card["body"]
+        assert "AirPods" not in card["body"]
+        assert "thread_id" in card
         assert card["blocks"]
 
 
@@ -708,7 +725,7 @@ def test_fire_due_writes_cards_when_post_off(tmp_path: Path):
     assert cards
     assert report.nurture_cards
     assert cards[0]["subject"] != "Roofing?"
-    assert "busy season" in cards[0]["subject"].lower() or "Kelly Roofing" in cards[0]["subject"]
+    assert cards[0]["subject"] == "Kelly Roofing follow up"
     assert "Josh Osborn" in cards[0]["body"]
 
 
@@ -716,18 +733,27 @@ def test_gmail_lookup_any_date_sent_and_inbox():
     gmail = FakeGmail(
         {
             "brad@lord.test": {
-                "thread_id": "th-brad",
+                "thread_id": "th-old-intro",
                 "message_id": "m-brad",
                 "original_subject": "Cyber intro",
-                "in_reply_to": "<brad@mail>",
-                "references": "<brad@mail>",
             }
         }
     )
-    row = attach_gmail_thread({"name": "Bradley Lord", "email": "brad@lord.test"}, gmail)
-    assert row["thread_kind"] == "reply"
-    assert row["gmail_thread_id"] == "th-brad"
-    assert row["original_subject"] == "Cyber intro"
+    ignored = attach_gmail_thread({"name": "Bradley Lord", "email": "brad@lord.test"}, gmail)
+    assert ignored["thread_kind"] == "new_thread"
+    assert not ignored.get("gmail_thread_id")
+    stored = attach_gmail_thread(
+        {
+            "name": "Bradley Lord",
+            "email": "brad@lord.test",
+            "nurture_thread_id": "th-nurture-brad",
+            "nurture_thread_subject": "Lord Security follow up",
+        },
+        gmail,
+    )
+    assert stored["thread_kind"] == "reply"
+    assert stored["gmail_thread_id"] == "th-nurture-brad"
+    assert stored["original_subject"] == "Lord Security follow up"
     missing = attach_gmail_thread({"name": "New Person", "email": "nobody@none.test"}, FakeGmail())
     assert missing["thread_kind"] == "new_thread"
     assert not missing.get("gmail_thread_id")
@@ -752,7 +778,9 @@ def test_send_without_thread_starts_new_one_to_one(tmp_path: Path):
     assert out["ok"] is True
     assert out["thread_kind"] == "new_thread"
     assert gmail.sent[0]["threadId"] == ""
-    assert memory.get_ticker("t-new")["thread_kind"] == "new_thread"
+    saved = memory.get_ticker("t-new")
+    assert saved["nurture_thread_id"]
+    assert saved["nurture_thread_subject"] == "Summit Roofs follow up"
 
 
 def test_hubspot_meeting_evidence_is_not_never_booked():
@@ -830,7 +858,7 @@ def test_opener_excludes_personal_family_details():
 
 
 def test_thread_reply_uses_original_subject_and_new_thread_is_specific():
-    reply = compose_nurture_draft(
+    old = compose_nurture_draft(
         {
             "name": "Jackie Darkazalli",
             "company": "Kelly Roofing",
@@ -839,7 +867,17 @@ def test_thread_reply_uses_original_subject_and_new_thread_is_specific():
             "last_touch_snippet": "Check back after our busy season.",
         }
     )
-    assert reply.subject == "Re: Kelly Roofing intro"
+    assert old.subject == "Kelly Roofing follow up"
+    reply = compose_nurture_draft(
+        {
+            "name": "Jackie Darkazalli",
+            "company": "Kelly Roofing",
+            "nurture_thread_id": "th-nurture-jackie",
+            "nurture_thread_subject": "Kelly Roofing follow up",
+            "last_touch_snippet": "Check back after our busy season.",
+        }
+    )
+    assert reply.subject == "Re: Kelly Roofing follow up"
     fresh = compose_nurture_draft(
         {
             "name": "Lee Ng",
@@ -848,6 +886,160 @@ def test_thread_reply_uses_original_subject_and_new_thread_is_specific():
             "last_touch_snippet": "We just lost our SDR, maybe now.",
         }
     )
-    assert fresh.subject != "MSP update"
-    assert fresh.subject != "Lee?"
-    assert "SDR" in fresh.subject or "Bytewise" in fresh.subject
+    assert fresh.subject == "Bytewise follow up"
+
+
+def test_nurture_stage_never_keeps_stale_never_booked():
+    """Item 1: Nurture without an explicit met flag derives met/booked from evidence."""
+    nurture = STAGE["nurture"]
+    assert infer_nurture_reason(reason="never_booked", deal_stage=nurture) == "booked"
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"fireflies": True},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"cube_acr": True},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"original_subject": "Your meeting recap - Pat Reyes and Joshua Osborn"},
+        )
+        == "met"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"calendar_event": True, "meeting_at": "2026-06-01T15:00:00Z"},
+        )
+        == "booked"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"hs_meeting": True},
+        )
+        == "booked"
+    )
+    assert (
+        infer_nurture_reason(
+            reason="never_booked",
+            deal_stage=nurture,
+            extra={"no_show_count": "2"},
+        )
+        == "booked"
+    )
+    reply_only = infer_nurture_reason(reason="never_booked", extra={"source": "smartlead"})
+    assert reply_only == "never_booked"
+    assert has_meeting_qualification(reason="never_booked", extra={"source": "smartlead"}) is False
+    assert may_enroll_from_engagement(
+        Engagement(source="smartlead", external_id="sl-1", email="pat@x.test", ticker_reason="never_booked"),
+        reason="never_booked",
+    ) == (False, "reply_only")
+
+
+def test_opener_never_quotes_own_name_company_or_stage():
+    """Item 2: no self-name / company / stage in 'you mentioned', and met people get a call opener."""
+    scott = compose_nurture_draft(
+        {
+            "name": "Scott Hagan",
+            "email": "scott@finishline.test",
+            "company": "Finish Line",
+            "reason": "met",
+            "deal_stage": STAGE["nurture"],
+            "last_touch_snippet": "scott Hagan",
+        }
+    )
+    opener = scott.body.split("\n", 1)[0]
+    assert "you mentioned" not in opener.lower()
+    assert "scott hagan" not in opener.lower()
+    assert "finish line" not in opener.lower()
+    assert "nurture" not in opener.lower()
+    assert "wanted to circle back" in opener.lower()
+    assert "on our call" not in opener.lower()
+    assert scott.subject != "Finish Line: Scott Hagan"
+    assert scott.subject != "Scott Hagan"
+    assert "Scott Hagan" not in scott.subject
+
+    stage_copy = compose_nurture_draft(
+        {
+            "name": "Mike Dolan",
+            "company": "Dolan Roofing",
+            "campaign": "Nurture",
+            "last_touch_snippet": "mike Dolan",
+            "reason": "met",
+        }
+    )
+    blob = f"{stage_copy.subject}\n{stage_copy.body}".lower()
+    assert "reached out about nurture" not in blob
+    assert "you mentioned mike" not in blob
+    assert "you replied a while back" not in blob
+
+    met_neutral = compose_nurture_draft(
+        {
+            "name": "Lionel Francis",
+            "reason": "met",
+            "meeting_at": "2026-06-12T16:00:00+00:00",
+            "last_touch_snippet": "lionel Francis",
+        }
+    )
+    assert "you replied a while back" not in met_neutral.body
+    assert "jun" in met_neutral.body.lower()
+    assert "call" in met_neutral.body.split("\n", 1)[0].lower()
+
+
+def test_nurture_body_has_no_airpods_and_is_personalized():
+    """Item 4: no AirPods/gift; proof matches vertical; guarantee stays."""
+    roof = compose_nurture_draft(
+        {
+            "name": "Jackie Darkazalli",
+            "company": "Kelly Roofing",
+            "industry": "roofing",
+            "reason": "met",
+            "last_touch_snippet": "Check back after our busy season. Roofing crews are slammed until fall.",
+        }
+    )
+    hvac = compose_nurture_draft(
+        {
+            "name": "Joel Stewart",
+            "company": "The Chill Brothers",
+            "industry": "hvac",
+            "reason": "met",
+            "last_touch_snippet": "We are slammed through summer, check back in the fall about filling shoulder season.",
+        }
+    )
+    assert "AirPods" not in roof.body
+    assert "AirPods" not in hvac.body
+    assert "ticket" not in roof.body.lower()
+    assert MEETING_GUARANTEE in roof.body
+    assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
+    assert "trades" in hvac.body or CASE_STUDIES["hvac"][:10] in hvac.body
+    assert roof.body != hvac.body
+    assert "busy season" in roof.body.lower() or "slammed" in roof.body.lower()
+    assert "shoulder" in hvac.body.lower() or "summer" in hvac.body.lower()
+    default = compose_nurture_draft({"name": "Pat Reyes", "industry": "roofing"})
+    assert "AirPods" not in default.body
+
+
+def test_company_name_keywords_pick_vertical_proof():
+    cases = (
+        ("RLP Mechanical", "hvac", "trades"),
+        ("Talent Unify", "staffing", "recruit"),
+        ("IntegriBuilt", "construction", "home-services"),
+        ("RDS Fire Systems", "construction", "home-services"),
+    )
+    for company, key, token in cases:
+        draft = compose_nurture_draft({"name": "Alex Rivera", "company": company})
+        assert CASE_STUDIES[key].split(",")[0][:12] in draft.body or token in draft.body.lower()

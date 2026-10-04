@@ -136,7 +136,7 @@ Return ONLY JSON:
   "intent": "sales|buyer|learning|networking|personal|mentor|vendor|recruiter|day_job|client_ops|hire|contractor",
   "confidence": 0.0,
   "reason": "one short sentence",
-  "stage": "discovery_scheduled|discovery_completed|proposal_sent|signed|paid|no_show|nurture|closed_lost|",
+  "stage": "initial_interest|meeting_booked|discovery_held|proposal_sent|needs_stakeholder_approval|contract_signed_unpaid|poc|closed_won|nurture|closed_lost|",
   "amount": ""
 }
 
@@ -272,6 +272,15 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
                 confidence=0.93,
                 reason=f"Known non-opportunity: {person}",
             )
+
+    if ev.source in {"smartlead", "heyreach"}:
+        return IntentDecision(
+            verdict="yes",
+            intent="sales",
+            confidence=0.85,
+            reason="Positive outreach reply",
+            stage=STAGE["initial_interest"],
+        )
 
     if any(h in blob for h in DAY_JOB_HINTS) and not deal_holder:
         return IntentDecision(
@@ -409,12 +418,12 @@ def apply_deal_holder_veto(ev: Engagement, decision: IntentDecision | None = Non
         )
     else:
         rewritten = IntentDecision(
-            verdict="yes",
+            verdict="review",
             intent="sales",
             confidence=max(0.8, min(decision.confidence, 0.9)),
-            reason="Open SalesGlider deal — stay updatable, not day-job/hire/recruiter",
-            stage=decision.stage,
-            amount=decision.amount,
+            reason="Open SalesGlider deal — notes only, no stage move from this veto",
+            stage="",
+            amount="",
             via=decision.via,
         )
     ev._intent_decision = rewritten

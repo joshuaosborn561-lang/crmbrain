@@ -6,13 +6,22 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from crmbrain.config import (
+    FREE_MAIL_DOMAINS,
     JOSH_DOMAINS,
     JOSH_EMAILS,
+    NO_SHOW_HINT,
+    RENEWAL_PIPELINE,
+    RENEWAL_STAGE,
     STAGE,
     Settings,
+    canonicalize_stage,
     has_not_deal_note,
+    is_archived_hs_row,
     is_client_context,
+    is_closed_won_client_domain,
+    is_deleted_stage,
     is_excluded_contact,
+    is_non_deal_person,
     is_zoom_room_address,
     now_utc,
 )
@@ -28,30 +37,16 @@ from crmbrain.names import (
     prefer_deal_name,
 )
 
-# Sources that may CREATE a HubSpot contact (meeting booked or held).
-HUBSPOT_CREATE_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
-# These never open a deal and never create a contact. Ticker is fine.
-NEVER_OPEN_DEAL_SOURCES = frozenset({"smartlead", "heyreach", "rvm", "gmail_person"})
+# Sources that may CREATE a HubSpot contact.
+# Smartlead/HeyReach/Allo positive replies open Initial Interest (Oct 2026 pipeline).
+HUBSPOT_CREATE_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo", "smartlead", "heyreach"})
+# These never open a new-business deal and never create a contact.
+NEVER_OPEN_DEAL_SOURCES = frozenset({"rvm", "gmail_person"})
+INITIAL_INTEREST_SOURCES = frozenset({"smartlead", "heyreach", "allo"})
 TICKER_WITHOUT_HUBSPOT = frozenset({"smartlead", "heyreach", "rvm"})
 MEETING_CRM_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
 NO_SHOW_GRACE = timedelta(hours=2)
 HELD_MATCH_WINDOW = timedelta(hours=24)
-FREE_MAIL_DOMAINS = frozenset(
-    {
-        "gmail.com",
-        "googlemail.com",
-        "yahoo.com",
-        "outlook.com",
-        "hotmail.com",
-        "live.com",
-        "icloud.com",
-        "me.com",
-        "aol.com",
-        "proton.me",
-        "protonmail.com",
-        "msn.com",
-    }
-)
 JOSH_NAME_KEYS = frozenset({"joshua osborn", "josh osborn", "joshua", "josh"})
 _NOTETAKER_DOMAINS = frozenset(
     {"fireflies.ai", "otter.ai", "fathom.video", "read.ai", "krisp.ai", "tldv.io"}
@@ -98,35 +93,65 @@ BUSINESS_HINTS = (
     "roi",
 )
 
-# Higher = more advanced open pipeline. Replied/Nurture are weak.
+# Sentinel from no_show_write_stage: increment no_show_count, leave dealstage.
+INCREMENT_NO_SHOW = "increment_no_show_count"
+
+# Higher = more advanced open pipeline. Nurture is closed (lost-type).
+# proposal_sent and needs_stakeholder_approval are peers (rank 5).
 STAGE_RANK = {
     STAGE["closed_lost"]: 0,
-    STAGE["replied"]: 1,
     STAGE["nurture"]: 1,
-    STAGE["no_show"]: 2,
-    STAGE["discovery_scheduled"]: 3,
-    STAGE["discovery_completed"]: 4,
+    STAGE["initial_interest"]: 2,
+    STAGE["meeting_booked"]: 3,
+    STAGE["discovery_held"]: 4,
     STAGE["proposal_sent"]: 5,
-    STAGE["signed"]: 6,
-    STAGE["paid"]: 7,
+    STAGE["needs_stakeholder_approval"]: 5,
+    STAGE["contract_signed_unpaid"]: 6,
+    STAGE["poc"]: 7,
+    STAGE["closed_won"]: 8,
 }
-BACK_STAGES = {STAGE["nurture"], STAGE["no_show"], STAGE["closed_lost"]}
-WEAK_STAGES = {STAGE["replied"], STAGE["nurture"]}
-MONEY_STAGES = {STAGE["signed"], STAGE["paid"], STAGE["proposal_sent"]}
-MEETING_STAGES = {
-    STAGE["discovery_scheduled"],
-    STAGE["discovery_completed"],
+BACK_STAGES = {STAGE["nurture"], STAGE["closed_lost"]}
+WEAK_STAGES = {STAGE["initial_interest"], STAGE["nurture"]}
+MONEY_STAGES = {
     STAGE["proposal_sent"],
-    STAGE["signed"],
-    STAGE["paid"],
+    STAGE["needs_stakeholder_approval"],
+    STAGE["contract_signed_unpaid"],
+    STAGE["poc"],
+    STAGE["closed_won"],
+}
+MEETING_STAGES = {
+    STAGE["meeting_booked"],
+    STAGE["discovery_held"],
+    STAGE["proposal_sent"],
+    STAGE["needs_stakeholder_approval"],
+    STAGE["contract_signed_unpaid"],
+    STAGE["poc"],
+    STAGE["closed_won"],
 }
 PRE_SALE_STAGES = {
-    STAGE["replied"],
-    STAGE["discovery_scheduled"],
-    STAGE["discovery_completed"],
+    STAGE["initial_interest"],
+    STAGE["meeting_booked"],
+    STAGE["discovery_held"],
 }
-CLOSED_WON_STAGES = {STAGE["signed"], STAGE["paid"]}
+CLOSED_WON_STAGES = {STAGE["closed_won"]}
+LATERAL_STAGES = {STAGE["proposal_sent"], STAGE["needs_stakeholder_approval"]}
+# Never regress across these without explicit newer negative evidence.
+PROTECTED_LATE_STAGES = {
+    STAGE["needs_stakeholder_approval"],
+    STAGE["poc"],
+    STAGE["contract_signed_unpaid"],
+    STAGE["closed_won"],
+}
+_NEWER_NEGATIVE_RE = re.compile(
+    r"\b(lost|not moving forward|going with (?:someone|another)|rejected|"
+    r"kill the deal|deal is dead|passed on|no longer interested|"
+    r"re-?quot(?:e|ed))\b",
+    re.I,
+)
+CLOSED_STAGES = {STAGE["closed_won"], STAGE["closed_lost"], STAGE["nurture"]}
 DEFAULT_PIPELINE = "default"
+RENEWED_STAGES = {RENEWAL_STAGE["renewed"]}
+CHURNED_STAGES = {RENEWAL_STAGE["churned"]}
 COMMERCE_AMOUNT_PROPS = ("hs_mrr", "hs_arr", "hs_acv", "hs_tcv")
 COMMERCE_DEALTYPES = {"subscription", "recurring", "commerce"}
 
@@ -230,9 +255,16 @@ def call_supports_proposal_sent(ev: Engagement, facts: dict | None = None) -> bo
 
 
 def requires_josh_meeting_to_open_deal(ev: Engagement) -> bool:
-    """HeyReach / client-campaign prospects need a held or scheduled meeting with Josh."""
+    """Client-campaign leftovers need a held or scheduled meeting with Josh.
+
+    Smartlead / HeyReach / Allo positives open Initial Interest without a meeting.
+    """
     extra = ev.extra or {}
-    if ev.source in NEVER_OPEN_DEAL_SOURCES or extra.get("client_campaign") or extra.get("heyreach"):
+    if extra.get("client_campaign"):
+        return not (is_meeting_held(ev) or is_meeting_scheduled(ev))
+    if ev.source in INITIAL_INTEREST_SOURCES:
+        return False
+    if ev.source in NEVER_OPEN_DEAL_SOURCES:
         return not (is_meeting_held(ev) or is_meeting_scheduled(ev))
     return False
 
@@ -243,11 +275,9 @@ def is_salesglider_intro(ev: Engagement) -> bool:
 
 
 def personal_allowed_for_sales_intro(ev: Engagement) -> bool:
-    """Jeremy Ciotola is personal except an explicit SalesGlider Intro meeting."""
-    name = (ev.display_name() or ev.name or "").lower()
-    if "jeremy" not in name and "ciotola" not in name:
-        return False
-    return is_salesglider_intro(ev) and ev.source in {"calendly", "fireflies", "gmail"}
+    """Hard exclude. Jeremy Ciotola is personal and never opens a deal or card."""
+    del ev
+    return False
 
 
 def is_discovery_meeting(ev: Engagement) -> bool:
@@ -348,7 +378,12 @@ def is_new_completed_paperwork(ev: Engagement) -> bool:
     if ev.source != "gmail":
         return False
     stage = ev.stage_hint or extra.get("stage") or ""
-    if stage not in {STAGE["signed"], "signed", "closedwon"}:
+    if stage not in {
+        STAGE["signed"],
+        STAGE["contract_signed_unpaid"],
+        "signed",
+        "4391699184",
+    }:
         return False
     return bool(extra.get("document_id") or extra.get("document_name") or extra.get("completed_doc"))
 
@@ -357,7 +392,7 @@ def is_payment_event(ev: Engagement) -> bool:
     extra = ev.extra or {}
     if extra.get("payment") or extra.get("amount_source") == "payment":
         return True
-    return ev.stage_hint == STAGE["paid"]
+    return ev.stage_hint in {STAGE["paid"], STAGE["closed_won"], "closedwon", "paid"}
 
 
 def closed_won_notes_only(
@@ -482,7 +517,13 @@ def is_meeting_held(ev: Engagement) -> bool:
 def is_meeting_scheduled(ev: Engagement) -> bool:
     if ev.source == "calendly":
         return True
-    if ev.stage_hint in {STAGE["discovery_scheduled"], "discovery_scheduled", "qualifiedtobuy"}:
+    if ev.stage_hint in {
+        STAGE["discovery_scheduled"],
+        STAGE["meeting_booked"],
+        "discovery_scheduled",
+        "meeting_booked",
+        "qualifiedtobuy",
+    }:
         return True
     return False
 
@@ -495,7 +536,9 @@ def may_create_hubspot_contact(ev: Engagement) -> bool:
     if ev.source == "cube_acr":
         return is_cube_business_discovery(ev)
     if ev.source == "allo":
-        return is_allo_discovery(ev)
+        return True
+    if ev.source in {"smartlead", "heyreach"}:
+        return True
     return False
 
 
@@ -525,20 +568,73 @@ def should_enroll_ticker_without_hubspot(ev: Engagement) -> bool:
 def is_explicit_back_signal(stage: str, ev: Engagement) -> bool:
     if stage not in BACK_STAGES:
         return False
-    if is_meeting_held(ev) and stage == STAGE["no_show"]:
+    if is_meeting_held(ev) and stage in {NO_SHOW_HINT, "no_show"}:
         return False
     if ev.source in NEVER_OPEN_DEAL_SOURCES and not (ev.stage_hint or ""):
         return False
     return True
 
 
-def should_move_stage(current: str, target: str, *, back_signal: bool = False) -> bool:
-    """Advance on stronger evidence. Never regress a held-meeting deal to Nurture or No Show."""
+def is_protected_regression(current: str, target: str) -> bool:
+    """NSA / POC / Contract / Closed Won must not move backward without newer negative evidence."""
+    current = canonicalize_stage(current)
+    target = canonicalize_stage(target)
+    if not current or not target or current == target:
+        return False
+    if current == STAGE["needs_stakeholder_approval"] and target == STAGE["proposal_sent"]:
+        return True
+    if current not in PROTECTED_LATE_STAGES:
+        return False
+    return STAGE_RANK.get(target, 0) < STAGE_RANK.get(current, 0)
+
+
+def is_newer_negative_evidence(ev: Engagement, deal: dict | None = None) -> bool:
+    """Lost / re-quote after rejection, and only when the event is newer than the last stage edit."""
+    hint = str(ev.stage_hint or "").strip().lower()
+    blob = f"{ev.summary or ''} {ev.transcript or ''} {ev.raw_subject or ''} {hint}"
+    negative = hint in {"lost", "closed_lost", STAGE["closed_lost"]} or bool(
+        _NEWER_NEGATIVE_RE.search(blob)
+    )
+    if not negative:
+        return False
+    if not deal or not ev.occurred_at:
+        return True
+    props = deal.get("properties") or {}
+    last = last_manual_modification(deal) or _parse_hs_datetime(props.get("hs_lastmodifieddate"))
+    history = deal.get("propertiesWithHistory") or {}
+    for row in history.get("dealstage") or []:
+        if not isinstance(row, dict):
+            continue
+        ts = _parse_hs_datetime(row.get("timestamp"))
+        if ts and (last is None or ts > last):
+            last = ts
+    occurred = _aware(ev.occurred_at)
+    if last and occurred and occurred <= last:
+        return False
+    return True
+
+
+def should_move_stage(
+    current: str,
+    target: str,
+    *,
+    back_signal: bool = False,
+    newer_negative: bool = False,
+) -> bool:
+    """Advance on stronger evidence. Never regress protected late stages from older re-extraction."""
     if not target or current == target:
         return False
-    held_floor = STAGE_RANK[STAGE["discovery_completed"]]
-    if target in {STAGE["nurture"], STAGE["no_show"]} and STAGE_RANK.get(current, 0) >= held_floor:
+    current = canonicalize_stage(current)
+    target = canonicalize_stage(target)
+    held_floor = STAGE_RANK[STAGE["discovery_held"]]
+    if target == STAGE["nurture"] and STAGE_RANK.get(current, 0) >= held_floor:
         return False
+    if is_protected_regression(current, target) and not newer_negative:
+        return False
+    if current == STAGE["proposal_sent"] and target == STAGE["needs_stakeholder_approval"]:
+        return True
+    if current in LATERAL_STAGES and target in LATERAL_STAGES and current != target:
+        return bool(newer_negative)
     if target in BACK_STAGES and back_signal:
         return True
     if target in WEAK_STAGES and not back_signal:
@@ -569,6 +665,31 @@ def _parse_hs_datetime(value: object) -> datetime | None:
         return datetime.fromtimestamp(n, tz=timezone.utc)
     except (OSError, OverflowError, ValueError):
         return None
+
+
+def deal_entered_stage_at(deal: dict | None, stage: str) -> datetime | None:
+    """Latest timestamp when this deal's dealstage became `stage`."""
+    if not deal or not stage:
+        return None
+    want = canonicalize_stage(stage) or str(stage).strip()
+    latest: datetime | None = None
+    history = deal.get("propertiesWithHistory") or {}
+    for row in history.get("dealstage") or []:
+        if not isinstance(row, dict):
+            continue
+        value = canonicalize_stage(str(row.get("value") or "")) or str(row.get("value") or "")
+        if value != want:
+            continue
+        ts = _parse_hs_datetime(row.get("timestamp"))
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    if latest:
+        return latest
+    props = deal.get("properties") or {}
+    current = canonicalize_stage(props.get("dealstage") or "") or str(props.get("dealstage") or "")
+    if current == want:
+        return _parse_hs_datetime(props.get("hs_v2_date_entered_current_stage"))
+    return None
 
 
 def last_manual_modification(deal: dict | None) -> datetime | None:
@@ -790,6 +911,54 @@ def may_mutate_existing_deal(
     return True
 
 
+def exclude_reason_for_nurture_or_deal(
+    *,
+    name: str = "",
+    email: str = "",
+    company: str = "",
+    phone: str = "",
+    title: str = "",
+    notes: str = "",
+    contact: dict | None = None,
+    deals: list[dict] | None = None,
+    company_deals: list[dict] | None = None,
+    extra: dict | None = None,
+) -> str:
+    """Empty if allowed. Else a skip reason shared by nurture cards and deal sync."""
+    extra = extra or {}
+    if (
+        is_archived_hs_row(contact)
+        or extra.get("archived")
+        or extra.get("contact_archived")
+        or extra.get("deal_archived")
+    ):
+        return "archived"
+    for deal in list(deals or []) + list(company_deals or []):
+        if is_archived_hs_row(deal):
+            return "archived"
+    if is_non_deal_person(
+        name=name, email=email, company=company, phone=phone, title=title, notes=notes
+    ):
+        return "non_deal"
+    extra_domains = extra.get("closed_won_domains") or extra.get("won_domains") or set()
+    if isinstance(extra_domains, str):
+        extra_domains = {extra_domains}
+    if is_closed_won_client_domain(email=email, extra_domains=set(extra_domains)):
+        return "closed_won"
+    if person_or_company_closed_won(deals, company_deals, extra):
+        return "closed_won"
+    from crmbrain.renewals import has_existing_client_deal, is_renewal_deal
+
+    if extra.get("has_renewal_deal") or extra.get("renewal_pipeline"):
+        return "client"
+    if has_existing_client_deal(deals, company_deals):
+        return "client"
+    for deal in list(deals or []) + list(company_deals or []):
+        if is_renewal_deal(deal):
+            return "client"
+    return ""
+
+
 def may_open_new_deal(
     ev: Engagement,
     contact: dict | None,
@@ -804,6 +973,19 @@ def may_open_new_deal(
         return False, "non_person"
     if (ev.extra or {}).get("name_ambiguous"):
         return False, "ambiguous_name"
+    blocked = exclude_reason_for_nurture_or_deal(
+        name=ev.display_name() or ev.name or f"{ev.first_name} {ev.last_name}".strip(),
+        email=ev.email,
+        company=ev.company,
+        phone=ev.phone,
+        title=ev.title,
+        contact=contact,
+        deals=deals,
+        company_deals=company_deals,
+        extra=ev.extra or {},
+    )
+    if blocked:
+        return False, "not_deal" if blocked == "non_deal" else blocked
     if is_excluded_contact(ev, contact):
         return False, "not_deal"
     if row_has_not_deal_note(contact):
@@ -814,7 +996,11 @@ def may_open_new_deal(
         return False, "locked"
     if event_predates_freeze(ev, settings) and contact_has_any_deal(deals):
         return False, "manual_freeze"
-    if not contact and not (is_meeting_held(ev) or is_meeting_scheduled(ev)):
+    if (
+        not contact
+        and ev.source not in INITIAL_INTEREST_SOURCES
+        and not (is_meeting_held(ev) or is_meeting_scheduled(ev))
+    ):
         return False, "no_contact_no_meeting"
     if (
         is_client_context_ev(ev)
@@ -825,6 +1011,8 @@ def may_open_new_deal(
         return False, "client"
     if ev.source in NEVER_OPEN_DEAL_SOURCES:
         return False, "cold_source"
+    if live_open_deals(deals):
+        return False, "existing_open_deal"
     return True, ""
 
 
@@ -842,21 +1030,55 @@ def choose_deal_action(
         return None
     if requires_josh_meeting_to_open_deal(ev) and not current:
         return None
-    held = is_meeting_held(ev)
-    target = requested
-    if held and target in {STAGE["nurture"], STAGE["no_show"]}:
+    held = is_meeting_held(ev) or bool(
+        (ev.extra or {}).get("held_meeting") or (ev.extra or {}).get("meeting_held")
+    )
+    current = canonicalize_stage(current or "")
+    target = canonicalize_stage(requested)
+    # Existing deals cannot move to Discovery Held without a held meeting.
+    # Create-path rewrites (HeyReach → Initial Interest) still run below.
+    if current and target == STAGE["discovery_held"] and not held:
+        return None
+    if (
+        requested == INCREMENT_NO_SHOW
+        or is_deleted_stage(requested)
+        or requested in {NO_SHOW_HINT, "no_show"}
+        or target == NO_SHOW_HINT
+    ):
+        if held:
+            target = STAGE["discovery_held"]
+        else:
+            return None
+    if held and target == STAGE["nurture"]:
         if current not in {STAGE["nurture"], STAGE["closed_lost"]}:
-            target = STAGE["discovery_completed"]
-    if current == STAGE["replied"] and held:
-        target = STAGE["discovery_completed"]
+            target = STAGE["discovery_held"]
+    if current == STAGE["initial_interest"] and held:
+        target = STAGE["discovery_held"]
     if current in {STAGE["nurture"], STAGE["closed_lost"]}:
+        new_proposal = bool(
+            target == STAGE["proposal_sent"]
+            and (
+                call_supports_proposal_sent(ev)
+                or (ev.extra or {}).get("josh_sent_proposal")
+                or has_paperwork_evidence(ev)
+            )
+        )
+        new_meeting = held or (is_meeting_scheduled(ev) and target == STAGE["meeting_booked"])
+        if current == STAGE["nurture"] and target not in BACK_STAGES:
+            if not (new_meeting or new_proposal):
+                return None
+            entered = deal_entered_stage_at(deal, STAGE["nurture"])
+            occurred = _aware(ev.occurred_at)
+            if entered and occurred and occurred <= entered:
+                return None
         call_forward = ev.source in {"fireflies", "cube_acr"} and target in {
-            STAGE["discovery_completed"],
-            STAGE["discovery_scheduled"],
+            STAGE["discovery_held"],
+            STAGE["meeting_booked"],
             STAGE["proposal_sent"],
+            STAGE["needs_stakeholder_approval"],
         }
-        if target == STAGE["discovery_completed"] or call_forward:
-            if target == STAGE["discovery_completed"] and not held:
+        if target == STAGE["discovery_held"] or call_forward:
+            if target == STAGE["discovery_held"] and not held:
                 return None
             if call_forward and not held:
                 return None
@@ -869,59 +1091,126 @@ def choose_deal_action(
     if not current:
         if ev.source in NEVER_OPEN_DEAL_SOURCES:
             return None
-        if target == STAGE["replied"]:
-            return None
+        if ev.source in {"smartlead", "heyreach"}:
+            return STAGE["initial_interest"]
+        if ev.source == "allo" and not is_allo_discovery(ev):
+            return STAGE["initial_interest"]
         return target
     if current == target:
         return None
-    if current == STAGE["paid"] and target != STAGE["paid"]:
+    if current == STAGE["closed_won"]:
         return None
-    if current == STAGE["signed"] and target not in {STAGE["signed"], STAGE["paid"]}:
-        return None
-    if current == STAGE["proposal_sent"] and target in {
-        STAGE["discovery_completed"],
-        STAGE["discovery_scheduled"],
+    if current == STAGE["contract_signed_unpaid"] and target not in {
+        STAGE["contract_signed_unpaid"],
+        STAGE["poc"],
+        STAGE["closed_won"],
     }:
         return None
-    back = is_explicit_back_signal(requested, ev) or is_explicit_back_signal(target, ev)
-    if not should_move_stage(current, target, back_signal=back):
+    if current == STAGE["proposal_sent"] and target in {
+        STAGE["discovery_held"],
+        STAGE["meeting_booked"],
+    }:
+        return None
+    if target == STAGE["closed_lost"]:
+        return None
+    newer_neg = is_newer_negative_evidence(ev, deal)
+    back = (
+        is_explicit_back_signal(requested, ev)
+        or is_explicit_back_signal(target, ev)
+        or newer_neg
+    )
+    if not should_move_stage(current, target, back_signal=back, newer_negative=newer_neg):
         return None
     return target
 
 
 def resolve_stage(ev: Engagement, facts: dict | None = None) -> str:
-    """Only set a stage when evidence warrants it. No HeyReach/RVM Replied. No Smartlead Nurture."""
+    """Only set a stage when evidence warrants it. Closed Lost is review-only."""
     facts = facts or {}
     if is_client_context(ev.display_name(), ev.company, ev.raw_subject) and is_closed_won_client(ev):
         return ""
     hint = facts.get("stage_hint") or ev.stage_hint
-    stage = stage_id(hint) if hint else ""
+    if hint in {NO_SHOW_HINT, "no_show"} or is_deleted_stage(str(hint or "")):
+        return STAGE["discovery_held"] if is_meeting_held(ev) else ""
+    stage = canonicalize_stage(stage_id(hint) if hint else "")
+    if is_deleted_stage(stage) or stage == NO_SHOW_HINT:
+        return STAGE["discovery_held"] if is_meeting_held(ev) else ""
     if ev.source == "fireflies" and is_silent_meeting(ev):
         return ""
     if ev.source != "gmail" and stage in MONEY_STAGES:
         if stage == STAGE["proposal_sent"] and call_supports_proposal_sent(ev, facts):
             pass
+        elif stage == STAGE["needs_stakeholder_approval"] and needs_stakeholder_approval(ev, facts):
+            pass
         else:
             stage = ""
-    if stage in {STAGE["nurture"], STAGE["no_show"]} and is_meeting_held(ev):
-        return STAGE["discovery_completed"]
+    if stage == STAGE["nurture"] and is_meeting_held(ev):
+        return STAGE["discovery_held"]
+    if stage == STAGE["closed_lost"]:
+        return ""
+    if stage == STAGE["nurture"] and not nurture_reason_of(ev, facts):
+        return ""
     if stage:
-        if ev.source in NEVER_OPEN_DEAL_SOURCES and stage in {STAGE["replied"], STAGE["nurture"]}:
+        if ev.source in NEVER_OPEN_DEAL_SOURCES:
             return ""
         return stage
+    if ev.source in {"smartlead", "heyreach"}:
+        return STAGE["initial_interest"]
     if ev.source == "calendly":
-        return STAGE["discovery_scheduled"]
+        return STAGE["meeting_booked"]
     if ev.source == "fireflies":
         if is_silent_meeting(ev):
             return ""
+        if needs_stakeholder_approval(ev, facts):
+            return STAGE["needs_stakeholder_approval"]
         if call_supports_proposal_sent(ev, facts):
             return STAGE["proposal_sent"]
-        return STAGE["discovery_completed"]
+        return STAGE["discovery_held"]
     if ev.source == "cube_acr" and is_cube_business_discovery(ev):
-        return STAGE["discovery_completed"]
+        return STAGE["discovery_held"]
     if ev.source == "allo" and is_allo_discovery(ev):
-        return STAGE["discovery_completed"]
+        return STAGE["discovery_held"]
+    if ev.source == "allo":
+        return STAGE["initial_interest"]
     return ""
+
+
+STAKEHOLDER_HINTS = (
+    "present to partners",
+    "present to the board",
+    "review with my partner",
+    "needs leadership approval",
+    "needs partner approval",
+    "silent partner",
+    "board approval",
+    "procurement",
+    "needs stakeholder",
+    "run it by my partner",
+    "get partner sign-off",
+)
+
+
+def nurture_reason_of(ev: Engagement, facts: dict | None = None) -> str:
+    facts = facts or {}
+    return str(facts.get("nurture_reason") or (ev.extra or {}).get("nurture_reason") or "").strip()
+
+
+def unclear_nurture(ev: Engagement, facts: dict | None = None) -> bool:
+    """True when something asked for Nurture but there is no concrete fit reason."""
+    facts = facts or {}
+    hint = facts.get("stage_hint") or ev.stage_hint
+    stage = canonicalize_stage(stage_id(hint) if hint else "")
+    if stage != STAGE["nurture"] and str(hint or "").strip().lower() not in {"nurture", STAGE["nurture"]}:
+        return False
+    return not nurture_reason_of(ev, facts)
+
+
+def needs_stakeholder_approval(ev: Engagement, facts: dict | None = None) -> bool:
+    facts = facts or {}
+    if str(facts.get("stage_hint") or "") in {"needs_stakeholder_approval", STAGE["needs_stakeholder_approval"]}:
+        return True
+    blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]} {(ev.summary or '')}".lower()
+    return any(h in blob for h in STAKEHOLDER_HINTS)
 
 
 def _norm_email(email: str | None) -> str:
@@ -1214,7 +1503,7 @@ def matching_held_event(
 
 def has_closed_won_deal(deals: list[dict] | None) -> bool:
     for deal in deals or []:
-        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        stage = canonicalize_stage((deal.get("properties") or {}).get("dealstage") or "")
         if stage in CLOSED_WON_STAGES:
             return True
     return False
@@ -1240,8 +1529,8 @@ def person_or_company_closed_won(
 
 
 def blocks_no_show_create(deals: list[dict] | None, stage: str) -> bool:
-    """Do not open a No Show deal when the contact already has Paid/Signed."""
-    return stage == STAGE["no_show"] and has_closed_won_deal(deals)
+    """Do not open a deal from a no-show signal. No-shows increment a counter."""
+    return stage in {NO_SHOW_HINT, "no_show"} or is_deleted_stage(stage)
 
 
 def no_show_write_stage(
@@ -1277,7 +1566,7 @@ def no_show_write_stage(
         return ""
     if scheduled_at and not scheduled_past_grace(scheduled_at, now):
         return ""
-    return STAGE["no_show"]
+    return INCREMENT_NO_SHOW
 
 
 _DEAL_NAME_NOISE = r"(replied|appointment scheduled|discovery scheduled)"
@@ -1363,7 +1652,13 @@ def live_open_deals(deals: list[dict] | None) -> list[dict]:
     live = []
     for deal in deals or []:
         stage = (deal.get("properties") or {}).get("dealstage") or ""
-        if stage not in {STAGE["closed_lost"], STAGE["paid"]}:
+        stage = canonicalize_stage(stage)
+        # Nurture is closed/lost-type for forecast, but we attach to it so a
+        # later call reopens the same deal instead of creating a duplicate.
+        if stage == STAGE["nurture"]:
+            live.append(deal)
+            continue
+        if stage and stage not in CLOSED_STAGES and stage not in RENEWED_STAGES | CHURNED_STAGES:
             live.append(deal)
     return live
 
@@ -1371,7 +1666,7 @@ def live_open_deals(deals: list[dict] | None) -> list[dict]:
 def closed_won_deals(deals: list[dict] | None) -> list[dict]:
     won = []
     for deal in deals or []:
-        stage = (deal.get("properties") or {}).get("dealstage") or ""
+        stage = canonicalize_stage((deal.get("properties") or {}).get("dealstage") or "")
         if stage in CLOSED_WON_STAGES:
             won.append(deal)
     return won

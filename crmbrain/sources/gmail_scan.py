@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from crmbrain.config import (
     CDT,
     JOSH_EMAILS,
+    NO_SHOW_HINT,
     STAGE,
     Settings,
     gmail_after_clause,
@@ -104,19 +105,35 @@ def _stage_from_mail(subject: str, sender: str, snippet: str, body: str = "") ->
     from crmbrain.documents import stage_from_signature_mail
 
     blob = f"{subject} {sender} {snippet} {body}".lower()
-    if "you received a payment" in blob or "payment received" in blob:
-        return STAGE["paid"]
+    if (
+        "you received a payment" in blob
+        or "payment received" in blob
+        or "your invoice has been paid" in blob
+        or "you received a $" in blob
+    ):
+        return STAGE["closed_won"]
     if "pandadoc" in blob or "docusign" in blob:
         stage, _amount, _name = stage_from_signature_mail(subject, sender, snippet, body)
         return stage
+    if any(
+        h in blob
+        for h in (
+            "invoice sent",
+            "sent you an invoice",
+            "sent an invoice",
+            "payment link",
+            "sent a payment link",
+        )
+    ):
+        return STAGE["contract_signed_unpaid"]
     if any(h in blob for h in ("calendly", "calendar-notification", "zoom.us")) and any(
         w in blob for w in ("canceled", "cancelled", "no-show", "no show")
     ):
-        return STAGE["no_show"]
+        return NO_SHOW_HINT
     if any(h in blob for h in ("calendly", "calendar-notification", "zoom.us")) and any(
         w in blob for w in ("new event", "accepted", "confirmed", "invitee", "invitation", "scheduled")
     ):
-        return STAGE["discovery_scheduled"]
+        return STAGE["meeting_booked"]
     return ""
 
 
@@ -306,7 +323,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 (not contact)
                 and "calendly" in f"{sender} {subject}".lower()
                 and is_josh_meeting(subject, cal.get("event_type", ""))
-                and stage in {STAGE["discovery_scheduled"], STAGE["no_show"]}
+                and stage in {STAGE["meeting_booked"], STAGE["discovery_scheduled"], NO_SHOW_HINT}
             )
             if classified is not None and not contact and "calendly" not in f"{sender} {subject}".lower():
                 gcal_create = may_create_contact_from_event(classified)
@@ -384,7 +401,9 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
             amount_source = ""
             extra_amount = sig_amount
             extra_terms: dict = {}
-            write_stage = stage or sig_stage or (STAGE["discovery_scheduled"] if gcal_create else "")
+            write_stage = stage or sig_stage or (STAGE["meeting_booked"] if gcal_create else "")
+            if write_stage == NO_SHOW_HINT:
+                write_stage = NO_SHOW_HINT
             if payment_mail:
                 from crmbrain.documents import payment_amount_from_text
 
@@ -680,6 +699,10 @@ def scan_people(
             try:
                 msg = gmail.get(mid)
             except Exception as exc:
+                from crmbrain.gmail_client import is_gmail_rate_limit_exc
+
+                if is_gmail_rate_limit_exc(exc):
+                    raise
                 if report is not None:
                     report.skipped.append(f"gmail_person:{mid} {exc}")
                     report.warnings.append(f"gmail_person skipped {mid}")

@@ -85,7 +85,7 @@ Every gate returns a `skip_reason`. A gate either stops the row (hard or soft pe
 | Gate | Check | Action |
 |---|---|---|
 | G1 emailed_recently | Josh emailed this address in the last 60 days. Check **Gmail Sent** (`in:sent to:{email} newer_than:60d`) **or** Smartlead message-history has a SENT message within 60d in any client-345263 campaign | soft stop `emailed_recently`, `next_fire_at = last_sent + 90d` (stays active, snoozed) |
-| G2 client / non-deal | `is_non_deal_person()` (NON_DEAL_EMAILS, seeded names), `CLIENT_HINTS` match on company/name, source campaign tagged `client_campaign` (e.g. "SalesGlider Acquire MSPOwner Infonaligy", "Insight ... Sports"), candidate-recruiting campaigns ("CANDIDATES"), or any associated deal in Signed (`closedwon`) / Paid (`3482933986`) | hard stop `client` / `non_deal` |
+| G2 client / non-deal | `is_non_deal_person()` (NON_DEAL_EMAILS, seeded names), `CLIENT_HINTS` match on company/name, source campaign tagged `client_campaign` (e.g. "SalesGlider Acquire MSPOwner Infonaligy", "Insight ... Sports"), candidate-recruiting campaigns ("CANDIDATES"), or any associated deal in Closed Won (`closedwon`) / Contract Sent (`4391699184`) | hard stop `client` / `non_deal` |
 | G3 deal deleted/archived | Row has `hs_deal_id` and HubSpot returns 404 or `archived=true` | soft stop `deal_archived` (re-enrolls on new signal) |
 | G4 booked meeting | Contact has a future meeting (`contact_has_future_meetings`), or an open deal in Discovery Scheduled (`qualifiedtobuy`), or a non-stalled Discovery Completed/Proposal Sent (activity < 30d). Reuse #19's booked/held/open-deal helper | soft stop `booked` |
 | G5 no identity | `name` empty **and** `email` empty. These are legacy rows: PR #19 already blocks new nameless rows at enroll time | hard stop `no_identity` |
@@ -110,8 +110,8 @@ Order: G5, G2, G6, G3, G4, G1, then draft, then G7. The cheap local checks run b
    - Other verticals (staffing, msp, construction, plumbing, electrical, solar, financial_advisors) use the general version until Josh approves a figure.
    - General version: "$2M in pipeline last quarter, one client closed $100K in their first 3 months, averaging 14+ replies per month."
 3. **Soft CTA = meeting guarantee:** `We guarantee meetings, or we keep working until you hit them.` (`MEETING_GUARANTEE`).
-   - AirPods line: the live approved copy on `main` (ff31db9, `_cta_paragraph`) still includes "a pair of AirPods just for chatting 15 minutes". Keep it behind a constant `AIRPODS_OFFER_LIVE = True`.
-   - If Josh drops it in the dry-run review, flip the flag. No other code change is needed. Remove the "I can send a Loom" variant unless Josh confirms it.
+   - AirPods / tickets: Josh rule is no AirPods or tickets. `AIRPODS_OFFER_LIVE = False`. Do not append a gift offer.
+   - Remove the "I can send a Loom" variant unless Josh confirms it.
 4. Close: `Worth a look?` then a blank line, then `Josh Osborn`.
 5. Subject: industry subject (e.g. "Roofing?", "HVAC update"), else `{first}?`. Never "Quick update" for a named contact.
 
@@ -198,7 +198,7 @@ Estimate for the dry run (from the 2026-10-02 audit pulls):
 | T-23 | Draft industry | Roofing draft contains the roofing case study + MEETING_GUARANTEE, subject "Roofing?" |
 | T-24 | Draft general | Unknown industry draft contains "$2M", "$100K", "14+" and subject "{first}?" |
 | T-25 | Draft validator | Snippet containing "free 10K" / em dash: output has no POC phrase, no dashes ("..." instead); POC in model output → G7 reject |
-| T-26 | Draft shape | Body <= 110 words, ends "Josh Osborn", no "{" left, AirPods line present iff AIRPODS_OFFER_LIVE |
+| T-26 | Draft shape | Body <= 110 words, ends "Josh Osborn", no "{" left, no AirPods/gift line unless AIRPODS_OFFER_LIVE |
 | T-27 | Cadence spread | 12 past-due candidates → 5,5,2 across 3 consecutive weekdays, no weekend slots, oldest signal first |
 | T-28 | Cadence future | signal_at + 90d in the future keeps its date (rolled to weekday) |
 | T-29 | Empty means empty | Supabase returns [] → due_ticker returns [] even when local JSON has due rows |

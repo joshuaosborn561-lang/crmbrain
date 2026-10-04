@@ -21,12 +21,15 @@
    ],
    "STAGES": {
     "nurture": "3486952153",
-    "no_show": "3557889773",
     "discovery_scheduled": "qualifiedtobuy",
     "discovery_completed": "presentationscheduled",
+    "meeting_booked": "qualifiedtobuy",
+    "discovery_held": "presentationscheduled",
     "proposal_sent": "decisionmakerboughtin",
-    "signed": "closedwon",
-    "paid": "3482933986"
+    "signed": "4391699184",
+    "contract_signed_unpaid": "4391699184",
+    "paid": "closedwon",
+    "closed_won": "closedwon"
    },
    "SOFT_STOPS": [
     "booked",
@@ -510,7 +513,7 @@
       "name": "Paid Owner",
       "deals": [
        {
-        "dealstage": "3482933986"
+        "dealstage": "closedwon"
        }
       ]
      },
