@@ -994,13 +994,16 @@ def _sender_is_josh(sender: str) -> bool:
 
 
 def _message_meeting_at(msg: dict) -> datetime | None:
-    from crmbrain.sources.gmail_scan import parse_meeting_at
+    from crmbrain.sources.gmail_scan import parse_ics_dtstart, parse_meeting_at
 
     subject = str(msg.get("subject") or "")
-    body = str(msg.get("body") or msg.get("snippet") or "")
+    body = str(msg.get("body") or msg.get("snippet") or msg.get("ics") or "")
     stamp = parse_meeting_at(subject, body)
     if stamp:
         return stamp
+    ics = parse_ics_dtstart(str(msg.get("ics") or body))
+    if ics:
+        return ics
     return parse_signal_at(msg.get("meeting_at") or msg.get("held_at") or msg.get("date"))
 
 
@@ -1053,7 +1056,7 @@ def gmail_meeting_evidence(row: dict | None, *, now: datetime | None = None) -> 
         if _FOLLOWUP_INVITE_RE.search(blob):
             if stamp:
                 followup_at = stamp
-            if "accepted" in subject.lower() or msg.get("accepted"):
+            if "accepted" in subject.lower() or msg.get("accepted") or "invitation" in subject.lower():
                 followup_accepted = True
             elif followup_at and msg.get("accepted") is not False:
                 followup_accepted = True
@@ -1061,12 +1064,16 @@ def gmail_meeting_evidence(row: dict | None, *, now: datetime | None = None) -> 
             _DECK_OR_RECAP_RE.search(blob) or _MEETING_RECAP_RE.search(blob)
         ):
             has_deck = True
-        if _WEB_BOOKING_RE.search(blob) or (
-            "salesglider" in blob.lower()
-            and any(h in blob.lower() for h in ("new event", "invitee", "web booking", "confirmed"))
+        if stamp and (
+            _WEB_BOOKING_RE.search(blob)
+            or "salesglider" in blob.lower()
+            or "calendly" in blob.lower()
+            or any(h in subject.lower() for h in ("accepted:", "invitation:", "new event"))
         ):
-            if stamp:
+            if not _FOLLOWUP_INVITE_RE.search(blob):
                 booking_at = booking_at or stamp
+    if followup_at and followup_at <= now and has_deck:
+        followup_accepted = True
     met = bool(followup_at and followup_accepted and followup_at <= now and has_deck)
     booked = bool(booking_at or followup_at)
     source = "gmail_followup" if met or (followup_at and followup_accepted) else "gmail_booking" if booking_at else ""
@@ -1089,10 +1096,11 @@ def lookup_gmail_meeting_messages(gmail, *, email: str) -> list[dict]:
         return []
     query = (
         f"(from:{addr} OR to:{addr}) "
-        f'(SalesGlider OR Calendly OR "Growth Playbook" OR "meeting recap" OR "Web Booking" OR Followup)'
+        f'(SalesGlider OR Calendly OR "Growth Playbook" OR playbook OR "meeting recap" '
+        f'OR "Web Booking" OR Followup OR Follow-up OR "Accepted:" OR "Invitation:" OR "New Event")'
     )
     try:
-        stubs = search(query, max_results=12) or []
+        stubs = search(query, max_results=15) or []
     except Exception as exc:
         logger.warning("gmail meeting evidence search failed: %s", exc)
         return []
@@ -1105,28 +1113,95 @@ def lookup_gmail_meeting_messages(gmail, *, email: str) -> list[dict]:
         subject = str(stub.get("subject") or "")
         body = str(stub.get("body") or stub.get("snippet") or "")
         sender = str(stub.get("from") or stub.get("sender") or "")
+        ics = str(stub.get("ics") or "")
+        fetched = stub
         if callable(getter) and mid:
             try:
-                msg = getter(mid)
+                fetched = getter(mid)
             except Exception as exc:
                 logger.warning("gmail meeting evidence get %s failed: %s", mid, exc)
-                msg = stub
+                fetched = stub
             headers = {}
             if hasattr(gmail, "headers_map"):
                 try:
-                    headers = gmail.headers_map(msg) or {}
+                    headers = gmail.headers_map(fetched) or {}
                 except Exception:
                     headers = {}
             subject = subject or str(headers.get("subject") or "")
             sender = sender or str(headers.get("from") or "")
             if hasattr(gmail, "body_text"):
                 try:
-                    body = body or str(gmail.body_text(msg) or "")
+                    body = body or str(gmail.body_text(fetched) or "")
                 except Exception:
                     pass
-            body = body or str((msg or {}).get("snippet") or "")
+            body = body or str((fetched or {}).get("snippet") or "")
+            if hasattr(gmail, "calendar_parts"):
+                try:
+                    ics = ics or "\n".join(gmail.calendar_parts(fetched) or [])
+                except Exception:
+                    pass
+        if ics and ics not in body:
+            body = f"{body}\n{ics}".strip()
         if subject or body:
-            out.append({"id": mid, "subject": subject, "body": body, "from": sender})
+            out.append({"id": mid, "subject": subject, "body": body, "from": sender, "ics": ics})
+    return out
+
+
+def gmail_client_for_cards(settings: Settings | None, gmail=None):
+    """Use the passed Gmail client, or build one from settings for --sample-cards / live cards."""
+    if gmail is not None:
+        return gmail
+    if not settings or not getattr(settings, "gmail_refresh_token", ""):
+        return None
+    try:
+        from crmbrain.gmail_client import Gmail
+
+        return Gmail(settings)
+    except Exception as exc:
+        logger.warning("gmail client for nurture cards failed: %s", exc)
+        return None
+
+
+def apply_gmail_meeting_evidence(row: dict | None, gmail=None) -> dict:
+    """Search Gmail and stamp booking/held dates onto the card row."""
+    out = dict(row or {})
+    extra = dict(_row_extra(out))
+    email = str(out.get("email") or extra.get("email") or "")
+    messages = list(_iter_gmail_messages(out))
+    already_looked_up = "gmail_messages" in out or "gmail_messages" in extra
+    fetched = (
+        lookup_gmail_meeting_messages(gmail, email=email)
+        if gmail is not None and email and not already_looked_up
+        else []
+    )
+    if fetched:
+        messages = fetched + [m for m in messages if m not in fetched]
+    if messages:
+        out["gmail_messages"] = messages
+        extra["gmail_messages"] = messages
+    ev = gmail_meeting_evidence({**out, "extra": extra})
+    if ev.get("held_at"):
+        iso = ev["held_at"].isoformat()
+        extra["held_at"] = iso
+        extra["gmail_followup_at"] = iso
+        extra["met"] = True
+        extra["meeting_date_source"] = "gmail_followup"
+        out["held_at"] = iso
+        out["gmail_followup_at"] = iso
+        out["met"] = True
+        out["meeting_date_source"] = "gmail_followup"
+    elif ev.get("booking_at"):
+        iso = ev["booking_at"].isoformat()
+        extra["gmail_booking_at"] = iso
+        extra["booked"] = True
+        extra["meeting_date_source"] = extra.get("meeting_date_source") or ev.get("source") or "gmail_booking"
+        if not out.get("meeting_at"):
+            extra["meeting_at"] = iso
+            out["meeting_at"] = iso
+        out["gmail_booking_at"] = iso
+        out["booked"] = True
+        out["meeting_date_source"] = extra["meeting_date_source"]
+    out["extra"] = extra
     return out
 
 
@@ -2133,6 +2208,7 @@ def fire_due_rows(
             report.errors.append("ticker_supabase_unavailable")
         return []
     cards: list[dict] = []
+    gmail = gmail_client_for_cards(settings, gmail)
     posted, rolled = select_due_with_cap(due, now=now)
     for row in rolled:
         memory.bump_ticker(str(row.get("id") or row.get("email")), row["next_fire_at"], now.isoformat())
@@ -2156,6 +2232,7 @@ def fire_due_rows(
             report.ticker_skipped.append(f"{row.get('email') or row.get('name')} {reason}")
             continue
         row = attach_gmail_thread(row, gmail)
+        row = apply_gmail_meeting_evidence(row, gmail)
         row["reason"] = infer_nurture_reason(
             reason=str(row.get("reason") or ""),
             deal_stage=str(row.get("deal_stage") or ""),
@@ -2826,6 +2903,7 @@ def sample_hubspot_nurture_cards(
     from crmbrain.config import email_domain
 
     limit = max(1, int(limit or 10))
+    gmail = gmail_client_for_cards(settings, gmail)
     if hs is None:
         if not getattr(settings, "hubspot_token", ""):
             raise RuntimeError("missing_hubspot_token")

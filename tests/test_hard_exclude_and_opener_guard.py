@@ -957,17 +957,20 @@ def test_brian_donigan_source_includes_its_date():
 
 JO_GMAIL_MESSAGES = [
     {
+        "id": "m-jo-intro",
         "subject": "New Event: Jo Fried - SalesGlider Intro",
-        "body": "Event Type: SalesGlider Intro\nInvitee: Jo Fried\nFriday, March 27, 2026 at 10:00 AM",
+        "body": "Event Type: SalesGlider Intro\nInvitee: Jo Fried\nEvent Date/Time: 10:00am - Friday, March 27, 2026 (CDT)",
         "from": "noreply@calendly.com",
     },
     {
-        "subject": "Accepted: SalesGlider Followup",
-        "body": "Wednesday, April 1, 2026 at 10:00 AM",
+        "id": "m-jo-followup",
+        "subject": "Accepted: SalesGlider Followup @ Wed Apr 1, 2026 10am - 10:30am (CDT)",
+        "body": "When: Wednesday Apr 1, 2026 10:00am (Central Time - Chicago)",
         "from": "calendar-notification@google.com",
         "accepted": True,
     },
     {
+        "id": "m-jo-deck",
         "subject": "IntegriBuilt Growth Playbook",
         "body": "Deck from our call.",
         "from": "Joshua Osborn <joshua@salesglidergrowth.com>",
@@ -977,11 +980,44 @@ JO_GMAIL_MESSAGES = [
 
 JOSH_BROWN_GMAIL_MESSAGES = [
     {
+        "id": "m-jb-book",
         "subject": "New Event: Josh Brown - SalesGlider Web Booking",
-        "body": "Event Type: SalesGlider Web Booking\nInvitee: Josh Brown\nMonday, March 30, 2026 at 10:00 AM",
+        "body": "Event Type: SalesGlider Web Booking\nInvitee: Josh Brown\nEvent Date/Time: 10:00am - Monday, March 30, 2026 (CDT)",
         "from": "noreply@calendly.com",
     },
 ]
+
+BRIAN_GMAIL_MESSAGES = [
+    {
+        "id": "m-brian-book",
+        "subject": "Accepted: SalesGlider Intro @ Fri Sep 25, 2026 2:00pm - 2:30pm (CDT)",
+        "body": "When: Friday Sep 25, 2026 2:00pm (Central Time - Chicago)",
+        "from": "calendar-notification@google.com",
+        "accepted": True,
+    },
+]
+
+
+def test_parse_invite_when_from_gcal_and_calendly():
+    from crmbrain.sources.gmail_scan import parse_meeting_at
+
+    followup = parse_meeting_at(
+        "Accepted: SalesGlider Followup @ Wed Apr 1, 2026 10am - 10:30am (CDT)",
+        "When: Wednesday Apr 1, 2026 10:00am (Central Time - Chicago)",
+    )
+    assert followup is not None
+    assert followup.month == 4 and followup.day == 1
+    booking = parse_meeting_at(
+        "New Event: Josh Brown - SalesGlider Web Booking",
+        "Event Date/Time: 10:00am - Monday, March 30, 2026 (CDT)",
+    )
+    assert booking is not None
+    assert booking.month == 3 and booking.day == 30
+    brian = parse_meeting_at(
+        "Accepted: SalesGlider Intro @ Fri Sep 25, 2026 2:00pm - 2:30pm (CDT)", ""
+    )
+    assert brian is not None
+    assert brian.month == 9 and brian.day == 25
 
 
 def test_jo_fried_gmail_followup_is_held_apr_1():
@@ -1119,6 +1155,15 @@ class _JoJoshHS:
                         "createdate": "2026-09-03T12:00:00Z",
                     },
                 },
+                {
+                    "id": "d-brian",
+                    "properties": {
+                        "dealname": "Brian Donigan - Donigan",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-09-03T12:00:00Z",
+                    },
+                },
             ],
             "closedwon": [],
             "renewal": [],
@@ -1146,6 +1191,18 @@ class _JoJoshHS:
                     },
                 }
             ],
+            "d-brian": [
+                {
+                    "id": "c-brian",
+                    "properties": {
+                        "firstname": "Brian",
+                        "lastname": "Donigan",
+                        "email": "brian@donigan.test",
+                        "company": "Donigan",
+                        "crm_source": "fireflies",
+                    },
+                }
+            ],
         }
 
     def search_objects(self, object_name, filters, properties, max_results=400, page_limit=100):
@@ -1164,13 +1221,53 @@ class _JoJoshHS:
 
 
 class _MeetingGmail:
-    def search(self, query, max_results=12):
+    """Real Gmail list() shape: ids only. Bodies come from get()."""
+
+    def __init__(self, settings=None):
+        del settings
+        self._by_id = {
+            row["id"]: row
+            for row in JO_GMAIL_MESSAGES + JOSH_BROWN_GMAIL_MESSAGES + BRIAN_GMAIL_MESSAGES
+        }
+
+    def search(self, query, max_results=15):
         del max_results
         q = (query or "").lower()
         if "jo@integribuilt.test" in q:
-            return list(JO_GMAIL_MESSAGES)
+            return [{"id": row["id"]} for row in JO_GMAIL_MESSAGES]
         if "josh@ampmediasales.test" in q:
-            return list(JOSH_BROWN_GMAIL_MESSAGES)
+            return [{"id": row["id"]} for row in JOSH_BROWN_GMAIL_MESSAGES]
+        if "brian@donigan.test" in q:
+            return [{"id": row["id"]} for row in BRIAN_GMAIL_MESSAGES]
+        return []
+
+    def get(self, message_id):
+        row = self._by_id[message_id]
+        return {
+            "id": message_id,
+            "snippet": row.get("body") or "",
+            "payload": {
+                "headers": [
+                    {"name": "Subject", "value": row.get("subject") or ""},
+                    {"name": "From", "value": row.get("from") or ""},
+                ],
+                "mimeType": "text/plain",
+                "body": {},
+            },
+        }
+
+    def headers_map(self, message):
+        return {
+            item["name"].lower(): item.get("value", "")
+            for item in (message.get("payload") or {}).get("headers") or []
+        }
+
+    def body_text(self, message):
+        mid = str(message.get("id") or "")
+        return str((self._by_id.get(mid) or {}).get("body") or message.get("snippet") or "")
+
+    def calendar_parts(self, message):
+        del message
         return []
 
 
@@ -1187,3 +1284,29 @@ def test_sample_cards_use_gmail_booking_and_followup_dates(tmp_path):
     assert josh["reason"] == "booked"
     assert "mar 30" in josh["body"].split("\n", 1)[0].lower()
     assert "sep" not in josh["body"].split("\n", 1)[0].lower()
+    brian = next(c for c in payload["cards"] if c["name"] == "Brian Donigan")
+    assert "sep 25" in brian["body"].split("\n", 1)[0].lower()
+    assert "sep 3" not in brian["body"].split("\n", 1)[0].lower()
+
+
+def test_sample_cards_builds_gmail_client_when_omitted(tmp_path, monkeypatch):
+    created = {}
+
+    class _BuiltGmail(_MeetingGmail):
+        def __init__(self, settings=None):
+            created["yes"] = True
+            super().__init__(settings)
+
+    monkeypatch.setattr("crmbrain.gmail_client.Gmail", _BuiltGmail)
+    settings = make_settings(
+        gmail_refresh_token="refresh-token",
+        gmail_client_id="id",
+        gmail_client_secret="secret",
+    )
+    payload = sample_hubspot_nurture_cards(
+        settings, 10, hs=_JoJoshHS(), out_path=str(tmp_path / "cards.json")
+    )
+    assert created.get("yes") is True
+    jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
+    assert jo["reason"] == "met"
+    assert "apr 1" in jo["body"].split("\n", 1)[0].lower()

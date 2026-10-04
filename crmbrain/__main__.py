@@ -62,7 +62,14 @@ def _run_sample_cards(settings: Settings, count: int, out_path: str | None) -> i
             "service run:\n  python -m crmbrain --sample-cards 10"
         )
         return 2
-    payload = sample_hubspot_nurture_cards(settings, count, out_path=out_path)
+    gmail = None
+    try:
+        from crmbrain.nurture import gmail_client_for_cards
+
+        gmail = gmail_client_for_cards(settings, None)
+    except Exception:
+        gmail = None
+    payload = sample_hubspot_nurture_cards(settings, count, gmail=gmail, out_path=out_path)
     print(json.dumps(payload.get("cards") or [], indent=2))
     print(
         f"\nwrote {payload.get('count', 0)} HubSpot Nurture cards to "
