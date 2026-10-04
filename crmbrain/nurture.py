@@ -135,6 +135,15 @@ _DECK_OR_RECAP_RE = re.compile(
     r"growth playbook|\bplaybook\b|\bdeck\b|meeting recap|your meeting recap",
     re.I,
 )
+_DECLINED_INVITE_RE = re.compile(
+    r"^\s*(?:fwd:\s*|re:\s*)*(?:declined|canceled|cancelled|tentative[- ]declined)\b",
+    re.I,
+)
+_ACCEPTED_INVITE_RE = re.compile(r"^\s*(?:fwd:\s*|re:\s*)*accepted:", re.I)
+_BOOKING_INVITE_RE = re.compile(
+    r"\b(new event|web booking|invitee|invitation:)\b",
+    re.I,
+)
 NURTURE_THREAD_PROP = "nurture_thread_id"
 NURTURE_SUBJECT_PROP = "nurture_thread_subject"
 OPENER_MAX_WORDS = 20
@@ -1007,31 +1016,58 @@ def _message_meeting_at(msg: dict) -> datetime | None:
     return parse_signal_at(msg.get("meeting_at") or msg.get("held_at") or msg.get("date"))
 
 
+def invite_is_rejected(subject: str = "", msg: dict | None = None) -> bool:
+    """Declined / canceled / tentative-declined invites never count as booked or held."""
+    text = str(subject or "")
+    if msg:
+        text = f"{text} {msg.get('subject') or ''}"
+        if msg.get("declined") or msg.get("canceled") or msg.get("cancelled"):
+            return True
+        status = str(msg.get("status") or msg.get("response") or "").lower()
+        if status in {"declined", "canceled", "cancelled", "tentative-declined"}:
+            return True
+    return bool(_DECLINED_INVITE_RE.search(text.strip()))
+
+
+def chicago_meeting_date(dt: datetime) -> datetime:
+    """America/Chicago calendar date of the meeting start, as midnight CDT."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CDT)
+    utc = dt.astimezone(timezone.utc)
+    if utc.hour == 0 and utc.minute == 0 and utc.second == 0 and utc.microsecond == 0:
+        day = utc.date()
+    else:
+        day = dt.astimezone(CDT).date()
+    return datetime(day.year, day.month, day.day, tzinfo=CDT)
+
+
+def chicago_date_phrase(dt: datetime) -> str:
+    return chicago_meeting_date(dt).strftime("%b %-d")
+
+
+def _latest(stamps: list[datetime], *, now: datetime | None = None) -> datetime | None:
+    now = now or now_utc()
+    past = [s for s in stamps if s and s <= now]
+    return max(past) if past else None
+
+
 def gmail_meeting_evidence(row: dict | None, *, now: datetime | None = None) -> dict[str, Any]:
-    """Booking/held dates from Gmail confirmations, follow-up invites, and Josh decks."""
+    """Booking/held dates from Gmail. Declined and future invites do not count as held."""
     now = now or now_utc()
     extra = _row_extra(row)
+    recaps: list[datetime] = []
+    accepted_held: list[datetime] = []
+    bookings: list[datetime] = []
+    future_bookings: list[datetime] = []
+    rejected: list[datetime] = []
     structured_followup = parse_signal_at(
         (row or {}).get("gmail_followup_at") or extra.get("gmail_followup_at")
     )
-    followup_at = structured_followup
-    booking_at = parse_signal_at(
+    structured_booking = parse_signal_at(
         (row or {}).get("gmail_booking_at")
         or extra.get("gmail_booking_at")
         or (row or {}).get("calendly_at")
         or extra.get("calendly_at")
-    )
-    if (row or {}).get("gmail_followup_accepted") is not None:
-        followup_accepted = bool((row or {}).get("gmail_followup_accepted"))
-    elif extra.get("gmail_followup_accepted") is not None:
-        followup_accepted = bool(extra.get("gmail_followup_accepted"))
-    else:
-        followup_accepted = bool(structured_followup)
-    has_deck = bool(
-        (row or {}).get("gmail_deck")
-        or extra.get("gmail_deck")
-        or (row or {}).get("gmail_recap")
-        or extra.get("gmail_recap")
     )
     followup_subj = str(
         (row or {}).get("gmail_followup_subject") or extra.get("gmail_followup_subject") or ""
@@ -1040,49 +1076,82 @@ def gmail_meeting_evidence(row: dict | None, *, now: datetime | None = None) -> 
         (row or {}).get("gmail_booking_subject") or extra.get("gmail_booking_subject") or ""
     )
     deck_subj = str((row or {}).get("gmail_deck_subject") or extra.get("gmail_deck_subject") or "")
-    if _FOLLOWUP_INVITE_RE.search(followup_subj):
-        followup_accepted = followup_accepted or "accepted" in followup_subj.lower()
-        if not followup_accepted and followup_at:
-            followup_accepted = True
-    if _DECK_OR_RECAP_RE.search(deck_subj) or _MEETING_RECAP_RE.search(deck_subj):
-        has_deck = True
-    if booking_subj and not booking_at:
-        booking_at = parse_signal_at((row or {}).get("gmail_booking_at") or extra.get("gmail_booking_at"))
+    if (
+        (row or {}).get("gmail_deck")
+        or extra.get("gmail_deck")
+        or (row or {}).get("gmail_recap")
+        or extra.get("gmail_recap")
+        or _DECK_OR_RECAP_RE.search(deck_subj)
+        or _MEETING_RECAP_RE.search(deck_subj)
+    ):
+        recap_at = parse_signal_at(
+            (row or {}).get("gmail_recap_at") or extra.get("gmail_recap_at") or structured_followup
+        )
+        if recap_at:
+            recaps.append(recap_at)
+    if structured_followup and not invite_is_rejected(followup_subj):
+        if _ACCEPTED_INVITE_RE.search(followup_subj) or (row or {}).get("gmail_followup_accepted") or extra.get(
+            "gmail_followup_accepted"
+        ):
+            if structured_followup <= now:
+                accepted_held.append(structured_followup)
+            else:
+                future_bookings.append(structured_followup)
+    if structured_booking and not invite_is_rejected(booking_subj):
+        if structured_booking <= now:
+            bookings.append(structured_booking)
+        else:
+            future_bookings.append(structured_booking)
     for msg in _iter_gmail_messages(row):
         subject = str(msg.get("subject") or "")
         body = str(msg.get("body") or msg.get("snippet") or "")
         blob = f"{subject} {body}"
-        stamp = _message_meeting_at(msg)
-        if _FOLLOWUP_INVITE_RE.search(blob):
+        if invite_is_rejected(subject, msg):
+            stamp = _message_meeting_at(msg)
             if stamp:
-                followup_at = stamp
-            if "accepted" in subject.lower() or msg.get("accepted") or "invitation" in subject.lower():
-                followup_accepted = True
-            elif followup_at and msg.get("accepted") is not False:
-                followup_accepted = True
+                rejected.append(stamp)
+            continue
+        stamp = _message_meeting_at(msg)
         if _sender_is_josh(str(msg.get("from") or msg.get("sender") or "")) and (
             _DECK_OR_RECAP_RE.search(blob) or _MEETING_RECAP_RE.search(blob)
         ):
-            has_deck = True
-        if stamp and (
+            recap_stamp = parse_signal_at(msg.get("date")) or stamp
+            if recap_stamp and recap_stamp <= now:
+                recaps.append(recap_stamp)
+            continue
+        if not stamp:
+            continue
+        accepted = bool(_ACCEPTED_INVITE_RE.search(subject) or msg.get("accepted"))
+        bookingish = bool(
             _WEB_BOOKING_RE.search(blob)
-            or "salesglider" in blob.lower()
+            or _BOOKING_INVITE_RE.search(blob)
             or "calendly" in blob.lower()
-            or any(h in subject.lower() for h in ("accepted:", "invitation:", "new event"))
-        ):
-            if not _FOLLOWUP_INVITE_RE.search(blob):
-                booking_at = booking_at or stamp
-    if followup_at and followup_at <= now and has_deck:
-        followup_accepted = True
-    met = bool(followup_at and followup_accepted and followup_at <= now and has_deck)
-    booked = bool(booking_at or followup_at)
-    source = "gmail_followup" if met or (followup_at and followup_accepted) else "gmail_booking" if booking_at else ""
+            or "salesglider" in blob.lower()
+        )
+        if stamp > now:
+            if accepted or bookingish:
+                future_bookings.append(stamp)
+            continue
+        if accepted:
+            accepted_held.append(stamp)
+        elif bookingish:
+            bookings.append(stamp)
+    recap_at = _latest(recaps, now=now)
+    held_invite_at = _latest(accepted_held, now=now)
+    booking_at = _latest(bookings, now=now)
+    held_at = recap_at or held_invite_at
+    met = bool(held_at)
+    booked = bool(booking_at or held_at)
+    source = "gmail_followup" if held_at else "gmail_booking" if booking_at else ""
     return {
         "met": met,
         "booked": booked,
-        "held_at": followup_at if met else None,
-        "booking_at": followup_at if (followup_at and followup_accepted) else booking_at,
+        "held_at": held_at,
+        "recap_at": recap_at,
+        "booking_at": booking_at,
         "source": source,
+        "future_booking": bool(future_bookings),
+        "rejected_at": rejected,
     }
 
 
@@ -1097,7 +1166,8 @@ def lookup_gmail_meeting_messages(gmail, *, email: str) -> list[dict]:
     query = (
         f"(from:{addr} OR to:{addr}) "
         f'(SalesGlider OR Calendly OR "Growth Playbook" OR playbook OR "meeting recap" '
-        f'OR "Web Booking" OR Followup OR Follow-up OR "Accepted:" OR "Invitation:" OR "New Event")'
+        f'OR "Web Booking" OR Followup OR Follow-up OR "Accepted:" OR "Invitation:" OR "New Event") '
+        f"-subject:Declined -subject:Canceled -subject:Cancelled"
     )
     try:
         stubs = search(query, max_results=15) or []
@@ -1180,7 +1250,11 @@ def apply_gmail_meeting_evidence(row: dict | None, gmail=None) -> dict:
         out["gmail_messages"] = messages
         extra["gmail_messages"] = messages
     ev = gmail_meeting_evidence({**out, "extra": extra})
-    if ev.get("held_at"):
+    if ev.get("future_booking"):
+        extra["skip_nurture"] = "future_booking"
+        out["skip_nurture"] = "future_booking"
+    recording = bool(_has_held_meeting_source(out) or meeting_source_id(out))
+    if ev.get("held_at") and not recording:
         iso = ev["held_at"].isoformat()
         extra["held_at"] = iso
         extra["gmail_followup_at"] = iso
@@ -1190,7 +1264,10 @@ def apply_gmail_meeting_evidence(row: dict | None, gmail=None) -> dict:
         out["gmail_followup_at"] = iso
         out["met"] = True
         out["meeting_date_source"] = "gmail_followup"
-    elif ev.get("booking_at"):
+    elif ev.get("held_at") and recording:
+        extra["met"] = True
+        out["met"] = True
+    elif ev.get("booking_at") and not recording:
         iso = ev["booking_at"].isoformat()
         extra["gmail_booking_at"] = iso
         extra["booked"] = True
@@ -1583,28 +1660,69 @@ def _trusted_date_source(row: dict | None, key: str, explicit: str = "") -> str:
     return source or key
 
 
+def _recording_held_stamps(row: dict | None) -> list[datetime]:
+    extra = _row_extra(row)
+    if not (_has_held_meeting_source(row) or meeting_source_id(row)):
+        return []
+    stamps: list[datetime] = []
+    for key in ("fireflies_at", "cube_at", "meeting_held_at", "occurred_at"):
+        dt = parse_signal_at((row or {}).get(key) or extra.get(key))
+        if dt:
+            stamps.append(dt)
+    source = str((row or {}).get("meeting_date_source") or extra.get("meeting_date_source") or "")
+    if source in {"fireflies", "cube", "cube_acr", "allo", "hs_meeting"}:
+        dt = parse_signal_at((row or {}).get("held_at") or extra.get("held_at"))
+        if dt:
+            stamps.append(dt)
+    return stamps
+
+
 def _call_date_phrase(row: dict | None) -> str:
-    """Date from a real booking/held meeting only. Never createdate or import stamps."""
+    """Held date from Fireflies/Cube, then recap/deck, then accepted past invite. Booked uses booking only."""
     row = row or {}
     extra = _row_extra(row)
+    now = now_utc()
     forbidden = _forbidden_meeting_stamps(row)
     gmail_ev = gmail_meeting_evidence(row)
-    candidates: list[tuple[datetime, str]] = []
-    if gmail_ev.get("held_at"):
-        candidates.append((gmail_ev["held_at"], "gmail_followup"))
-    if gmail_ev.get("booking_at"):
-        candidates.append((gmail_ev["booking_at"], gmail_ev.get("source") or "gmail_booking"))
-    for key in _MEETING_DATE_KEYS:
-        raw = row.get(key) or extra.get(key)
-        dt = parse_signal_at(raw)
-        if dt:
-            candidates.append((dt, _trusted_date_source(row, key)))
-    for dt, source in candidates:
-        matches_forbidden = any(_same_calendar_day(dt, stamp) for stamp in forbidden)
-        if matches_forbidden and source not in TRUSTED_MEETING_DATE_SOURCES:
-            continue
-        return dt.astimezone(CDT).strftime("%b %-d")
-    return ""
+    met, booked = _row_meeting_flags(row)
+    dt = None
+    source = ""
+    if met:
+        recording = _latest(_recording_held_stamps(row), now=now)
+        if recording:
+            dt, source = recording, "fireflies"
+        elif gmail_ev.get("recap_at"):
+            dt, source = gmail_ev["recap_at"], "gmail_followup"
+        elif gmail_ev.get("held_at"):
+            dt, source = gmail_ev["held_at"], "gmail_followup"
+        else:
+            for key in ("held_at", "meeting_at", "hs_meeting_start", "last_meeting_at"):
+                cand = parse_signal_at(row.get(key) or extra.get(key))
+                if not cand or cand > now:
+                    continue
+                if any(_same_calendar_day(cand, rejected) for rejected in gmail_ev.get("rejected_at") or []):
+                    continue
+                if any(_same_calendar_day(cand, stamp) for stamp in forbidden) and _trusted_date_source(row, key) not in TRUSTED_MEETING_DATE_SOURCES:
+                    continue
+                dt, source = cand, _trusted_date_source(row, key)
+                break
+    elif booked:
+        dt = gmail_ev.get("booking_at")
+        source = "gmail_booking" if dt else ""
+        if not dt:
+            for key in ("gmail_booking_at", "booking_at", "calendly_at", "meeting_at", "hs_meeting_start"):
+                raw = row.get(key) or extra.get(key)
+                cand = parse_signal_at(raw)
+                if cand and cand <= now:
+                    dt = cand
+                    source = _trusted_date_source(row, key)
+                    break
+    if not dt or dt > now:
+        return ""
+    matches_forbidden = any(_same_calendar_day(dt, stamp) for stamp in forbidden)
+    if matches_forbidden and source not in TRUSTED_MEETING_DATE_SOURCES:
+        return ""
+    return chicago_date_phrase(dt)
 
 
 def spoken_clause_is_raw_transcript(text: str) -> bool:
@@ -1845,6 +1963,8 @@ def qualify_candidate(c: TickerCandidate) -> str:
         return "client_campaign"
     if not parse_signal_at(c.last_signal):
         return "no_signal_date"
+    if gmail_meeting_evidence(c.extra or {}).get("future_booking"):
+        return "future_booking"
     if not has_meeting_qualification(
         source=c.source,
         reason=c.reason,
@@ -2233,6 +2353,9 @@ def fire_due_rows(
             continue
         row = attach_gmail_thread(row, gmail)
         row = apply_gmail_meeting_evidence(row, gmail)
+        if row.get("skip_nurture") == "future_booking":
+            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} future_booking")
+            continue
         row["reason"] = infer_nurture_reason(
             reason=str(row.get("reason") or ""),
             deal_stage=str(row.get("deal_stage") or ""),
@@ -2992,6 +3115,12 @@ def sample_hubspot_nurture_cards(
                 "cube_acr": bool(cprops.get("crm_source") == "cube_acr"),
                 "fireflies_id": str(cprops.get("fireflies_id") or ""),
                 "cube_id": str(cprops.get("cube_id") or ""),
+                "fireflies_at": str(
+                    cprops.get("fireflies_at")
+                    or cprops.get("hs_call_start")
+                    or ""
+                ),
+                "cube_at": str(cprops.get("cube_at") or ""),
                 "transcript": str(cprops.get("transcript") or ""),
                 "summary": str(cprops.get("hs_call_summary") or cprops.get("meeting_summary") or ""),
                 "gmail_messages": gmail_messages,
@@ -3008,12 +3137,21 @@ def sample_hubspot_nurture_cards(
                 or str(props.get(NURTURE_SUBJECT_PROP) or ""),
             }
             gmail_ev = gmail_meeting_evidence({"extra": extra, "gmail_messages": gmail_messages})
-            if gmail_ev.get("held_at"):
+            if gmail_ev.get("future_booking"):
+                skipped["future_booking"] = skipped.get("future_booking", 0) + 1
+                continue
+            recording = bool(extra.get("fireflies") or extra.get("cube_acr") or extra.get("fireflies_id") or extra.get("cube_id"))
+            if recording and meeting_at and not extra.get("fireflies_at") and not extra.get("cube_at"):
+                extra["fireflies_at"] = meeting_at
+                extra["meeting_date_source"] = extra.get("meeting_source") or "fireflies"
+            if gmail_ev.get("held_at") and not recording:
                 extra["held_at"] = gmail_ev["held_at"].isoformat()
                 extra["gmail_followup_at"] = extra["held_at"]
                 extra["met"] = True
                 extra["meeting_date_source"] = "gmail_followup"
-            elif gmail_ev.get("booking_at"):
+            elif gmail_ev.get("held_at") and recording:
+                extra["met"] = True
+            elif gmail_ev.get("booking_at") and not recording:
                 extra["gmail_booking_at"] = gmail_ev["booking_at"].isoformat()
                 extra["booked"] = True
                 extra["meeting_date_source"] = extra.get("meeting_date_source") or "gmail_booking"
@@ -3089,6 +3227,8 @@ def sample_hubspot_nurture_cards(
                     "cube_acr": extra.get("cube_acr"),
                     "fireflies_id": extra.get("fireflies_id") or "",
                     "cube_id": extra.get("cube_id") or "",
+                    "fireflies_at": extra.get("fireflies_at") or "",
+                    "cube_at": extra.get("cube_at") or "",
                     "transcript": extra.get("transcript") or "",
                     "summary": extra.get("summary") or "",
                     "meeting_source": extra.get("meeting_source") or "",

@@ -989,6 +989,13 @@ JOSH_BROWN_GMAIL_MESSAGES = [
 
 BRIAN_GMAIL_MESSAGES = [
     {
+        "id": "m-brian-declined",
+        "subject": "Declined: New Commercial Clients @ Mon Feb 1, 2027 10am - 10:30am (CDT)",
+        "body": "When: Monday Feb 1, 2027 10:00am (Central Time - Chicago)",
+        "from": "calendar-notification@google.com",
+        "declined": True,
+    },
+    {
         "id": "m-brian-book",
         "subject": "Accepted: SalesGlider Intro @ Fri Sep 25, 2026 2:00pm - 2:30pm (CDT)",
         "body": "When: Friday Sep 25, 2026 2:00pm (Central Time - Chicago)",
@@ -996,6 +1003,22 @@ BRIAN_GMAIL_MESSAGES = [
         "accepted": True,
     },
 ]
+
+DAN_DECLINED_FOLLOWUP = {
+    "id": "m-dan-declined",
+    "subject": "Declined: SalesGlider Followup @ Wed Aug 26, 2026 10am - 10:30am (CDT)",
+    "body": "When: Wednesday Aug 26, 2026 10:00am (Central Time - Chicago)",
+    "from": "calendar-notification@google.com",
+    "declined": True,
+}
+
+ERIK_SEPT_10_INVITE = {
+    "id": "m-erik-sep10",
+    "subject": "Accepted: SalesGlider Intro @ Thu Sep 10, 2026 11:00pm - 11:30pm (CDT)",
+    "body": "When: Thursday Sep 10, 2026 11:00pm (Central Time - Chicago)",
+    "from": "calendar-notification@google.com",
+    "accepted": True,
+}
 
 
 def test_parse_invite_when_from_gcal_and_calendly():
@@ -1131,6 +1154,138 @@ def test_shaun_and_hamdat_dates_need_real_booking_events():
     )
     assert "sep 4" in hamdat.body.split("\n", 1)[0].lower()
     assert "following up on our" in hamdat.body.split("\n", 1)[0].lower()
+
+
+def test_held_date_rules_for_brian_dan_erik_and_jo():
+    brian = compose_nurture_draft(
+        {
+            "name": "Brian Donigan",
+            "reason": "met",
+            "meeting_source": "fireflies",
+            "fireflies": True,
+            "createdate": "2026-09-03T12:00:00+00:00",
+            "gmail_messages": [BRIAN_GMAIL_MESSAGES[0]],
+        }
+    )
+    brian_opener = brian.body.split("\n", 1)[0].lower()
+    assert "feb" not in brian_opener
+    assert "2027" not in brian_opener
+    assert "wanted to circle back" in brian_opener or "following up" in brian_opener
+
+    dan = compose_nurture_draft(
+        {
+            "name": "Dan McGurl",
+            "reason": "met",
+            "fireflies_id": "01M08PYCZF2GVS80MNPQKH8ZPF",
+            "meeting_source": "fireflies",
+            "fireflies": True,
+            "fireflies_at": "2026-08-18T17:00:00+00:00",
+            "meeting_date_source": "fireflies",
+            "gmail_messages": [DAN_DECLINED_FOLLOWUP],
+            "meeting_at": "2026-08-26T15:00:00+00:00",
+        }
+    )
+    dan_opener = dan.body.split("\n", 1)[0].lower()
+    assert "aug 18" in dan_opener
+    assert "aug 26" not in dan_opener
+    assert "following up on our" in dan_opener
+    assert dan.meeting_source_id == "01M08PYCZF2GVS80MNPQKH8ZPF"
+
+    erik = compose_nurture_draft(
+        {
+            "name": "Erik Pinho",
+            "reason": "met",
+            "fireflies_id": "01ERIKPINHOFIREFLIESIDXX",
+            "meeting_source": "fireflies",
+            "fireflies": True,
+            "fireflies_at": "2026-09-11T00:00:00+00:00",
+            "meeting_date_source": "fireflies",
+            "gmail_messages": [ERIK_SEPT_10_INVITE],
+        }
+    )
+    assert "sep 11" in erik.body.split("\n", 1)[0].lower()
+    assert "sep 10" not in erik.body.split("\n", 1)[0].lower()
+
+    jo = compose_nurture_draft(
+        {
+            "name": "Jo Fried",
+            "company": "IntegriBuilt",
+            "reason": "booked",
+            "gmail_messages": JO_GMAIL_MESSAGES,
+        }
+    )
+    jo_opener = jo.body.split("\n", 1)[0].lower()
+    assert "following up on our apr 1 call" in jo_opener
+    assert "mar 27" not in jo_opener
+
+
+def test_future_accepted_booking_is_skipped_from_sample_cards(tmp_path):
+    class _FutureHS(_JoJoshHS):
+        def __init__(self):
+            super().__init__()
+            self.deals["nurture"] = [
+                {
+                    "id": "d-future",
+                    "properties": {
+                        "dealname": "Pat Future",
+                        "dealstage": STAGE["nurture"],
+                        "pipeline": "default",
+                        "createdate": "2026-09-03T12:00:00Z",
+                    },
+                }
+            ]
+            self.contacts = {
+                "d-future": [
+                    {
+                        "id": "c-future",
+                        "properties": {
+                            "firstname": "Pat",
+                            "lastname": "Future",
+                            "email": "pat@future.test",
+                            "company": "Future Co",
+                        },
+                    }
+                ]
+            }
+
+    class _FutureGmail(_MeetingGmail):
+        def search(self, query, max_results=15):
+            if "pat@future.test" in (query or "").lower():
+                return [{"id": "m-future"}]
+            return []
+
+        def get(self, message_id):
+            if message_id == "m-future":
+                return {
+                    "id": message_id,
+                    "snippet": "When: Monday Feb 1, 2027 10:00am",
+                    "payload": {
+                        "headers": [
+                            {
+                                "name": "Subject",
+                                "value": "Accepted: SalesGlider Intro @ Mon Feb 1, 2027 10am - 10:30am (CDT)",
+                            },
+                            {"name": "From", "value": "calendar-notification@google.com"},
+                        ],
+                        "body": {},
+                    },
+                }
+            return super().get(message_id)
+
+        def body_text(self, message):
+            if message.get("id") == "m-future":
+                return "When: Monday Feb 1, 2027 10:00am"
+            return super().body_text(message)
+
+    payload = sample_hubspot_nurture_cards(
+        make_settings(),
+        10,
+        hs=_FutureHS(),
+        gmail=_FutureGmail(),
+        out_path=str(tmp_path / "cards.json"),
+    )
+    assert payload["cards"] == []
+    assert payload["skipped"].get("future_booking", 0) >= 1
 
 
 class _JoJoshHS:
