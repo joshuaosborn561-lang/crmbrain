@@ -56,19 +56,26 @@ POSITIVE_CATEGORY_IDS = frozenset({1, 2, 5, 131482})
 MEETING_ENROLL_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
 REPLY_ONLY_SOURCES = frozenset({"smartlead", "heyreach", "rvm", "gmail_person", "gmail"})
 
+GENERAL_PROOF = (
+    "$2M in pipeline last quarter, one client closed $100K in their first 3 months, "
+    "averaging 14+ replies per month."
+)
+TRADES_PROOF = (
+    "$2M in pipeline last quarter across our trades clients, "
+    "one closed $100K in their first 3 months."
+)
+ROOFING_PROOF = "one of our roofers closed $100K in his first 3 months with us."
 CASE_STUDIES = {
-    "roofing": "one of our roofers closed $100K in his first 3 months with us.",
-    "hvac": "$2M in pipeline last quarter across our trades clients, one closed $100K in their first 3 months.",
-    "construction": "home-services teams we work with are filling the calendar without adding another closer.",
-    "plumbing": "home-services teams we work with are filling the calendar without adding another closer.",
-    "electrical": "home-services teams we work with are filling the calendar without adding another closer.",
-    "solar": "home-services teams we work with are filling the calendar without adding another closer.",
-    "staffing": "one recruiting desk we support booked 40 qualified conversations in 90 days.",
-    "msp": "an MSP we work with added $2M in pipeline last quarter without hiring another closer.",
-    "financial_advisors": "advisor teams we support are booking 14+ conversations a month with people who already want to talk.",
-    "saas": "a SaaS team we support booked a steady week of demos without standing up another SDR pod.",
-    "agency": "an agency we support filled next month's calendar without adding another closer.",
+    "roofing": ROOFING_PROOF,
+    "hvac": TRADES_PROOF,
+    "construction": TRADES_PROOF,
+    "plumbing": TRADES_PROOF,
+    "electrical": TRADES_PROOF,
+    "solar": TRADES_PROOF,
+    "trades": TRADES_PROOF,
+    "home_services": TRADES_PROOF,
 }
+APPROVED_PROOF_LINES = frozenset({GENERAL_PROOF, TRADES_PROOF, ROOFING_PROOF})
 PROOF_ALIASES = {
     "recruiting": "staffing",
     "it": "msp",
@@ -76,6 +83,10 @@ PROOF_ALIASES = {
     "trades": "construction",
     "home_services": "construction",
 }
+NURTURE_EXCLUDE_NAMES = frozenset({"kevin hagemoser"})
+NURTURE_EXCLUDE_EMAILS = frozenset({"kevin@kevinhagemoser.com"})
+HELD_MEETING_SOURCES = frozenset({"fireflies", "cube_acr", "cube", "allo"})
+HELD_NEAR_DAYS = 2
 NURTURE_THREAD_PROP = "nurture_thread_id"
 NURTURE_SUBJECT_PROP = "nurture_thread_subject"
 OPENER_MAX_WORDS = 20
@@ -100,10 +111,6 @@ KNOWN_NURTURE_REASONS = frozenset(
 )
 _BARE_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z]{2,})+$", re.I)
 _FIT_NOTE_RE = re.compile(r"^fit\s*:\s*", re.I)
-GENERAL_PROOF = (
-    "$2M in pipeline last quarter, one client closed $100K in their first 3 months, "
-    "averaging 14+ replies per month."
-)
 INDUSTRY_SUBJECTS = {row["key"]: row["subject"] for row in VERTICALS}
 INDUSTRY_SUBJECTS["financial_advisors"] = "Advisor update"
 
@@ -225,6 +232,8 @@ class NurtureDraft:
     body: str
     valid: bool = True
     reject_reason: str = ""
+    spoken_source_id: str = ""
+    meeting_source_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -232,6 +241,8 @@ class NurtureDraft:
             "body": self.body,
             "valid": self.valid,
             "reject_reason": self.reject_reason,
+            "spoken_source_id": self.spoken_source_id,
+            "meeting_source_id": self.meeting_source_id,
         }
 
 
@@ -342,6 +353,8 @@ def is_not_deal_candidate(
 
     if is_josh_address(email):
         return "non_deal"
+    if is_nurture_excluded(name=name, email=email):
+        return "non_deal"
     blocked = exclude_reason_for_nurture_or_deal(
         name=name,
         email=email,
@@ -362,6 +375,139 @@ def is_not_deal_candidate(
     if campaign and _CANDIDATE_CAMPAIGN_RE.search(campaign):
         return "non_deal"
     return ""
+
+
+def is_nurture_excluded(*, name: str = "", email: str = "") -> bool:
+    """Partners Josh handles personally — nurture cards only, not HubSpot deal sync."""
+    email_l = (email or "").strip().lower()
+    if email_l and email_l in NURTURE_EXCLUDE_EMAILS:
+        return True
+    blob = f"{name or ''} {email_l}".strip().lower()
+    return any(token and token in blob for token in NURTURE_EXCLUDE_NAMES)
+
+
+def _row_extra(row: dict | None) -> dict:
+    row = row or {}
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    return extra
+
+
+def _has_held_meeting_source(row: dict | None) -> bool:
+    extra = _row_extra(row)
+    source = str(
+        extra.get("meeting_source")
+        or extra.get("evidence_source")
+        or extra.get("source")
+        or (row or {}).get("source")
+        or extra.get("crm_source")
+        or ""
+    ).lower()
+    if source in HELD_MEETING_SOURCES:
+        return True
+    return bool(
+        extra.get("fireflies")
+        or extra.get("fireflies_id")
+        or extra.get("cube_acr")
+        or extra.get("cube")
+        or extra.get("cube_id")
+        or extra.get("cube_recording")
+        or extra.get("meeting_held")
+        or (row or {}).get("fireflies_id")
+        or (row or {}).get("cube_id")
+        or (row or {}).get("fireflies")
+        or (row or {}).get("cube_acr")
+    )
+
+
+def meeting_source_id(row: dict | None) -> str:
+    """Fireflies/Cube meeting id (or source:date fallback) stored on the card."""
+    extra = _row_extra(row)
+    for key in (
+        "fireflies_id",
+        "cube_acr_id",
+        "cube_id",
+        "meeting_source_id",
+        "held_meeting_id",
+        "source_id",
+    ):
+        val = str((row or {}).get(key) or extra.get(key) or "").strip()
+        if val:
+            return val
+    if not _has_held_meeting_source(row):
+        return ""
+    source = str(extra.get("meeting_source") or extra.get("source") or extra.get("crm_source") or "").lower()
+    if source not in HELD_MEETING_SOURCES:
+        source = "fireflies" if (extra.get("fireflies") or extra.get("fireflies_id") or (row or {}).get("fireflies_id")) else "cube_acr"
+    ext = str(extra.get("external_id") or (row or {}).get("external_id") or "").strip()
+    if ext:
+        return ext
+    raw = (
+        extra.get("held_at")
+        or extra.get("fireflies_at")
+        or extra.get("cube_at")
+        or extra.get("meeting_held_at")
+        or (row or {}).get("meeting_at")
+        or extra.get("meeting_at")
+    )
+    dt = parse_signal_at(raw)
+    if dt:
+        return f"{source}:{dt.date().isoformat()}"
+    return source
+
+
+def held_meeting_text(row: dict | None) -> str:
+    """Transcript or summary from a held Fireflies/Cube meeting only."""
+    if not _has_held_meeting_source(row) and not meeting_source_id(row):
+        return ""
+    extra = _row_extra(row)
+    for key in ("transcript", "summary", "meeting_summary", "fireflies_summary", "cube_summary"):
+        text = str((row or {}).get(key) or extra.get(key) or "").strip()
+        if text and not _FIT_NOTE_RE.match(text):
+            return text
+    snippet = str((row or {}).get("last_touch_snippet") or extra.get("last_touch_snippet") or "").strip()
+    if snippet and not _FIT_NOTE_RE.match(snippet) and _has_held_meeting_source(row):
+        return snippet
+    return ""
+
+
+def grounded_spoken_want(row: dict | None) -> tuple[str, str]:
+    """Josh-voice want clause plus source id, or empty if not from a held transcript/summary."""
+    source_id = meeting_source_id(row)
+    text = held_meeting_text(row)
+    if not source_id or not text:
+        return "", source_id
+    clause = summarize_spoken_want(text)
+    if not clause or spoken_clause_is_raw_transcript(clause):
+        return "", source_id
+    return clause, source_id
+
+
+def held_near_booked_date(row: dict | None, *, window_days: int = HELD_NEAR_DAYS) -> bool:
+    """True when Fireflies/Cube/recap shows a held meeting on or near the booked date."""
+    extra = _row_extra(row)
+    blob = " ".join(
+        str(extra.get(k) or (row or {}).get(k) or "")
+        for k in ("last_touch_snippet", "gmail_subject", "original_subject", "subject", "snippet")
+    )
+    recap = bool(_MEETING_RECAP_RE.search(blob))
+    if not _has_held_meeting_source(row) and not recap:
+        return False
+    booked = parse_signal_at(
+        (row or {}).get("meeting_at")
+        or extra.get("meeting_at")
+        or extra.get("engagements_last_meeting_booked")
+        or extra.get("last_meeting_at")
+    )
+    held = parse_signal_at(
+        extra.get("held_at")
+        or extra.get("fireflies_at")
+        or extra.get("cube_at")
+        or extra.get("meeting_held_at")
+        or extra.get("occurred_at")
+    )
+    if booked and held:
+        return abs((held.date() - booked.date()).days) <= window_days
+    return True
 
 
 def has_meeting_qualification(
@@ -894,6 +1040,16 @@ def _proof_line(industry: str | None) -> str:
     return _ensure_sentence_period(GENERAL_PROOF)
 
 
+def approved_proof_texts() -> frozenset[str]:
+    """Approved proof sentences as stored and as they appear after line capitalization."""
+    out: set[str] = set()
+    for line in APPROVED_PROOF_LINES:
+        ended = _ensure_sentence_period(line)
+        out.add(ended)
+        out.add(capitalize_body_lines(ended))
+    return frozenset(out)
+
+
 def is_bare_domain(text: str) -> bool:
     return bool(_BARE_DOMAIN_RE.fullmatch((text or "").strip()))
 
@@ -998,6 +1154,8 @@ def _row_meeting_flags(row: dict | None) -> tuple[bool, bool]:
         booked = True
     if why == "kicked_can" and not met:
         booked = True
+    if booked and not met and held_near_booked_date(row):
+        met = True
     return met, booked
 
 
@@ -1073,58 +1231,22 @@ def capitalize_body_lines(body: str) -> str:
 def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict | None = None) -> str:
     first = _first_name(first)
     row = row or {}
-    usable = scoped_snippet(_strip_poc_phrases(snippet), row)
-    usable = _no_dashes(_strip_crm_prefix(usable))
-    if usable and is_banned_opener_topic(usable, row):
-        usable = ""
-    if not usable:
-        usable = summarize_spoken_want(snippet) and snippet or ""
-        if usable:
-            usable = summarize_spoken_want(snippet)
-    spoken = ""
-    summarized = False
-    if usable and usable.lower().startswith("you "):
-        spoken = usable
-        summarized = True
-    elif usable:
-        if spoken_clause_is_raw_transcript(usable):
-            spoken = summarize_spoken_want(usable)
-            summarized = bool(spoken)
-        else:
-            low = usable.rstrip(".")
-            spoken = low[0].lower() + low[1:] if low else low
-            if spoken_clause_is_raw_transcript(spoken):
-                spoken = summarize_spoken_want(usable)
-                summarized = bool(spoken)
-    if not spoken:
-        spoken = summarize_spoken_want(snippet)
-        summarized = bool(spoken)
+    spoken, _source_id = grounded_spoken_want(row)
+    del snippet
     met, booked = _row_meeting_flags(row)
     date_phrase = _call_date_phrase(row)
     if met:
-        if spoken and summarized:
+        if spoken:
             if date_phrase:
                 return f"Hey {first}, on our {date_phrase} call {spoken}."
             return f"Hey {first}, wanted to circle back. {spoken[0].upper() + spoken[1:]}."
-        if spoken:
-            if date_phrase:
-                return f"Hey {first}, on our {date_phrase} call you mentioned {spoken}."
-            return f"Hey {first}, wanted to circle back. You mentioned {spoken}."
         if date_phrase:
             return f"Hey {first}, following up on our {date_phrase} call."
         return f"Hey {first}, wanted to circle back."
     if booked:
-        if spoken and summarized:
-            if date_phrase:
-                return f"Hey {first}, circling back on the {date_phrase} meeting we had booked. {spoken[0].upper() + spoken[1:]}."
-            return f"Hey {first}, circling back on the meeting we had booked. {spoken[0].upper() + spoken[1:]}."
         if date_phrase:
             return f"Hey {first}, circling back on the {date_phrase} meeting we had booked."
         return f"Hey {first}, circling back on the meeting we had booked."
-    if spoken and summarized:
-        return f"Hey {first}, {spoken}."
-    if spoken:
-        return f"Hey {first}, you mentioned {spoken}."
     topic = ""
     if campaign and not looks_like_deal_name(campaign, row) and not is_banned_opener_topic(campaign, row):
         topic = re.sub(r"salesglider\s*", "", campaign, flags=re.I).strip() or ""
@@ -1171,6 +1293,7 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
     raw_snippet = str(row.get("last_touch_snippet") or "")
     snippet = scoped_snippet(raw_snippet, row)
     use_airpods = AIRPODS_OFFER_LIVE if airpods is None else airpods
+    spoken, spoken_source_id = grounded_spoken_want(row)
     opener = _no_dashes(_opener_from_snippet(first, raw_snippet, campaign, row))
     proof = _proof_line(industry)
     cta = MEETING_GUARANTEE
@@ -1180,7 +1303,12 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
         _no_dashes(f"{opener}\n\n{proof}\n\n{cta}\n\nWorth a look?\n\nJosh Osborn")
     )
     subject = compose_nurture_subject({**row, "last_touch_snippet": snippet})
-    draft = NurtureDraft(subject=subject, body=body)
+    draft = NurtureDraft(
+        subject=subject,
+        body=body,
+        spoken_source_id=spoken_source_id if spoken else "",
+        meeting_source_id=meeting_source_id(row),
+    )
     return validate_draft(draft, row)
 
 
@@ -1369,12 +1497,15 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
         booked=bool((row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
         met=bool((row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
     )
+    source_id = draft.spoken_source_id or draft.meeting_source_id or meeting_source_id(row)
+    source_id_line = f"Meeting source: {source_id}\n" if source_id else ""
     fallback = (
         f"90-day ticker (approve before send)\n"
         f"To: {row.get('email') or row.get('phone')}\n"
         f"Why: {why}\n"
         f"Thread: {thread_label}\n"
         f"Source: {source} / {campaign}\n"
+        f"{source_id_line}"
         f"Signal: {signal_line}\n"
         f'They said: "{snippet}"\n'
         f"Subject: {draft.subject}\n\n{draft.body}"
@@ -1393,7 +1524,8 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
                     f"*Why:* {why}\n"
                     f"*Thread:* {thread_label}\n"
                     f"*Source:* {source} / {campaign or '-'}\n"
-                    f"*Signal:* {signal_line}\n"
+                    + (f"*Meeting source:* {source_id}\n" if source_id else "")
+                    + f"*Signal:* {signal_line}\n"
                     f'*They said:* "{snippet}"'
                 ),
             },
@@ -1432,7 +1564,15 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
             ],
         },
     ]
-    return {"text": fallback, "blocks": blocks, "subject": draft.subject, "body": draft.body}
+    return {
+        "text": fallback,
+        "blocks": blocks,
+        "subject": draft.subject,
+        "body": draft.body,
+        "source_id": source_id,
+        "spoken_source_id": draft.spoken_source_id,
+        "meeting_source_id": draft.meeting_source_id,
+    }
 
 
 def outcome_blocks(row: dict, outcome: str, detail: str = "") -> list[dict]:
@@ -2165,6 +2305,9 @@ def render_sample_cards(rows: list[dict] | None = None) -> list[dict]:
                 "valid": draft.valid,
                 "blocks": card["blocks"],
                 "fallback_text": card["text"],
+                "source_id": draft.spoken_source_id or draft.meeting_source_id,
+                "spoken_source_id": draft.spoken_source_id,
+                "meeting_source_id": draft.meeting_source_id,
             }
         )
     return cards
@@ -2410,6 +2553,17 @@ def sample_hubspot_nurture_cards(
                 "hs_meeting": bool(meeting_at),
                 "fireflies": bool(cprops.get("crm_source") == "fireflies"),
                 "cube_acr": bool(cprops.get("crm_source") == "cube_acr"),
+                "fireflies_id": str(cprops.get("fireflies_id") or ""),
+                "cube_id": str(cprops.get("cube_id") or ""),
+                "transcript": str(cprops.get("transcript") or ""),
+                "summary": str(cprops.get("hs_call_summary") or cprops.get("meeting_summary") or ""),
+                "meeting_source": (
+                    "fireflies"
+                    if cprops.get("crm_source") == "fireflies"
+                    else "cube_acr"
+                    if cprops.get("crm_source") == "cube_acr"
+                    else ""
+                ),
                 NURTURE_THREAD_PROP: fields["nurture_thread_id"]
                 or str(props.get(NURTURE_THREAD_PROP) or ""),
                 NURTURE_SUBJECT_PROP: fields["nurture_thread_subject"]
@@ -2473,6 +2627,13 @@ def sample_hubspot_nurture_cards(
                     "last_touch_snippet": snippet,
                     "industry": industry,
                     "hs_industry": hs_industry,
+                    "fireflies": extra.get("fireflies"),
+                    "cube_acr": extra.get("cube_acr"),
+                    "fireflies_id": extra.get("fireflies_id") or "",
+                    "cube_id": extra.get("cube_id") or "",
+                    "transcript": extra.get("transcript") or "",
+                    "summary": extra.get("summary") or "",
+                    "meeting_source": extra.get("meeting_source") or "",
                     NURTURE_THREAD_PROP: extra.get(NURTURE_THREAD_PROP) or "",
                     NURTURE_SUBJECT_PROP: extra.get(NURTURE_SUBJECT_PROP) or "",
                     "signal_at": (
@@ -2502,6 +2663,7 @@ def sample_hubspot_nurture_cards(
                 "subject": draft.subject,
                 "thread_id": stored_nurture_thread_id(row),
                 "body": draft.body,
+                "source_id": draft.spoken_source_id or draft.meeting_source_id,
             }
         )
     payload = {

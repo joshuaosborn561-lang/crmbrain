@@ -11,6 +11,11 @@ from crmbrain.config import (
 )
 from crmbrain.models import Engagement
 from crmbrain.nurture import (
+    APPROVED_PROOF_LINES,
+    CASE_STUDIES,
+    GENERAL_PROOF,
+    TRADES_PROOF,
+    approved_proof_texts,
     capitalize_body_lines,
     collect_s2_hubspot,
     compose_nurture_draft,
@@ -57,6 +62,8 @@ def test_hard_exclude_names_block_nurture_and_deal_sync():
     assert is_non_deal_person(email="noahbbrown951@gmail.com")
     assert is_not_deal_candidate(name="Jeremy Ciotola", email="jeremy.ciotola@gmail.com") == "non_deal"
     assert is_not_deal_candidate(name="Noah Brown", email="noahbbrown951@gmail.com") == "non_deal"
+    assert is_not_deal_candidate(name="Kevin Hagemoser", email="kevin@kevinhagemoser.com") == "non_deal"
+    assert not is_non_deal_person(name="Kevin Hagemoser", email="kevin@kevinhagemoser.com")
     assert not is_non_deal_person(name="Robert Lawson", email="rob@cyberguard360.com")
 
 
@@ -138,12 +145,15 @@ def test_opener_rejects_raw_transcript_first_person_and_long_clause():
     assert summarize_spoken_want(raw) == "you were focused on getting the website done first"
     draft = compose_nurture_draft(
         {
-            "name": "Kevin Hagemoser",
-            "email": "kevin@kevinhagemoser.com",
-            "company": "Kevin Hagemoser",
+            "name": "Pat Reyes",
+            "email": "pat@summitroofs.test",
+            "company": "Summit Roofs",
             "reason": "met",
             "deal_stage": STAGE["nurture"],
             "meeting_at": "2026-09-10T18:00:00+00:00",
+            "fireflies_id": "ff-pat-website",
+            "meeting_source": "fireflies",
+            "transcript": raw,
             "last_touch_snippet": raw,
         }
     )
@@ -154,12 +164,13 @@ def test_opener_rejects_raw_transcript_first_person_and_long_clause():
     assert "website" in opener.lower()
     assert "you were focused on getting the website done first" in opener.lower()
     assert len(opener.split()) <= 24
+    assert draft.spoken_source_id == "ff-pat-website"
 
     long = " ".join(["pipeline"] * 21)
     assert spoken_clause_is_raw_transcript(long)
     fallback = compose_nurture_draft(
         {
-            "name": "Kevin Hagemoser",
+            "name": "Pat Reyes",
             "reason": "met",
             "meeting_at": "2026-09-10T18:00:00+00:00",
             "last_touch_snippet": long,
@@ -167,6 +178,7 @@ def test_opener_rejects_raw_transcript_first_person_and_long_clause():
     )
     assert "following up on our" in fallback.body.split("\n", 1)[0].lower()
     assert "you mentioned" not in fallback.body.split("\n", 1)[0].lower()
+    assert not fallback.spoken_source_id
 
 
 def test_body_lines_start_with_a_capital_letter():
@@ -543,8 +555,8 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
 
     met = compose_nurture_draft(
         {
-            "name": "Kevin Hagemoser",
-            "company": "Kevin Hagemoser",
+            "name": "Pat Reyes",
+            "company": "Summit Roofs",
             "reason": "met",
             "meeting_at": "2026-09-10T18:00:00+00:00",
             "last_touch_snippet": "Fit: they want to knock out a website first.",
@@ -552,9 +564,9 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
     )
     opener = met.body.split("\n", 1)[0]
     assert "sep" in opener.lower()
-    assert "website" in opener.lower()
     assert "fit:" not in opener.lower()
-    assert "following up on our call" not in opener.lower() or "sep" in opener.lower()
+    assert "following up on our" in opener.lower()
+    assert "website" not in opener.lower()
 
     booked = compose_nurture_draft(
         {
@@ -585,28 +597,23 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
 
 
 def test_proof_line_varies_by_vertical():
-    from crmbrain.nurture import CASE_STUDIES, GENERAL_PROOF, compose_nurture_draft
+    from crmbrain.nurture import CASE_STUDIES, GENERAL_PROOF, TRADES_PROOF, compose_nurture_draft
 
-    proofs = {}
-    for industry, company in (
-        ("staffing", "HireRight"),
-        ("msp", "Bytewise"),
-        ("roofing", "Kelly Roofing"),
-        ("saas", "Acme Cloud"),
-        ("financial_advisors", "Northshore Wealth"),
-    ):
-        draft = compose_nurture_draft(
-            {"name": "Pat Reyes", "company": company, "industry": industry}
-        )
-        proofs[industry] = draft.body.split("\n\n")[1]
-        assert proofs[industry].rstrip().endswith(".")
-        assert CASE_STUDIES[industry].rstrip(".")[:12].lower() in proofs[industry].lower()
-    assert len(set(proofs.values())) == 5
+    roof = compose_nurture_draft(
+        {"name": "Pat Reyes", "company": "Kelly Roofing", "industry": "roofing"}
+    )
+    hvac = compose_nurture_draft(
+        {"name": "Pat Reyes", "company": "The Chill Brothers", "industry": "hvac"}
+    )
+    staffing = compose_nurture_draft(
+        {"name": "Pat Reyes", "company": "HireRight", "industry": "staffing"}
+    )
     generic = compose_nurture_draft({"name": "Pat Reyes", "company": "Mystery Co"})
-    assert generic.body.split("\n\n")[1].rstrip(".") == GENERAL_PROOF.rstrip(".")
-    assert generic.body.split("\n\n")[1] not in proofs.values() or True
-    for other in proofs.values():
-        assert generic.body.split("\n\n")[1] != other
+    assert roof.body.split("\n\n")[1].rstrip(".").lower() == CASE_STUDIES["roofing"].rstrip(".").lower()
+    assert hvac.body.split("\n\n")[1].rstrip(".").lower() == TRADES_PROOF.rstrip(".").lower()
+    assert staffing.body.split("\n\n")[1].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
+    assert generic.body.split("\n\n")[1].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
+    assert roof.body.split("\n\n")[1] != hvac.body.split("\n\n")[1]
 
 
 def test_new_thread_subject_uses_title_case_company_not_domain():
@@ -688,3 +695,128 @@ def test_first_send_stores_nurture_thread_and_later_reply_uses_it(tmp_path):
     assert second["ok"] is True
     assert gmail.sent[1]["threadId"] == "th-nurture-1"
     assert gmail.sent[1]["subject"].lower().startswith("re:")
+
+
+def test_every_proof_line_is_in_the_approved_set():
+    from crmbrain.ticker import VERTICALS
+
+    approved = approved_proof_texts()
+    for raw in APPROVED_PROOF_LINES:
+        assert raw.rstrip(".") in {line.rstrip(".") for line in approved}
+    banned = (
+        "one recruiting desk we support booked 40 qualified conversations in 90 days.",
+        "home-services teams we work with are filling the calendar without adding another closer.",
+        "an MSP we work with added $2M in pipeline last quarter without hiring another closer.",
+        "a SaaS team we support booked a steady week of demos without standing up another SDR pod.",
+        "advisor teams we support are booking 14+ conversations a month with people who already want to talk.",
+        "an agency we support filled next month's calendar without adding another closer.",
+    )
+    for line in CASE_STUDIES.values():
+        assert line.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
+    for industry in [row["key"] for row in VERTICALS] + ["staffing", "msp", "saas", "financial_advisors", "agency", ""]:
+        draft = compose_nurture_draft({"name": "Pat Reyes", "company": "Acme", "industry": industry})
+        proof = draft.body.split("\n\n")[1]
+        assert proof in approved
+        low = proof.lower()
+        for bad in banned:
+            assert bad.rstrip(".") not in low
+    assert GENERAL_PROOF.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
+    assert TRADES_PROOF.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
+
+
+def test_kevin_hagemoser_is_nurture_excluded():
+    assert is_not_deal_candidate(name="Kevin Hagemoser") == "non_deal"
+    assert is_not_deal_candidate(email="kevin@kevinhagemoser.com") == "non_deal"
+    cand = TickerCandidate(
+        name="Kevin Hagemoser",
+        email="kevin@kevinhagemoser.com",
+        reason="met",
+        last_signal=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        source="hubspot",
+        extra={"deal_stage": STAGE["nurture"], "booked": True, "met": True},
+    )
+    assert qualify_candidate(cand) == "non_deal"
+    kevin = [
+        {
+            "id": "d-kevin",
+            "dealstage": STAGE["nurture"],
+            "contact": {
+                "firstname": "Kevin",
+                "lastname": "Hagemoser",
+                "email": "kevin@kevinhagemoser.com",
+                "company": "Hagemoser",
+            },
+            "last_activity": "2026-07-01T00:00:00+00:00",
+            "source_note": {"body": "Source: intro.", "created": "2026-07-01T00:00:00+00:00"},
+        }
+    ]
+    assert collect_s2_hubspot(kevin, now=datetime(2026, 10, 2, tzinfo=timezone.utc)) == []
+
+
+def test_focused_on_clause_requires_held_source_id():
+    ungrounded = compose_nurture_draft(
+        {
+            "name": "Dan McGurl",
+            "email": "dan@example.com",
+            "reason": "met",
+            "meeting_at": "2025-08-18T17:00:00+00:00",
+            "last_touch_snippet": "Dan was focused on getting pricing nailed down.",
+        }
+    )
+    opener = ungrounded.body.split("\n", 1)[0].lower()
+    assert "pricing" not in opener
+    assert "focused on" not in opener
+    assert "following up on our" in opener
+    assert not ungrounded.spoken_source_id
+
+    grounded = compose_nurture_draft(
+        {
+            "name": "Dan McGurl",
+            "email": "dan@example.com",
+            "reason": "met",
+            "meeting_at": "2025-08-18T17:00:00+00:00",
+            "fireflies_id": "ff-dan-aug18",
+            "meeting_source": "fireflies",
+            "transcript": "Dan said he wants to get pricing nailed down before we send anything.",
+        }
+    )
+    g_opener = grounded.body.split("\n", 1)[0].lower()
+    assert "pricing" in g_opener
+    assert "you were focused on getting pricing nailed down" in g_opener
+    assert grounded.spoken_source_id == "ff-dan-aug18"
+
+
+def test_booked_opener_upgrades_to_held_when_fireflies_is_near_date():
+    hamdat = compose_nurture_draft(
+        {
+            "name": "Hamdat Wahid",
+            "email": "hamdat@example.com",
+            "reason": "booked",
+            "meeting_at": "2026-09-04T15:00:00+00:00",
+            "fireflies_id": "ff-hamdat-sep4",
+            "meeting_source": "fireflies",
+            "held_at": "2026-09-04T15:20:00+00:00",
+            "extra": {
+                "fireflies": True,
+                "fireflies_id": "ff-hamdat-sep4",
+                "held_at": "2026-09-04T15:20:00+00:00",
+                "booked": True,
+            },
+        }
+    )
+    opener = hamdat.body.split("\n", 1)[0].lower()
+    assert "meeting we had booked" not in opener
+    assert "following up on our" in opener
+    assert "sep" in opener
+    assert hamdat.meeting_source_id == "ff-hamdat-sep4"
+
+    still_booked = compose_nurture_draft(
+        {
+            "name": "Jonathan Matthews",
+            "reason": "booked",
+            "meeting_at": "2026-03-12T16:00:00+00:00",
+        }
+    )
+    booked_opener = still_booked.body.split("\n", 1)[0].lower()
+    assert "meeting we had booked" in booked_opener
+    assert "mar" in booked_opener

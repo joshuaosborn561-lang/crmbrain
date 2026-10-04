@@ -407,7 +407,8 @@ def test_t22_t26_drafts():
         }
     )
     first = d.body.split("\n", 1)[0].lower()
-    assert "q4" in first or "timing" in first
+    assert "q4" not in first
+    assert "it's been a few months" in first
     assert d.subject != "Morgan?"
     assert d.subject == "Following up"
 
@@ -1008,6 +1009,9 @@ def test_nurture_body_has_no_airpods_and_is_personalized():
             "company": "Kelly Roofing",
             "industry": "roofing",
             "reason": "met",
+            "fireflies_id": "ff-jackie-busy",
+            "meeting_source": "fireflies",
+            "summary": "Check back after our busy season. Roofing crews are slammed until fall.",
             "last_touch_snippet": "Check back after our busy season. Roofing crews are slammed until fall.",
         }
     )
@@ -1027,19 +1031,18 @@ def test_nurture_body_has_no_airpods_and_is_personalized():
     assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
     assert "trades" in hvac.body or CASE_STUDIES["hvac"][:10] in hvac.body
     assert roof.body != hvac.body
-    assert "busy season" in roof.body.lower() or "slammed" in roof.body.lower()
-    assert "shoulder" in hvac.body.lower() or "summer" in hvac.body.lower()
     default = compose_nurture_draft({"name": "Pat Reyes", "industry": "roofing"})
     assert "AirPods" not in default.body
 
 
 def test_company_name_keywords_pick_vertical_proof():
-    cases = (
-        ("RLP Mechanical", "hvac", "trades"),
-        ("Talent Unify", "staffing", "recruit"),
-        ("IntegriBuilt", "construction", "home-services"),
-        ("RDS Fire Systems", "construction", "home-services"),
-    )
-    for company, key, token in cases:
-        draft = compose_nurture_draft({"name": "Alex Rivera", "company": company})
-        assert CASE_STUDIES[key].split(",")[0][:12] in draft.body or token in draft.body.lower()
+    from crmbrain.nurture import GENERAL_PROOF, TRADES_PROOF
+
+    trades = compose_nurture_draft({"name": "Alex Rivera", "company": "RLP Mechanical"})
+    staffing = compose_nurture_draft({"name": "Alex Rivera", "company": "Talent Unify"})
+    built = compose_nurture_draft({"name": "Alex Rivera", "company": "IntegriBuilt"})
+    fire = compose_nurture_draft({"name": "Alex Rivera", "company": "RDS Fire Systems"})
+    assert TRADES_PROOF.rstrip(".") in trades.body
+    assert GENERAL_PROOF.rstrip(".") in staffing.body
+    assert TRADES_PROOF.rstrip(".") in built.body
+    assert TRADES_PROOF.rstrip(".") in fire.body
