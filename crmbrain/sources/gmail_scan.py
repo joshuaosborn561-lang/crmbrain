@@ -176,17 +176,38 @@ SUBJECT_WHEN = re.compile(
     re.I,
 )
 BODY_WHEN = re.compile(
-    r"(\w+day),?\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}:\d{2}\s*[ap]m)",
+    r"(\w+day),?\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}(?::\d{2})?\s*[ap]m)",
+    re.I,
+)
+GCAL_AT_WHEN = re.compile(
+    r"@\s+\w{3},?\s+(\w{3})\s+(\d{1,2}),?\s+(\d{4})\s+(\d{1,2}(?::\d{2})?\s*[ap]m)",
+    re.I,
+)
+CALENDLY_FLIPPED_WHEN = re.compile(
+    r"(\d{1,2}(?::\d{2})?\s*[ap]m)\s*-?\s*(?:\w+day,?\s+)?(\w+)\s+(\d{1,2}),?\s+(\d{4})",
+    re.I,
+)
+DATE_ONLY_WHEN = re.compile(
+    r"(?:\w+day,?\s+)?(\w{3,9})\s+(\d{1,2}),?\s+(\d{4})",
+    re.I,
+)
+ICS_DTSTART_RE = re.compile(
+    r"DTSTART(?:;TZID=[^\r\n:]+)?:(\d{8}(?:T\d{6})?)",
     re.I,
 )
 
 
 def parse_meeting_at(subject: str, body: str = "") -> datetime | None:
-    """Calendly times are Josh's Chicago clock."""
+    """Calendly / Google Calendar times on Josh's Chicago clock."""
     text = f"{subject}\n{body}"
     m = SUBJECT_WHEN.search(subject) or SUBJECT_WHEN.search(text)
     if m:
         stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4))
+        if stamp:
+            return stamp
+    m = GCAL_AT_WHEN.search(text)
+    if m:
+        stamp = _parse_clock(m.group(4), m.group(1), m.group(2), m.group(3))
         if stamp:
             return stamp
     m = BODY_WHEN.search(text)
@@ -194,12 +215,41 @@ def parse_meeting_at(subject: str, body: str = "") -> datetime | None:
         stamp = _parse_clock(m.group(5), m.group(2), m.group(3), m.group(4))
         if stamp:
             return stamp
+    m = CALENDLY_FLIPPED_WHEN.search(text)
+    if m:
+        stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4))
+        if stamp:
+            return stamp
+    ics = parse_ics_dtstart(text)
+    if ics:
+        return ics
+    m = DATE_ONLY_WHEN.search(text)
+    if m:
+        stamp = _parse_clock("12:00pm", m.group(1), m.group(2), m.group(3))
+        if stamp:
+            return stamp
+    return None
+
+
+def parse_ics_dtstart(text: str) -> datetime | None:
+    m = ICS_DTSTART_RE.search(text or "")
+    if not m:
+        return None
+    raw = m.group(1)
+    for fmt in ("%Y%m%dT%H%M%S", "%Y%m%d"):
+        try:
+            naive = datetime.strptime(raw, fmt)
+            return naive.replace(tzinfo=CDT)
+        except ValueError:
+            continue
     return None
 
 
 def _parse_clock(time_part: str, month: str, day: str, year: str) -> datetime | None:
-    clock = re.sub(r"\s+", "", time_part).upper()
-    month = month[:3].title()
+    clock = re.sub(r"\s+", "", time_part or "").upper()
+    if re.fullmatch(r"\d{1,2}[AP]M", clock):
+        clock = f"{clock[:-2]}:00{clock[-2:]}"
+    month = (month or "")[:3].title()
     for fmt in ("%I:%M%p %b %d %Y", "%I:%M%p %B %d %Y"):
         try:
             naive = datetime.strptime(f"{clock} {month} {int(day)} {year}", fmt)
