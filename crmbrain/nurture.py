@@ -87,12 +87,47 @@ NURTURE_EXCLUDE_NAMES = frozenset({"kevin hagemoser"})
 NURTURE_EXCLUDE_EMAILS = frozenset({"kevin@kevinhagemoser.com"})
 HELD_MEETING_SOURCES = frozenset({"fireflies", "cube_acr", "cube", "allo"})
 HELD_NEAR_DAYS = 2
+WANT_CONFIDENCE_MIN = 0.7
 NURTURE_THREAD_PROP = "nurture_thread_id"
 NURTURE_SUBJECT_PROP = "nurture_thread_subject"
 OPENER_MAX_WORDS = 20
 _TRANSCRIPT_FIRST_PERSON_RE = re.compile(
     r"\b(i|i'm|i’m|i'll|i’ll|i'd|i’d|i've|i’ve|lets|let's|let’s)\b",
     re.I,
+)
+_SYNTHETIC_SOURCE_ID_RE = re.compile(
+    r"^(?:fireflies|cube_acr|cube|allo)(?::\d{4}-\d{2}-\d{2})?$",
+    re.I,
+)
+_PREFIXED_MEETING_ID_RE = re.compile(r"^(?:ff|cube)-[A-Za-z0-9_-]+$", re.I)
+_RAW_MEETING_ID_RE = re.compile(r"^[A-Za-z0-9_-]{12,}$")
+_FOCUS_LANGUAGE_RE = re.compile(
+    r"\b(?:(?:were|was|is|are|been)\s+)?(?:focused on|focusing on)\b|"
+    r"\bwants? to\b|\bwanted to\b|\bknock out\b|"
+    r"\bpriority\b|\bmain (?:thing|focus|priority)\b",
+    re.I,
+)
+_MEETING_TEXT_KEYS = (
+    "action_items",
+    "transcript",
+    "summary",
+    "meeting_summary",
+    "fireflies_summary",
+    "cube_summary",
+    "overview",
+    "shorthand_bullet",
+)
+_GENERIC_NOTE_KEYS = frozenset(
+    {
+        "last_touch_snippet",
+        "description",
+        "nurture_reason",
+        "personal_details",
+        "pain_points",
+        "notes",
+        "hs_note",
+        "source_note",
+    }
 )
 _WANT_TOPIC_CLAUSES = (
     ("website", "you were focused on getting the website done first"),
@@ -419,8 +454,39 @@ def _has_held_meeting_source(row: dict | None) -> bool:
     )
 
 
+def is_real_meeting_id(value: str | None) -> bool:
+    """True for a Fireflies meeting id or Cube file id. Rejects fireflies / fireflies:<date>."""
+    val = str(value or "").strip()
+    if not val or val.lower() in HELD_MEETING_SOURCES:
+        return False
+    if _SYNTHETIC_SOURCE_ID_RE.fullmatch(val):
+        return False
+    if ":" in val:
+        return False
+    if _PREFIXED_MEETING_ID_RE.fullmatch(val):
+        return True
+    return bool(_RAW_MEETING_ID_RE.fullmatch(val))
+
+
+def _as_meeting_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_as_meeting_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        parts = [
+            _as_meeting_text(value.get(key))
+            for key in ("overview", "shorthand_bullet", "action_items", "text", "body", "summary")
+        ]
+        return "\n".join(part for part in parts if part)
+    return str(value).strip()
+
+
 def meeting_source_id(row: dict | None) -> str:
-    """Fireflies/Cube meeting id (or source:date fallback) stored on the card."""
+    """Actual Fireflies/Cube meeting id only. Never fireflies, fireflies:<date>, or notes."""
     extra = _row_extra(row)
     for key in (
         "fireflies_id",
@@ -429,55 +495,74 @@ def meeting_source_id(row: dict | None) -> str:
         "meeting_source_id",
         "held_meeting_id",
         "source_id",
+        "external_id",
     ):
-        val = str((row or {}).get(key) or extra.get(key) or "").strip()
-        if val:
+        val = _as_meeting_text((row or {}).get(key) or extra.get(key))
+        if is_real_meeting_id(val):
             return val
-    if not _has_held_meeting_source(row):
-        return ""
-    source = str(extra.get("meeting_source") or extra.get("source") or extra.get("crm_source") or "").lower()
-    if source not in HELD_MEETING_SOURCES:
-        source = "fireflies" if (extra.get("fireflies") or extra.get("fireflies_id") or (row or {}).get("fireflies_id")) else "cube_acr"
-    ext = str(extra.get("external_id") or (row or {}).get("external_id") or "").strip()
-    if ext:
-        return ext
-    raw = (
-        extra.get("held_at")
-        or extra.get("fireflies_at")
-        or extra.get("cube_at")
-        or extra.get("meeting_held_at")
-        or (row or {}).get("meeting_at")
-        or extra.get("meeting_at")
-    )
-    dt = parse_signal_at(raw)
-    if dt:
-        return f"{source}:{dt.date().isoformat()}"
-    return source
-
-
-def held_meeting_text(row: dict | None) -> str:
-    """Transcript or summary from a held Fireflies/Cube meeting only."""
-    if not _has_held_meeting_source(row) and not meeting_source_id(row):
-        return ""
-    extra = _row_extra(row)
-    for key in ("transcript", "summary", "meeting_summary", "fireflies_summary", "cube_summary"):
-        text = str((row or {}).get(key) or extra.get(key) or "").strip()
-        if text and not _FIT_NOTE_RE.match(text):
-            return text
-    snippet = str((row or {}).get("last_touch_snippet") or extra.get("last_touch_snippet") or "").strip()
-    if snippet and not _FIT_NOTE_RE.match(snippet) and _has_held_meeting_source(row):
-        return snippet
     return ""
 
 
+def held_meeting_text(row: dict | None) -> str:
+    """Summary / action items / transcript from that meeting. Generic deal notes do not count."""
+    if not _has_held_meeting_source(row) and not meeting_source_id(row):
+        return ""
+    extra = _row_extra(row)
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key in _MEETING_TEXT_KEYS:
+        text = _as_meeting_text((row or {}).get(key) or extra.get(key))
+        if not text or key in _GENERIC_NOTE_KEYS or _FIT_NOTE_RE.match(text):
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+    nested = extra.get("summary") if isinstance(extra.get("summary"), dict) else None
+    row_summary = (row or {}).get("summary")
+    if isinstance(row_summary, dict):
+        nested = row_summary
+    if nested:
+        nested_text = _as_meeting_text(nested)
+        if nested_text and nested_text not in seen and not _FIT_NOTE_RE.match(nested_text):
+            parts.append(nested_text)
+    return "\n".join(parts)
+
+
+def extract_spoken_want(text: str) -> tuple[str, float]:
+    """Josh-voice want clause plus confidence. Lone keywords in a long summary are low."""
+    raw = _FIT_NOTE_RE.sub("", text or "").strip()
+    if not raw:
+        return "", 0.0
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", raw) if s.strip()]
+    focused = [s for s in sentences if _FOCUS_LANGUAGE_RE.search(s)]
+    for sent in focused:
+        low = sent.lower()
+        for needle, clause in _WANT_TOPIC_CLAUSES:
+            if needle in low:
+                if spoken_clause_is_raw_transcript(clause):
+                    return "", 0.0
+                return clause, 0.85
+        want = re.search(r"wants? to ([^.]+)", sent, flags=re.I)
+        if want:
+            clause = f"you wanted to {want.group(1).strip()}"
+            if not spoken_clause_is_raw_transcript(clause):
+                return clause, 0.8
+    low_all = raw.lower()
+    for needle, _clause in _WANT_TOPIC_CLAUSES:
+        if needle in low_all:
+            return "", 0.3
+    return "", 0.0
+
+
 def grounded_spoken_want(row: dict | None) -> tuple[str, str]:
-    """Josh-voice want clause plus source id, or empty if not from a held transcript/summary."""
+    """Want clause from that meeting's own summary/action items, plus the real meeting id."""
     source_id = meeting_source_id(row)
     text = held_meeting_text(row)
     if not source_id or not text:
         return "", source_id
-    clause = summarize_spoken_want(text)
-    if not clause or spoken_clause_is_raw_transcript(clause):
+    clause, confidence = extract_spoken_want(text)
+    if confidence < WANT_CONFIDENCE_MIN or not clause or spoken_clause_is_raw_transcript(clause):
         return "", source_id
     return clause, source_id
 
@@ -1166,20 +1251,25 @@ def _row_met_or_booked(row: dict | None) -> bool:
 
 def _call_date_phrase(row: dict | None) -> str:
     row = row or {}
-    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
-    raw = (
-        row.get("meeting_at")
-        or extra.get("meeting_at")
-        or row.get("call_at")
-        or extra.get("call_at")
-        or extra.get("hs_meeting_start")
-        or extra.get("engagements_last_meeting_booked")
-        or extra.get("last_meeting_at")
-    )
-    dt = parse_signal_at(raw)
-    if not dt:
-        return ""
-    return dt.astimezone(CDT).strftime("%b %-d")
+    extra = _row_extra(row)
+    for key in (
+        "meeting_at",
+        "call_at",
+        "held_at",
+        "fireflies_at",
+        "cube_at",
+        "meeting_held_at",
+        "occurred_at",
+        "hs_meeting_start",
+        "engagements_last_meeting_booked",
+        "last_meeting_at",
+        "signal_at",
+    ):
+        raw = row.get(key) or extra.get(key)
+        dt = parse_signal_at(raw)
+        if dt:
+            return dt.astimezone(CDT).strftime("%b %-d")
+    return ""
 
 
 def spoken_clause_is_raw_transcript(text: str) -> bool:
@@ -1194,22 +1284,11 @@ def spoken_clause_is_raw_transcript(text: str) -> bool:
 
 
 def summarize_spoken_want(text: str) -> str:
-    """One short Josh-voice clause, or empty to fall back to the date-call opener."""
-    raw = _FIT_NOTE_RE.sub("", text or "").strip()
-    low = raw.lower()
-    if not low:
+    """One short Josh-voice clause, or empty when the meeting text is not a clear want."""
+    clause, confidence = extract_spoken_want(text)
+    if confidence < WANT_CONFIDENCE_MIN:
         return ""
-    for needle, clause in _WANT_TOPIC_CLAUSES:
-        if needle in low:
-            if spoken_clause_is_raw_transcript(clause):
-                return ""
-            return clause
-    want = re.search(r"wants to ([^.]+)", raw, flags=re.I)
-    if want:
-        clause = f"you wanted to {want.group(1).strip()}"
-        if not spoken_clause_is_raw_transcript(clause):
-            return clause
-    return ""
+    return clause
 
 
 def capitalize_body_lines(body: str) -> str:

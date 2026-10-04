@@ -19,7 +19,10 @@ from crmbrain.nurture import (
     capitalize_body_lines,
     collect_s2_hubspot,
     compose_nurture_draft,
+    extract_spoken_want,
     is_not_deal_candidate,
+    is_real_meeting_id,
+    meeting_source_id,
     qualify_candidate,
     sample_hubspot_nurture_cards,
     spoken_clause_is_raw_transcript,
@@ -820,3 +823,128 @@ def test_booked_opener_upgrades_to_held_when_fireflies_is_near_date():
     booked_opener = still_booked.body.split("\n", 1)[0].lower()
     assert "meeting we had booked" in booked_opener
     assert "mar" in booked_opener
+
+
+DAN_FF_ID = "01M08PYCZF2GVS80MNPQKH8ZPF"
+DAN_MEETING_SUMMARY = (
+    "401k lead gen for financial advisors. Dual campaign covering existing 401k plans "
+    "plus startups. Dan will take the proposal to his advisor team and leadership. "
+    "We briefly mentioned pricing at the end."
+)
+DAN_GENERIC_NOTES = "Dan was focused on getting pricing nailed down."
+
+
+def test_real_meeting_id_rejects_source_and_date_fallbacks():
+    assert is_real_meeting_id(DAN_FF_ID)
+    assert is_real_meeting_id("ff-dan-aug18")
+    assert is_real_meeting_id("cube-drivefileidxx")
+    assert not is_real_meeting_id("fireflies")
+    assert not is_real_meeting_id("fireflies:2026-08-18")
+    assert not is_real_meeting_id("cube_acr")
+    assert not is_real_meeting_id("")
+
+
+def test_dan_mcgurl_fixture_does_not_invent_pricing_from_notes():
+    notes_only = compose_nurture_draft(
+        {
+            "name": "Dan McGurl",
+            "email": "dan@example.com",
+            "reason": "met",
+            "meeting_at": "2026-08-18T17:00:00+00:00",
+            "meeting_source": "fireflies",
+            "fireflies": True,
+            "crm_source": "fireflies",
+            "last_touch_snippet": DAN_GENERIC_NOTES,
+            "description": DAN_GENERIC_NOTES,
+            "nurture_reason": DAN_GENERIC_NOTES,
+            "personal_details": DAN_GENERIC_NOTES,
+            "extra": {
+                "fireflies": True,
+                "meeting_source": "fireflies",
+                "crm_source": "fireflies",
+                "last_touch_snippet": DAN_GENERIC_NOTES,
+            },
+        }
+    )
+    notes_opener = notes_only.body.split("\n", 1)[0].lower()
+    assert "pricing" not in notes_opener
+    assert "focused on" not in notes_opener
+    assert "following up on our aug 18 call" in notes_opener
+    assert not notes_only.spoken_source_id
+    assert not notes_only.meeting_source_id
+    assert meeting_source_id(
+        {
+            "meeting_source": "fireflies",
+            "fireflies": True,
+            "meeting_at": "2026-08-18T17:00:00+00:00",
+            "source_id": "fireflies:2026-08-18",
+        }
+    ) == ""
+
+    grounded = compose_nurture_draft(
+        {
+            "name": "Dan McGurl",
+            "email": "dan@example.com",
+            "reason": "met",
+            "meeting_at": "2026-08-18T17:00:00+00:00",
+            "fireflies_id": DAN_FF_ID,
+            "meeting_source": "fireflies",
+            "summary": DAN_MEETING_SUMMARY,
+            "action_items": [
+                "Dan to take the proposal to his advisor team and leadership.",
+            ],
+            "last_touch_snippet": DAN_GENERIC_NOTES,
+            "description": DAN_GENERIC_NOTES,
+        }
+    )
+    opener = grounded.body.split("\n", 1)[0].lower()
+    assert "pricing" not in opener
+    assert "focused on" not in opener
+    assert "proposal" not in opener
+    assert "following up on our aug 18 call" in opener
+    assert not grounded.spoken_source_id
+    assert grounded.meeting_source_id == DAN_FF_ID
+    clause, confidence = extract_spoken_want(DAN_MEETING_SUMMARY)
+    assert clause == ""
+    assert confidence < 0.7
+    assert summarize_spoken_want(DAN_MEETING_SUMMARY) == ""
+
+
+def test_brian_donigan_source_includes_its_date():
+    undated = compose_nurture_draft(
+        {
+            "name": "Brian Donigan",
+            "company": "Donigan",
+            "reason": "met",
+            "meeting_source": "fireflies",
+            "fireflies": True,
+            "source_id": "fireflies",
+            "last_touch_snippet": "",
+        }
+    )
+    undated_opener = undated.body.split("\n", 1)[0].lower()
+    assert "wanted to circle back" in undated_opener
+    assert not undated.meeting_source_id
+    assert undated.meeting_source_id != "fireflies"
+
+    dated = compose_nurture_draft(
+        {
+            "name": "Brian Donigan",
+            "company": "Donigan",
+            "reason": "met",
+            "fireflies_id": "01BRIANDONIGANMEETIDXX",
+            "meeting_source": "fireflies",
+            "signal_at": "2026-07-15T16:00:00+00:00",
+            "held_at": "2026-07-15T16:00:00+00:00",
+            "extra": {
+                "fireflies": True,
+                "fireflies_id": "01BRIANDONIGANMEETIDXX",
+                "signal_at": "2026-07-15T16:00:00+00:00",
+                "held_at": "2026-07-15T16:00:00+00:00",
+            },
+        }
+    )
+    dated_opener = dated.body.split("\n", 1)[0].lower()
+    assert "following up on our jul 15 call" in dated_opener
+    assert dated.meeting_source_id == "01BRIANDONIGANMEETIDXX"
+    assert dated.meeting_source_id != "fireflies"
