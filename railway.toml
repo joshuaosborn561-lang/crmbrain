@@ -3,5 +3,5 @@ builder = "NIXPACKS"
 
 [deploy]
 startCommand = "python -m crmbrain cycle"
-cronSchedule = "0 12,22 * * *"
+cronSchedule = "0 12,22 * * 1-5"
 restartPolicyType = "NEVER"

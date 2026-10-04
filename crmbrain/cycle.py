@@ -1045,10 +1045,10 @@ def _flush_memory_errors(memory: Memory, report: CycleReport) -> None:
             report.errors.append(msg)
 
 
-def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport) -> None:
+def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport, *, now=None) -> None:
     from crmbrain.nurture import fire_due_rows
 
-    fire_due_rows(settings, memory, report)
+    fire_due_rows(settings, memory, report, now=now)
 
 
 def _mail_contact(hs: HubSpot, ev: Engagement) -> dict | None:
