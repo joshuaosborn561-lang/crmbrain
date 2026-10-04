@@ -29,14 +29,12 @@ class Engagement:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def display_name(self) -> str:
-        built = f"{self.first_name} {self.last_name}".strip()
-        if built:
-            return built
-        if self.name:
-            from crmbrain.names import looks_like_meeting_title
+        from crmbrain.names import looks_like_meeting_title
 
-            if looks_like_meeting_title(self.name):
-                return ""
+        built = f"{self.first_name} {self.last_name}".strip()
+        if built and not looks_like_meeting_title(built):
+            return built
+        if self.name and not looks_like_meeting_title(self.name):
             return self.name
         return ""
 
@@ -52,6 +50,8 @@ class CycleReport:
     junk_blocked: list[str] = field(default_factory=list)
     ticker_enrolled: list[str] = field(default_factory=list)
     ticker_drafts: list[str] = field(default_factory=list)
+    ticker_skipped: list[str] = field(default_factory=list)
+    nurture_cards: list[Any] = field(default_factory=list)
     linkedin_queued: list[str] = field(default_factory=list)
     briefs_sent: list[str] = field(default_factory=list)
     notes_updated: list[str] = field(default_factory=list)
@@ -82,6 +82,8 @@ class CycleReport:
             "junk_blocked": self.junk_blocked,
             "ticker_enrolled": self.ticker_enrolled,
             "ticker_drafts": self.ticker_drafts,
+            "ticker_skipped": self.ticker_skipped,
+            "nurture_cards": self.nurture_cards,
             "linkedin_queued": self.linkedin_queued,
             "briefs_sent": self.briefs_sent,
             "notes_updated": self.notes_updated,

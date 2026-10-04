@@ -121,6 +121,7 @@ PERSONAL_NAMES = {
 }
 PERSONAL_FIRST_NAMES = {"sarah", "jeremy", "diana", "cayden", "dad", "mom", "father", "nonna"}
 # Never write these people to HubSpot (contacts, notes, or deals).
+# Hard exclude for both nurture cards and deal sync.
 SEEDED_NON_DEAL_NAMES = (
     "cynthia hernandez",
     "alex branning",
@@ -128,6 +129,9 @@ SEEDED_NON_DEAL_NAMES = (
     "bob carlson",
     "noah brown",
     "leroy hite",
+    "gabriel lopez",
+    "josh bereano",
+    "jeremy ciotola",
     "shore capital",
 )
 PARTNER_INVESTOR_HINTS = (
@@ -143,6 +147,26 @@ NOT_DEAL_NOTE_RE = re.compile(
 )
 SEEDED_NON_DEAL_EMAILS: tuple[str, ...] = (
     "bobcbobc@gmail.com",
+    "jeremy.ciotola@gmail.com",
+    "noahbbrown951@gmail.com",
+    "gabriel.lopez@rocketbox.mx",
+)
+# Free-mail domains never count as a Closed Won client domain.
+FREE_MAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "yahoo.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "icloud.com",
+        "me.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "msn.com",
+    }
 )
 PERSONAL_FAMILY_INTENTS = frozenset({"personal", "family"})
 JOSH_EMAILS = {
@@ -161,17 +185,83 @@ JOSH_DOMAINS = {
 POSITIVE_SMARTLEAD_CATEGORIES = {1, 2, 5}  # Interested, Meeting Request, Info Request
 POSITIVE_SENTIMENTS = {"positive"}
 
+# Sales Pipeline (id `default`). Display names live in HubSpot; values are stage IDs.
+# Old keys stay as aliases so existing callers keep working after the Oct 3 2026 rename.
+# closedwon NOW means payment received (was Signed). signed NOW means contract unpaid.
 STAGE = {
+    "initial_interest": "appointmentscheduled",
+    "meeting_booked": "qualifiedtobuy",
+    "discovery_held": "presentationscheduled",
+    "proposal_sent": "decisionmakerboughtin",
+    "needs_stakeholder_approval": "4391745240",
+    "contract_signed_unpaid": "4391699184",
+    "poc": "4391745241",
+    "closed_won": "closedwon",
+    "closed_lost": "closedlost",
+    "nurture": "3486952153",
+    # Aliases (same IDs or remapped IDs). Do not add deleted stages here.
     "replied": "appointmentscheduled",
     "discovery_scheduled": "qualifiedtobuy",
     "discovery_completed": "presentationscheduled",
-    "proposal_sent": "decisionmakerboughtin",
-    "signed": "closedwon",
-    "paid": "3482933986",
-    "nurture": "3486952153",
-    "no_show": "3557889773",
-    "closed_lost": "closedlost",
+    "signed": "4391699184",
+    "paid": "closedwon",
 }
+
+RENEWAL_PIPELINE = "2604181234"
+RENEWAL_STAGE = {
+    "renewal_upcoming": "4391699185",
+    "call_scheduled": "4391699186",
+    "at_risk": "4391699187",
+    "renewed": "4392753853",
+    "churned": "4392753854",
+}
+
+# Deleted HubSpot stages. Never write these IDs.
+DELETED_STAGE_IDS = frozenset({"3482933986", "3557889773"})
+DELETED_STAGE_CANONICAL = {
+    "3482933986": "closedwon",  # old Paid → Closed Won
+    "3557889773": "qualifiedtobuy",  # old No Show → leave Meeting Booked
+}
+
+# Evidence / ticker signal only. Not a HubSpot dealstage.
+NO_SHOW_HINT = "no_show"
+
+LOST_REASONS = (
+    "prospect_dq",
+    "josh_dq",
+    "not_a_fit",
+    "budget_timing",
+    "went_dark",
+    "other",
+)
+SG_DEAL_TYPES = ("new_business", "paid_poc", "free_poc", "renewal", "expansion")
+DEAL_PROPS_NEW = (
+    "lost_reason",
+    "nurture_reason",
+    "sg_deal_type",
+    "monthly_fee",
+    "contract_months",
+    "contract_end_date",
+    "no_show_count",
+    "positive_replies_30d",
+    "josh_review_flag",
+)
+
+
+def canonicalize_stage(stage: str | None) -> str:
+    """Map leftover deleted IDs to the live stage. Empty if not a stage."""
+    raw = (stage or "").strip()
+    if not raw:
+        return ""
+    if raw in DELETED_STAGE_CANONICAL:
+        return DELETED_STAGE_CANONICAL[raw]
+    if raw in STAGE.values():
+        return raw
+    return STAGE.get(raw, "")
+
+
+def is_deleted_stage(stage: str | None) -> bool:
+    return (stage or "").strip() in DELETED_STAGE_IDS
 
 INTERNAL_MEETING_HINTS = (
     "weekly",
@@ -226,6 +316,11 @@ CLIENT_HINTS = (
 )
 
 
+DEFAULT_LEGACY_SLACK_INTERACTIONS_URL = (
+    "https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions"
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     hubspot_token: str
@@ -266,6 +361,11 @@ class Settings:
     manual_freeze_at: datetime | None = None
     google_api_key: str = ""
     cube_lookback_days: int = 14
+    nurture_send_enabled: bool = False
+    nurture_post_enabled: bool = False
+    slack_signing_secret: str = ""
+    nurture_max_per_weekday: int = 5
+    legacy_slack_interactions_url: str = DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -311,6 +411,14 @@ class Settings:
             manual_freeze_at=_parse_lookback_start(os.getenv("CRMBRAIN_MANUAL_FREEZE_AT", "")),
             google_api_key=os.getenv("GOOGLE_API_KEY", ""),
             cube_lookback_days=int(os.getenv("CUBE_LOOKBACK_DAYS", "14")),
+            nurture_send_enabled=os.getenv("NURTURE_SEND_ENABLED", "").strip().lower() in {"1", "true", "yes"},
+            nurture_post_enabled=os.getenv("NURTURE_POST_ENABLED", "").strip().lower() in {"1", "true", "yes"},
+            slack_signing_secret=os.getenv("SLACK_SIGNING_SECRET", ""),
+            nurture_max_per_weekday=int(os.getenv("NURTURE_MAX_PER_WEEKDAY", "5")),
+            legacy_slack_interactions_url=(
+                os.getenv("LEGACY_SLACK_INTERACTIONS_URL", "").strip()
+                or DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
+            ),
         )
 
 
@@ -495,8 +603,52 @@ def date_window_cdt(days: int) -> list[str]:
     return [(end - timedelta(days=i)).isoformat() for i in range(span, -1, -1)]
 
 
+def is_archived_hs_row(row: dict | None) -> bool:
+    """True when a HubSpot contact or deal is archived."""
+    if not isinstance(row, dict) or not row:
+        return False
+    if row.get("archived") is True:
+        return True
+    if row.get("archivedAt"):
+        return True
+    props = row.get("properties") if isinstance(row.get("properties"), dict) else {}
+    for key in ("hs_is_archived", "archived"):
+        raw = str(props.get(key) or "").strip().lower()
+        if raw in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def email_domain(email: str | None = None, domain: str | None = None) -> str:
+    raw = (domain or "").strip().lower()
+    if raw:
+        return raw.split("@")[-1]
+    email_l = (email or "").strip().lower()
+    if "@" in email_l:
+        return email_l.rsplit("@", 1)[-1]
+    return ""
+
+
+def is_closed_won_client_domain(
+    email: str | None = None,
+    domain: str | None = None,
+    extra_domains: set[str] | frozenset[str] | None = None,
+) -> bool:
+    """True when this work email domain belongs to a current Closed Won client."""
+    host = email_domain(email, domain)
+    if not host or host in FREE_MAIL_DOMAINS or host in JOSH_DOMAINS:
+        return False
+    extras = {str(d or "").strip().lower() for d in (extra_domains or set()) if str(d or "").strip()}
+    extras.discard("")
+    extras -= FREE_MAIL_DOMAINS
+    extras -= JOSH_DOMAINS
+    return host in extras
+
+
 def is_excluded_contact(ev=None, contact: dict | None = None) -> bool:
     """True when the engagement or HubSpot contact is on the non-deal list."""
+    if is_archived_hs_row(contact):
+        return True
     props = (contact or {}).get("properties") or {}
     name = ""
     email = ""
@@ -560,6 +712,11 @@ def is_non_deal_person(
     if notes and has_not_deal_note(notes):
         return True
     if is_partner_or_investor(name=name, company=company, title=title):
+        return True
+    from crmbrain.names import is_room_or_bot_name, looks_like_meeting_title
+
+    titled = is_room_or_bot_name(name or "") or looks_like_meeting_title(name or "")
+    if titled and not email_l and not (phone or "").strip():
         return True
     if not blob.strip():
         return False

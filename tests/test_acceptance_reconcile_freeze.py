@@ -459,7 +459,7 @@ def test_travis_rise_hiring_screener_does_not_promote_no_show(tmp_path):
     scheduled = datetime(2026, 9, 14, 15, 30, tzinfo=timezone.utc)
     held_at = datetime(2026, 9, 14, 15, 40, tzinfo=timezone.utc)
     contact = _contact("c-travis", "travis@risehiring.com", "Travis", "L", "Rise Hiring")
-    deal = _deal("d-travis", "c-travis", STAGE["no_show"], name="Travis L - Rise Hiring")
+    deal = _deal("d-travis", "c-travis", STAGE["discovery_scheduled"], name="Travis L - Rise Hiring")
     screener = Engagement(
         source="fireflies",
         external_id="ff-travis-screener",
@@ -498,7 +498,7 @@ def test_travis_rise_hiring_screener_does_not_promote_no_show(tmp_path):
         domain="risehiring.com",
         raw_subject="Invitee no-show: Travis L - SalesGlider Intro",
         summary="Mon Sep 14 2026 10:30AM CDT\nSalesGlider Intro",
-        stage_hint=STAGE["no_show"],
+        stage_hint="no_show",
         extra={
             "hubspot_contact_id": "c-travis",
             "meeting_when": "Mon Sep 14 2026 10:30AM CDT",
@@ -512,7 +512,7 @@ def test_travis_rise_hiring_screener_does_not_promote_no_show(tmp_path):
         no_show_write_stage(
             prospect=gmail,
             contact=contact,
-            current_stage=STAGE["no_show"],
+            current_stage=STAGE["discovery_scheduled"],
             held_events=[screener],
             scheduled_at=scheduled,
             already_processed=True,
@@ -561,7 +561,7 @@ def test_travis_rise_hiring_screener_does_not_promote_no_show(tmp_path):
         report,
         held_events=[screener],
     )
-    assert hs.deals[0]["properties"]["dealstage"] == STAGE["no_show"]
+    assert hs.deals[0]["properties"]["dealstage"] == STAGE["discovery_scheduled"]
     assert len(hs.deals) == 1
     assert report.proposed_writes == []
     assert hs.writes == []
@@ -576,7 +576,7 @@ def test_production_deal_writes_go_through_single_gate():
         Path("crmbrain/deal_write.py").resolve(),
         Path("crmbrain/hubspot.py").resolve(),
     }
-    forbidden_calls = {"upsert_deal", "fill_deal_amount"}
+    forbidden_calls = {"upsert_deal", "fill_deal_amount", "archive_deal", "move_deal"}
     offenders: list[str] = []
     roots = [Path("crmbrain"), Path("scripts")]
     for root in roots:

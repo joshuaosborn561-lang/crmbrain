@@ -1,8 +1,8 @@
 """PandaDoc / DocuSign / Stripe status from Gmail.
 
-sent/viewed → Proposal Sent (+ amount when stated).
-completed + paid agreement → Signed.
-completed free SOW / $0 / complimentary → not Signed.
+sent or completed contract → Contract Sent / Signed, Not Yet Paid.
+payment received → Closed Won.
+completed free SOW / $0 / complimentary → not a paid contract.
 """
 
 from __future__ import annotations
@@ -218,10 +218,10 @@ def stage_from_signature_mail(subject: str, sender: str, snippet: str, body: str
     if is_payment_mail(subject, sender, snippet):
         return STAGE["paid"], amount, name
     if "docusign" in blob or "pandadoc" in blob:
-        if any(h in blob for h in COMPLETED_HINTS):
+        if any(h in blob for h in COMPLETED_HINTS) or any(h in blob for h in SENT_HINTS):
             if free:
                 return "", amount, name
-            return STAGE["signed"], amount, name
-        if any(h in blob for h in VIEWED_HINTS) or any(h in blob for h in SENT_HINTS):
+            return STAGE["contract_signed_unpaid"], amount, name
+        if any(h in blob for h in VIEWED_HINTS):
             return STAGE["proposal_sent"], amount, name
     return "", amount, name

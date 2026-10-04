@@ -23,7 +23,14 @@ from crmbrain.evidence import (
     KIND_SIGNED,
     PersonTimeline,
 )
-from crmbrain.deal_write import authorize_deal_write, commit_deal_write, propose_deal_write
+from crmbrain.deal_write import (
+    authorize_deal_lifecycle,
+    authorize_deal_write,
+    commit_deal_archive,
+    commit_deal_write,
+    propose_deal_write,
+    record_lifecycle_refusal,
+)
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement, IntentDecision
@@ -31,7 +38,7 @@ from crmbrain.policy import NEVER_OPEN_DEAL_SOURCES
 
 logger = logging.getLogger(__name__)
 
-PROTECTED_STAGES = {STAGE["signed"], STAGE["paid"]}
+PROTECTED_STAGES = {STAGE["closed_won"], STAGE["paid"]}
 COLD_CREATE_SOURCES = NEVER_OPEN_DEAL_SOURCES | {"gmail", "gmail_person"}
 MEETING_CRM_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo"})
 
@@ -83,25 +90,27 @@ def stage_from_timeline(
     """Latest evidence wins. POC hints never become Signed."""
     kinds = timeline.kinds()
     if KIND_PAYMENT in kinds:
-        return STAGE["paid"]
+        return STAGE["closed_won"]
     if KIND_SIGNED in kinds:
-        return STAGE["signed"]
+        return STAGE["contract_signed_unpaid"]
     if KIND_PROPOSAL in kinds:
         return STAGE["proposal_sent"]
     if KIND_HELD in kinds:
-        return STAGE["discovery_completed"]
+        return STAGE["discovery_held"]
     if canceled_no_reschedule and not has_upcoming:
         return STAGE["nurture"]
     if KIND_NO_SHOW in kinds and KIND_HELD not in kinds and not has_upcoming:
-        return STAGE["no_show"]
+        return ""
     if KIND_BOOKED in kinds or has_upcoming:
-        return STAGE["discovery_scheduled"]
+        return STAGE["meeting_booked"]
     if past_grace and KIND_HELD not in kinds and not has_upcoming:
-        if KIND_BOOKED in kinds or _current_stage(timeline) == STAGE["discovery_scheduled"]:
-            return STAGE["no_show"]
+        if KIND_BOOKED in kinds or _current_stage(timeline) == STAGE["meeting_booked"]:
+            return ""
     if decision.stage:
-        if decision.stage == STAGE["signed"] and KIND_SIGNED not in kinds and KIND_PAYMENT not in kinds:
-            return STAGE["discovery_completed"] if KIND_HELD in kinds else ""
+        if decision.stage in {STAGE["signed"], STAGE["contract_signed_unpaid"]} and KIND_SIGNED not in kinds and KIND_PAYMENT not in kinds:
+            return STAGE["discovery_held"] if KIND_HELD in kinds else ""
+        if decision.stage == STAGE["closed_lost"]:
+            return ""
         if decision.stage in STAGE.values():
             return decision.stage
         return STAGE.get(decision.stage, "")
@@ -136,23 +145,26 @@ def _company_deals(hs: HubSpot, timeline: PersonTimeline) -> list[dict]:
 def _resolve_contact(hs: HubSpot, timeline: PersonTimeline, ev: Engagement) -> dict | None:
     if timeline.contact:
         return timeline.contact
-    found = None
-    if hasattr(hs, "find_contact"):
-        try:
-            found = hs.find_contact(
-                email=timeline.email or ev.email,
-                phone=timeline.phone or ev.phone,
-                name=timeline.display_name() or ev.display_name(),
-            )
-        except Exception:
-            found = None
-    if not found:
-        finder = getattr(hs, "find_contact_fuzzy", None)
-        if callable(finder):
-            try:
-                found = finder(timeline.display_name() or ev.display_name(), timeline.company or ev.company)
-            except Exception:
-                found = None
+    probe = Engagement(
+        source=ev.source,
+        external_id=ev.external_id,
+        occurred_at=ev.occurred_at,
+        first_name=ev.first_name or timeline.first_name,
+        last_name=ev.last_name or timeline.last_name,
+        name=ev.name or timeline.name,
+        email=timeline.email or ev.email,
+        phone=timeline.phone or ev.phone,
+        company=timeline.company or ev.company,
+        extra=dict(ev.extra or {}),
+    )
+    found = policy.resolve_engagement_contact(hs, probe)
+    ev.extra = dict(ev.extra or {})
+    if (probe.extra or {}).get("name_ambiguous"):
+        ev.extra["name_ambiguous"] = True
+    if (probe.extra or {}).get("non_person"):
+        ev.extra["non_person"] = True
+    if (probe.extra or {}).get("attached_via"):
+        ev.extra["attached_via"] = probe.extra["attached_via"]
     if found:
         timeline.contact = found
         if hasattr(hs, "open_deals_for_contact") and found.get("id"):
@@ -264,7 +276,12 @@ def _commit(
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} person_intent_no")
         return False
     if action == "archive":
-        pass
+        ok, gate_reason = authorize_deal_lifecycle(
+            deal, ev=ev, settings=settings, action="archive"
+        )
+        if not ok:
+            record_lifecycle_refusal(deal, gate_reason, "archive", report=report)
+            return False
     else:
         stage_out, amount_out, gate_reason = authorize_deal_write(
             ev,
@@ -305,11 +322,13 @@ def _commit(
         contact_id=str((contact or {}).get("id") or ""),
         deal_id=str((deal or {}).get("id") or ""),
         reason=reason,
+        ev=ev,
     )
     if dry_run:
         return True
     if action == "archive" and deal:
-        hs.archive_deal(str(deal.get("id") or ""))
+        if not commit_deal_archive(hs, deal, ev=ev, settings=settings, report=report):
+            return False
         report.deals_pruned.append(f"{label} {reason or 'archive'}")
         return True
     if not contact:
@@ -765,7 +784,7 @@ def _reeval_decision(
         and not has_upcoming
         and not calendar_or_future
     ):
-        return STAGE["no_show"], "past_grace_no_show"
+        return "", "past_grace_no_show"
     return "", ""
 
 
@@ -851,7 +870,30 @@ def reeval_discovery_scheduled(
         if reason == "unknown_scheduled_time":
             _queue_review(memory, report, timeline, reason="unknown_scheduled_time", dry_run=dry_run)
             continue
-        if not target or target == STAGE["discovery_scheduled"]:
+        if reason == "past_grace_no_show":
+            ev.stage_hint = "no_show"
+            kind = "archive_regression"
+            if budget.aborted or not budget.allow(kind):
+                _queue_review(memory, report, timeline, reason="cap", dry_run=dry_run)
+                continue
+            if dry_run:
+                propose_deal_write(
+                    report,
+                    action="move",
+                    label=label,
+                    stage=str((deal.get("properties") or {}).get("dealstage") or ""),
+                    deal_id=deal_id,
+                    reason="no_show_count",
+                )
+            else:
+                from crmbrain import ticker
+                from crmbrain.hubspot import increment_no_show_count
+
+                increment_no_show_count(hs, deal)
+                ticker.enroll(memory, ev, "no_show", hs_contact_id=contact.get("id"))
+                report.deals_moved.append(f"{label} no_show_count++ (stage unchanged)")
+            continue
+        if not target or target == STAGE["meeting_booked"] or target == STAGE["discovery_scheduled"]:
             continue
         stage_out, _amt, gate_reason = authorize_deal_write(
             ev,
@@ -883,10 +925,8 @@ def reeval_discovery_scheduled(
         wrote = commit_deal_write(hs, contact, ev, write_stage)
         if wrote.get("id"):
             report.deals_moved.append(f"{label} scheduled-reeval -> {target} ({wrote.get('id')})")
-            if target == STAGE["no_show"]:
-                from crmbrain import ticker
-
-                ticker.enroll(memory, ev, "no_show", hs_contact_id=contact.get("id"))
+            if target in {STAGE["nurture"], STAGE["closed_lost"]}:
+                pass
 
 
 def _count_open_deals(hs: HubSpot, timelines: dict[str, PersonTimeline]) -> int:
@@ -1003,6 +1043,9 @@ def _planned_change_count(
                     hs, timeline, deal, contact, upcoming_emails, held_events
                 )
                 ev = representative_engagement(timeline)
+                if reason == "past_grace_no_show":
+                    changed.add(deal_id)
+                    continue
                 if (
                     target
                     and reason != "unknown_scheduled_time"
@@ -1160,33 +1203,16 @@ def run(
 
 
 def _attach_hubspot(hs: HubSpot, timelines: dict[str, PersonTimeline]) -> None:
-    if not hasattr(hs, "find_contact"):
-        return
     for timeline in timelines.values():
         if timeline.contact:
             continue
-        try:
-            found = hs.find_contact(email=timeline.email, phone=timeline.phone, name=timeline.display_name())
-        except Exception:
-            found = None
-        if not found:
-            finder = getattr(hs, "find_contact_fuzzy", None)
-            if callable(finder):
-                try:
-                    found = finder(timeline.display_name(), timeline.company)
-                except Exception:
-                    found = None
+        ev = representative_engagement(timeline)
+        found = _resolve_contact(hs, timeline, ev)
         if not found:
             continue
-        timeline.contact = found
-        if hasattr(hs, "open_deals_for_contact") and found.get("id"):
-            try:
-                timeline.deals = hs.open_deals_for_contact(found["id"])
-            except Exception:
-                timeline.deals = []
         company_deals = _company_deals(hs, timeline)
-        for ev in timeline.engagements:
-            policy.stamp_deal_context(ev, found, timeline.deals, company_deals)
+        for item in timeline.engagements:
+            policy.stamp_deal_context(item, found, timeline.deals, company_deals)
 
 
 def _restore_archived_deal(hs: HubSpot, contact: dict, ev: Engagement, stage: str) -> dict | None:

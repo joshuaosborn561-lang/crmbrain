@@ -195,14 +195,14 @@ def test_payment_and_agreement_mail_match_by_name_company_amount():
     assert not any("not in CRM" in x for x in report.junk_blocked)
 
 
-def test_gmail_people_skips_one_403_and_continues():
+def test_gmail_people_skips_one_500_and_continues():
     class PartialGmail:
         def search(self, query, max_results=80):
-            return [{"id": "ok-1"}, {"id": "bad-403"}]
+            return [{"id": "ok-1"}, {"id": "bad-500"}]
 
         def get(self, mid):
-            if mid == "bad-403":
-                raise RuntimeError("403 Forbidden")
+            if mid == "bad-500":
+                raise RuntimeError("500 Internal Server Error")
             return {
                 "id": mid,
                 "internalDate": "1728000000000",
@@ -221,8 +221,8 @@ def test_gmail_people_skips_one_403_and_continues():
     report = CycleReport()
     people = scan_people(settings, PartialGmail(), report=report)
     assert any(ev.email == "pat@clientco.com" for ev in people)
-    assert any("bad-403" in w for w in report.warnings)
-    assert any("bad-403" in s for s in report.skipped)
+    assert any("bad-500" in w for w in report.warnings)
+    assert any("bad-500" in s for s in report.skipped)
 
 
 def test_lookback_start_override_is_not_capped_and_keeps_write_caps():

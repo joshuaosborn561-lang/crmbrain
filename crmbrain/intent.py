@@ -136,7 +136,7 @@ Return ONLY JSON:
   "intent": "sales|buyer|learning|networking|personal|mentor|vendor|recruiter|day_job|client_ops|hire|contractor",
   "confidence": 0.0,
   "reason": "one short sentence",
-  "stage": "discovery_scheduled|discovery_completed|proposal_sent|signed|paid|no_show|nurture|closed_lost|",
+  "stage": "initial_interest|meeting_booked|discovery_held|proposal_sent|needs_stakeholder_approval|contract_signed_unpaid|poc|closed_won|nurture|closed_lost|",
   "amount": ""
 }
 
@@ -272,6 +272,15 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
                 confidence=0.93,
                 reason=f"Known non-opportunity: {person}",
             )
+
+    if ev.source in {"smartlead", "heyreach"}:
+        return IntentDecision(
+            verdict="yes",
+            intent="sales",
+            confidence=0.85,
+            reason="Positive outreach reply",
+            stage=STAGE["initial_interest"],
+        )
 
     if any(h in blob for h in DAY_JOB_HINTS) and not deal_holder:
         return IntentDecision(
@@ -409,11 +418,52 @@ def apply_deal_holder_veto(ev: Engagement, decision: IntentDecision | None = Non
         )
     else:
         rewritten = IntentDecision(
-            verdict="yes",
+            verdict="review",
             intent="sales",
             confidence=max(0.8, min(decision.confidence, 0.9)),
-            reason="Open SalesGlider deal — stay updatable, not day-job/hire/recruiter",
+            reason="Open SalesGlider deal — notes only, no stage move from this veto",
+            stage="",
+            amount="",
+            via=decision.via,
+        )
+    ev._intent_decision = rewritten
+    ev._person_intent = rewritten
+    extra = ev.extra
+    extra["intent_no"] = is_confident_non_sales(rewritten, 0.75)
+    extra["intent_gemini_yes"] = rewritten.via == "gemini" and is_confident_sales(rewritten, 0.75)
+    return normalize_client_ops(ev, rewritten)
+
+
+def normalize_client_ops(ev: Engagement, decision: IntentDecision | None) -> IntentDecision | None:
+    """client_ops is Paid/Signed only. Open pipeline stays sales or review."""
+    if not isinstance(decision, IntentDecision):
+        return decision
+    if (decision.intent or "") != "client_ops":
+        return decision
+    if is_closed_won_client(ev):
+        return decision
+    blob = _blob(ev)
+    if ev.source in {"cube_acr", "fireflies"}:
+        sales_hit = has_word_hint(blob, STRICT_DISCOVERY_HINTS) or has_word_hint(blob, SALES_HINTS)
+    else:
+        sales_hit = has_word_hint(blob, SALES_HINTS)
+    if sales_hit or _has_salesglider_deal(ev):
+        rewritten = IntentDecision(
+            verdict="yes",
+            intent="sales",
+            confidence=max(0.8, min(decision.confidence or 0.8, 0.9)),
+            reason="Open deal — not a Paid/Signed client, stay updatable",
             stage=decision.stage,
+            amount=decision.amount,
+            via=decision.via,
+        )
+    else:
+        rewritten = IntentDecision(
+            verdict="review",
+            intent="",
+            confidence=min(decision.confidence or 0.4, 0.4),
+            reason="client_ops without Paid/Signed",
+            stage="",
             amount=decision.amount,
             via=decision.via,
         )
@@ -428,7 +478,8 @@ def apply_deal_holder_veto(ev: Engagement, decision: IntentDecision | None = Non
 def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
     cached = getattr(ev, "_intent_decision", None)
     if isinstance(cached, IntentDecision):
-        return apply_deal_holder_veto(ev, cached) or cached
+        vetoed = apply_deal_holder_veto(ev, cached) or cached
+        return normalize_client_ops(ev, vetoed) or vetoed
     decision = heuristic_intent(ev)
     decision = _veto_learning_vendor_in_sales_context(ev, decision)
     if decision.verdict == "review" and settings and settings.gemini_key:
@@ -442,6 +493,7 @@ def classify(settings: Settings | None, ev: Engagement) -> IntentDecision:
             except Exception:
                 pass
     decision = apply_deal_holder_veto(ev, decision) or decision
+    decision = normalize_client_ops(ev, decision) or decision
     ev._intent_decision = decision
     extra = ev.extra
     extra["intent_via"] = decision.via

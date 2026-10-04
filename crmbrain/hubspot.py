@@ -9,7 +9,17 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import STAGE, Settings, digits_phone, is_excluded_contact, is_zoom_room_address
+from crmbrain.config import (
+    LOST_REASONS,
+    NO_SHOW_HINT,
+    SG_DEAL_TYPES,
+    STAGE,
+    Settings,
+    digits_phone,
+    is_deleted_stage,
+    is_excluded_contact,
+    is_zoom_room_address,
+)
 from crmbrain.models import Engagement
 from crmbrain.names import names_fuzzy_match, prefer_contact_name
 from crmbrain import intelligence, policy
@@ -80,6 +90,22 @@ CONTACT_PROPS = [
         "description": "How this person earned a HubSpot record: call, meeting, reply, LinkedIn, Allo, RVM.",
     },
     {
+        "name": "nurture_thread_id",
+        "label": "Nurture thread id",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "contactinformation",
+        "description": "Gmail thread started by the first #nurture email. Later nurture touches reply here only.",
+    },
+    {
+        "name": "nurture_thread_subject",
+        "label": "Nurture thread subject",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "contactinformation",
+        "description": "Subject of the #nurture thread so later touches can reply with Re:.",
+    },
+    {
         "name": "gift_ideas",
         "label": "Gift ideas",
         "type": "string",
@@ -87,6 +113,13 @@ CONTACT_PROPS = [
         "groupName": "contactinformation",
     },
 ]
+
+def _enum_options(values: tuple[str, ...] | list[str]) -> list[dict]:
+    return [
+        {"label": value.replace("_", " ").title(), "value": value, "displayOrder": i, "hidden": False}
+        for i, value in enumerate(values)
+    ]
+
 
 DEAL_PROPS = [
     {
@@ -96,6 +129,87 @@ DEAL_PROPS = [
         "fieldType": "booleancheckbox",
         "groupName": "dealinformation",
         "description": "When true, CRMBrain will not change stage or amount on this deal.",
+    },
+    {
+        "name": "lost_reason",
+        "label": "Lost reason",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "options": _enum_options(LOST_REASONS),
+    },
+    {
+        "name": "nurture_reason",
+        "label": "Nurture reason",
+        "type": "string",
+        "fieldType": "textarea",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "nurture_thread_id",
+        "label": "Nurture thread id",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "dealinformation",
+        "description": "Gmail thread started by the first #nurture email. Later nurture touches reply here only.",
+    },
+    {
+        "name": "nurture_thread_subject",
+        "label": "Nurture thread subject",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "sg_deal_type",
+        "label": "SG deal type",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "options": _enum_options(SG_DEAL_TYPES),
+    },
+    {
+        "name": "monthly_fee",
+        "label": "Monthly fee",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "contract_months",
+        "label": "Contract months",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "contract_end_date",
+        "label": "Contract end date",
+        "type": "date",
+        "fieldType": "date",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "no_show_count",
+        "label": "No-show count",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "positive_replies_30d",
+        "label": "Positive replies last 30 days",
+        "type": "number",
+        "fieldType": "number",
+        "groupName": "dealinformation",
+    },
+    {
+        "name": "josh_review_flag",
+        "label": "Josh review flag",
+        "type": "string",
+        "fieldType": "text",
+        "groupName": "dealinformation",
+        "description": "Non-empty means Josh needs to review this deal.",
     },
 ]
 
@@ -209,20 +323,134 @@ class HubSpot:
                     logger.warning("create deal prop %s: %s", prop["name"], created.text[:300])
 
     def _search(self, object_name: str, filters: list[dict], properties: list[str]) -> list[dict]:
-        payload = {
-            "filterGroups": [{"filters": filters}],
-            "properties": properties,
-            "limit": 10,
-        }
+        return self.search_objects(object_name, filters, properties, page_limit=10)
+
+    def search_objects(
+        self,
+        object_name: str,
+        filters: list[dict],
+        properties: list[str],
+        *,
+        page_limit: int = 100,
+        max_results: int = 500,
+    ) -> list[dict]:
+        out: list[dict] = []
+        after = None
+        while len(out) < max_results:
+            payload: dict[str, Any] = {
+                "filterGroups": [{"filters": filters}],
+                "properties": properties,
+                "limit": min(100, page_limit, max_results - len(out)),
+            }
+            if after:
+                payload["after"] = after
+            resp = self._request(
+                "POST",
+                f"/crm/v3/objects/{object_name}/search",
+                json=payload,
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            out.extend(data.get("results") or [])
+            after = (data.get("paging") or {}).get("next", {}).get("after")
+            if not after:
+                break
+        return out
+
+    def contacts_for_deal(self, deal_id: str, properties: list[str] | None = None) -> list[dict]:
+        if not deal_id:
+            return []
         resp = self._request(
-            "POST",
-            f"/crm/v3/objects/{object_name}/search",
-            json=payload,
+            "GET",
+            f"/crm/v4/objects/deals/{deal_id}/associations/contacts",
             retry=True,
             timeout=READ_TIMEOUT,
         )
-        resp.raise_for_status()
-        return resp.json().get("results", [])
+        if resp.status_code >= 400:
+            return []
+        ids = []
+        for row in resp.json().get("results") or []:
+            cid = row.get("toObjectId") or row.get("id")
+            if cid:
+                ids.append(str(cid))
+        props = ",".join(
+            properties
+            or [
+                "email",
+                "firstname",
+                "lastname",
+                "phone",
+                "company",
+                "personal_details",
+                "family_notes",
+                "relationship_hooks",
+                "pain_points",
+                "jobtitle",
+                "engagements_last_meeting_booked",
+                "notes_last_contacted",
+                "crm_source",
+                "industry",
+                "nurture_thread_id",
+                "nurture_thread_subject",
+            ]
+        )
+        contacts = []
+        for cid in ids:
+            c = self._request(
+                "GET",
+                f"/crm/v3/objects/contacts/{cid}",
+                params={"properties": props},
+                retry=True,
+                timeout=20,
+            )
+            if c.ok:
+                contacts.append(c.json())
+        return contacts
+
+    def associated_company_industry(self, *, contact_id: str = "", deal_id: str = "") -> str:
+        """HubSpot company.industry for the associated company — not the contact field."""
+        cache = getattr(self, "_company_industry_cache", None)
+        if cache is None:
+            self._company_industry_cache = {}
+            cache = self._company_industry_cache
+        for kind, oid in (("contact", contact_id), ("deal", deal_id)):
+            key = f"{kind}:{oid}"
+            if not oid:
+                continue
+            if key in cache:
+                if cache[key]:
+                    return cache[key]
+                continue
+            from_object = "contacts" if kind == "contact" else "deals"
+            resp = self._request(
+                "GET",
+                f"/crm/v4/objects/{from_object}/{oid}/associations/companies",
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
+            industry = ""
+            if resp.ok:
+                company_id = ""
+                for row in resp.json().get("results") or []:
+                    company_id = str(row.get("toObjectId") or row.get("id") or "")
+                    if company_id:
+                        break
+                if company_id:
+                    c = self._request(
+                        "GET",
+                        f"/crm/v3/objects/companies/{company_id}",
+                        params={"properties": "name,industry"},
+                        retry=True,
+                        timeout=20,
+                    )
+                    if c.ok:
+                        industry = str((c.json().get("properties") or {}).get("industry") or "").strip()
+            cache[key] = industry
+            if industry:
+                return industry
+        return ""
 
     def find_contact(self, email: str = "", phone: str = "", name: str = "") -> dict | None:
         if email and is_zoom_room_address(email):
@@ -247,13 +475,13 @@ class HubSpot:
                     return rows[0]
         return self._find_contact_by_name(name)
 
-    def _find_contact_by_name(self, name: str) -> dict | None:
-        """Exact first+last match. Skip if zero or multiple hits."""
+    def find_contacts_by_name(self, name: str) -> list[dict]:
+        """Every exact first+last match. Caller decides unique vs attach-to-richest."""
         parts = [p for p in (name or "").strip().split() if p]
         if len(parts) < 2:
-            return None
+            return []
         first, last = parts[0], " ".join(parts[1:])
-        rows = self._search(
+        return self._search(
             "contacts",
             [
                 {"propertyName": "firstname", "operator": "EQ", "value": first},
@@ -261,16 +489,18 @@ class HubSpot:
             ],
             CONTACT_SEARCH_PROPS,
         )
-        if len(rows) == 1:
-            return rows[0]
-        return None
 
-    def find_contact_fuzzy(self, name: str = "", company: str = "") -> dict | None:
-        """Company plus fuzzy person name (MacAntosh / McAntosh at Emcor)."""
+    def _find_contact_by_name(self, name: str) -> dict | None:
+        """Exact first+last match. Skip if zero or multiple hits."""
+        rows = self.find_contacts_by_name(name)
+        return rows[0] if len(rows) == 1 else None
+
+    def find_contacts_fuzzy(self, name: str = "", company: str = "") -> list[dict]:
+        """Every company plus fuzzy person-name hit."""
         raw_company = (company or "").strip()
         raw_name = (name or "").strip()
         if not raw_name or len(raw_company) < 3:
-            return None
+            return []
         rows = self._search(
             "contacts",
             [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw_company}],
@@ -282,9 +512,12 @@ class HubSpot:
             full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
             if names_fuzzy_match(raw_name, full):
                 hits.append(row)
-        if len(hits) == 1:
-            return hits[0]
-        return None
+        return hits
+
+    def find_contact_fuzzy(self, name: str = "", company: str = "") -> dict | None:
+        """Company plus fuzzy person name (MacAntosh / McAntosh at Emcor)."""
+        hits = self.find_contacts_fuzzy(name, company)
+        return hits[0] if len(hits) == 1 else None
 
     def in_crm(self, email: str = "", phone: str = "") -> bool:
         return self.find_contact(email=email, phone=phone) is not None
@@ -317,7 +550,13 @@ class HubSpot:
         if self._is_excluded(ev):
             logger.info("skip hubspot contact write for excluded person")
             return {"id": "", "properties": {}, "skipped": "non_deal"}
-        existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
+        existing = policy.resolve_engagement_contact(self, ev)
+        if not existing and (ev.extra or {}).get("name_ambiguous"):
+            return {"id": "", "properties": {}, "skipped": "ambiguous_name"}
+        if not existing and (ev.extra or {}).get("non_person"):
+            return {"id": "", "properties": {}, "skipped": "non_person"}
+        if not existing:
+            existing = self.find_contact(email=ev.email, phone=ev.phone, name=ev.display_name())
         existing_props = (existing or {}).get("properties") or {}
         first = prefer_contact_name(
             existing_props.get("firstname") or "",
@@ -440,12 +679,21 @@ class HubSpot:
                 deals.append(d.json())
         return deals
 
-    def _archive_duplicate_deals(self, deals: list[dict]) -> list[dict]:
+    def _archive_duplicate_deals(self, deals: list[dict], ev: Engagement | None = None) -> list[dict]:
         """Soft-archive same-stage, no-amount duplicates. Keep the richer deal."""
+        from crmbrain.deal_write import authorize_deal_lifecycle, record_lifecycle_refusal
+
         archived_ids: set[str] = set()
+        report = getattr(self, "report", None)
         for _keep, dup in policy.duplicate_open_deal_pairs(deals):
             dup_id = str(dup.get("id") or "")
             if not dup_id or dup_id in archived_ids:
+                continue
+            ok, reason = authorize_deal_lifecycle(
+                dup, ev=ev, settings=self.settings, action="archive"
+            )
+            if not ok:
+                record_lifecycle_refusal(dup, reason, "archive", report=report)
                 continue
             try:
                 self.archive_deal(dup_id)
@@ -525,6 +773,9 @@ class HubSpot:
         return None
 
     def _apply_live_deal(self, deal: dict, ev: Engagement, stage: str, amount: str, contact: dict) -> dict:
+        if _refused_dealstage(stage):
+            logger.info("refuse dealstage write %s", stage)
+            stage = ""
         current = (deal.get("properties") or {}).get("dealstage") or ""
         target = (
             policy.choose_deal_action(current, stage, ev, deal=deal, settings=self.settings)
@@ -540,13 +791,21 @@ class HubSpot:
         if policy.is_weak_deal_name(current_name) and wanted:
             cleaned = wanted
         if target:
-            self.move_deal(
-                deal["id"],
-                target,
-                evidence=f"{ev.source}:{ev.external_id}",
-                dealname=cleaned if cleaned and cleaned != current_name else "",
+            from crmbrain.deal_write import authorize_deal_lifecycle, record_lifecycle_refusal
+
+            ok, reason = authorize_deal_lifecycle(
+                deal, ev=ev, settings=self.settings, action="move"
             )
-            deal.setdefault("properties", {})["dealstage"] = target
+            if not ok:
+                record_lifecycle_refusal(deal, reason, "move", report=getattr(self, "report", None))
+            else:
+                self.move_deal(
+                    deal["id"],
+                    target,
+                    evidence=f"{ev.source}:{ev.external_id}",
+                    dealname=cleaned if cleaned and cleaned != current_name else "",
+                )
+                deal.setdefault("properties", {})["dealstage"] = target
         elif cleaned and cleaned != current_name:
             self.patch_deal(str(deal["id"]), {"dealname": cleaned})
         if cleaned and cleaned != current_name:
@@ -555,11 +814,14 @@ class HubSpot:
         return deal
 
     def upsert_deal(self, contact: dict, ev: Engagement, stage: str, amount: str = "") -> dict:
+        if _refused_dealstage(stage):
+            logger.info("refuse dealstage write %s", stage)
+            return {}
         if self._is_excluded(ev, contact):
             logger.info("skip hubspot deal write for excluded person")
             return {}
         contact_id = contact["id"]
-        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id), ev=ev)
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)
@@ -577,7 +839,7 @@ class HubSpot:
         if not target:
             return {}
         # HubSpot workflows can create a deal between the first read and POST.
-        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id))
+        existing = self._archive_duplicate_deals(self.open_deals_for_contact(contact_id), ev=ev)
         live = policy.live_open_deals(existing)
         if live:
             deal = max(live, key=policy.deal_richness)
@@ -656,10 +918,38 @@ class HubSpot:
                 logger.warning("amount note failed %s: %s", contact.get("id"), exc)
         return True
 
+    def create_pipeline_deal(self, contact_id: str, properties: dict[str, Any]) -> dict:
+        """Create a deal on an explicit pipeline (renewals). Refuses deleted stages."""
+        from crmbrain.config import RENEWAL_PIPELINE
+
+        stage = str(properties.get("dealstage") or "")
+        if _refused_dealstage(stage):
+            logger.warning("refuse dealstage write %s", stage)
+            return {}
+        props = {k: v for k, v in properties.items() if v not in (None, "")}
+        props.setdefault("pipeline", RENEWAL_PIPELINE)
+        payload = {
+            "properties": props,
+            "associations": [
+                {
+                    "to": {"id": contact_id},
+                    "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 3}],
+                }
+            ],
+        }
+        resp = self._request("POST", "/crm/v3/objects/deals", json=payload, timeout=WRITE_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
     def patch_deal(self, deal_id: str, properties: dict[str, Any]) -> None:
-        properties = {k: v for k, v in properties.items() if v}
+        properties = {k: v for k, v in properties.items() if v not in (None, "")}
         if not properties:
             return
+        if _refused_dealstage(str(properties.get("dealstage") or "")):
+            logger.warning("refuse dealstage write %s", properties.get("dealstage"))
+            properties = {k: v for k, v in properties.items() if k != "dealstage"}
+            if not properties:
+                return
         resp = self._request(
             "PATCH",
             f"/crm/v3/objects/deals/{deal_id}",
@@ -669,9 +959,16 @@ class HubSpot:
         resp.raise_for_status()
 
     def move_deal(self, deal_id: str, stage: str, evidence: str, dealname: str = "") -> None:
+        if _refused_dealstage(stage):
+            logger.warning("refuse dealstage write %s", stage)
+            return
         props = {"dealstage": stage}
         if dealname:
             props["dealname"] = dealname
+        if stage == STAGE["closed_won"]:
+            existing = _existing_closedate(self, deal_id)
+            if existing:
+                props["closedate"] = existing
         resp = self._request(
             "PATCH",
             f"/crm/v3/objects/deals/{deal_id}",
@@ -679,6 +976,12 @@ class HubSpot:
             timeout=WRITE_TIMEOUT,
         )
         resp.raise_for_status()
+
+    def increment_no_show_count(self, deal: dict) -> int:
+        return increment_no_show_count(self, deal)
+
+    def set_josh_review_flag(self, deal: dict, reason: str) -> None:
+        set_josh_review_flag(self, deal, reason)
 
     def upcoming_meetings(self) -> list[dict]:
         """Meetings in HubSpot engagements if available; otherwise empty (Gmail/Calendly fills this)."""
@@ -723,32 +1026,38 @@ class HubSpot:
             if not after:
                 break
 
-    def contacts_for_deal(self, deal_id: str) -> list[dict]:
-        resp = self._request(
-            "GET",
-            f"/crm/v4/objects/deals/{deal_id}/associations/contacts",
-            retry=True,
-            timeout=20,
-        )
-        if resp.status_code >= 400:
-            return []
-        out = []
-        for row in resp.json().get("results") or []:
-            cid = row.get("toObjectId") or row.get("id")
-            if not cid:
-                continue
-            c = self._request(
+    def last_meeting_at(self, contact_id: str):
+        """Most recent HubSpot meeting start time for this contact, or None."""
+        from datetime import datetime, timezone
+
+        ids = self._meeting_association_ids(contact_id)
+        latest = None
+        for mid in ids:
+            resp = self._request(
                 "GET",
-                f"/crm/v3/objects/contacts/{cid}",
-                params={
-                    "properties": "email,firstname,lastname,phone,company,crm_source,hs_linkedin_url"
-                },
+                f"/crm/v3/objects/meetings/{mid}",
+                params={"properties": "hs_meeting_start_time,hs_timestamp,hs_meeting_title"},
                 retry=True,
                 timeout=20,
             )
-            if c.ok:
-                out.append(c.json())
-        return out
+            if resp.status_code >= 400:
+                continue
+            props = (resp.json() or {}).get("properties") or {}
+            raw = props.get("hs_meeting_start_time") or props.get("hs_timestamp")
+            if not raw:
+                continue
+            try:
+                if str(raw).isdigit():
+                    stamp = datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
+                else:
+                    stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                continue
+            if latest is None or stamp > latest:
+                latest = stamp
+        return latest
 
     def contact_has_meetings(self, contact_id: str) -> bool:
         """True only for real HubSpot meeting engagements. Emails do not count."""
@@ -843,6 +1152,55 @@ class HubSpot:
             return
         if resp.status_code >= 400:
             raise RuntimeError(f"archive contact {contact_id}: {resp.text[:200]}")
+
+
+def _refused_dealstage(stage: str) -> bool:
+    raw = (stage or "").strip()
+    if not raw:
+        return False
+    return is_deleted_stage(raw) or raw in {NO_SHOW_HINT, "no_show", "increment_no_show_count"}
+
+
+def _existing_closedate(hs: HubSpot, deal_id: str) -> str:
+    try:
+        resp = hs._request(
+            "GET",
+            f"/crm/v3/objects/deals/{deal_id}",
+            params={"properties": "closedate"},
+            retry=True,
+            timeout=READ_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return ""
+        return str(((resp.json() or {}).get("properties") or {}).get("closedate") or "").strip()
+    except Exception:
+        return ""
+
+
+def increment_no_show_count(hs: HubSpot, deal: dict) -> int:
+    """Increment no_show_count. Never changes dealstage."""
+    if not deal or not deal.get("id"):
+        return 0
+    if policy.deal_is_locked(deal):
+        return 0
+    props = deal.setdefault("properties", {})
+    try:
+        current = int(float(str(props.get("no_show_count") or "0").strip() or "0"))
+    except (TypeError, ValueError):
+        current = 0
+    new = current + 1
+    hs.patch_deal(str(deal["id"]), {"no_show_count": str(new)})
+    props["no_show_count"] = str(new)
+    return new
+
+
+def set_josh_review_flag(hs: HubSpot, deal: dict, reason: str) -> None:
+    if not deal or not deal.get("id") or not reason:
+        return
+    if policy.deal_is_locked(deal):
+        return
+    hs.patch_deal(str(deal["id"]), {"josh_review_flag": reason})
+    deal.setdefault("properties", {})["josh_review_flag"] = reason
 
 
 def _sleep(seconds: float) -> None:
