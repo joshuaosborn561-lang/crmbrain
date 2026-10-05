@@ -228,6 +228,7 @@ def _queue_review(
             {
                 "person_key": timeline.key,
                 "email": timeline.email,
+                "phone": timeline.phone,
                 "name": label,
                 "company": timeline.company,
                 "intent": decision.intent if decision else "",
@@ -362,6 +363,32 @@ def _commit(
     return True
 
 
+def calendar_source_unreliable(
+    calendar_api_ok: bool = True,
+    hs: HubSpot | None = None,
+    report: CycleReport | None = None,
+    calendar_error: str = "",
+) -> bool:
+    """True when Calendar cannot be trusted for reply-only archive (403 / stale / error)."""
+    if calendar_api_ok is False:
+        return True
+    if hs is not None and getattr(hs, "calendar_api_ok", True) is False:
+        return True
+    err = calendar_error or (getattr(hs, "calendar_api_error", "") if hs is not None else "")
+    if err:
+        return True
+    if report is not None:
+        if getattr(report, "calendar_api_ok", True) is False:
+            return True
+        for line in list(report.stale_sources or []) + list(report.warnings or []) + list(report.errors or []):
+            text = str(line).lower()
+            if not text.startswith("calendar") and "calendar" not in text:
+                continue
+            if any(token in text for token in ("403", "401", "stale", "unavailable", "permission")):
+                return True
+    return False
+
+
 def apply_timeline(
     timeline: PersonTimeline,
     settings: Settings,
@@ -375,6 +402,7 @@ def apply_timeline(
     dry_run: bool = False,
     budget: WriteBudget | None = None,
     held_events: list[Engagement] | None = None,
+    calendar_api_ok: bool = True,
 ) -> IntentDecision:
     del held_events
     budget = budget or WriteBudget.from_settings(settings)
@@ -429,7 +457,22 @@ def apply_timeline(
 
     if evidence.reply_only(timeline) and not has_upcoming:
         if deal and current == STAGE["discovery_scheduled"] and current not in PROTECTED_STAGES:
-            if _may_archive_reply_only(hs, timeline.contact, deal):
+            if calendar_source_unreliable(calendar_api_ok, hs=hs, report=report):
+                _queue_review(
+                    memory, report, timeline, decision, reason="calendar_unavailable", dry_run=dry_run
+                )
+                report.skipped.append(f"{label} reply-only, calendar unavailable")
+            elif policy.deal_has_post_freeze_manual_edit(deal, settings):
+                _queue_review(
+                    memory,
+                    report,
+                    timeline,
+                    decision,
+                    reason="post_freeze_manual_edit",
+                    dry_run=dry_run,
+                )
+                report.skipped.append(f"{label} reply-only, post-freeze manual edit")
+            elif _may_archive_reply_only(hs, timeline.contact, deal, calendar_api_ok=calendar_api_ok):
                 _commit(
                     hs,
                     memory,
@@ -445,6 +488,7 @@ def apply_timeline(
                     timeline=timeline,
                     deal=deal,
                     dry_run=dry_run,
+                    settings=settings,
                 )
             else:
                 report.skipped.append(f"{label} reply-only, keep (meeting evidence)")
@@ -735,7 +779,11 @@ def _attendee_hit(hs: HubSpot, email: str) -> bool:
     return low in upcoming or low in recent
 
 
-def _may_archive_reply_only(hs: HubSpot, contact: dict | None, deal: dict) -> bool:
+def _may_archive_reply_only(
+    hs: HubSpot, contact: dict | None, deal: dict, *, calendar_api_ok: bool = True
+) -> bool:
+    if not calendar_api_ok or calendar_source_unreliable(calendar_api_ok, hs=hs):
+        return False
     if not contact or not deal:
         return False
     source = ((contact.get("properties") or {}).get("crm_source") or "").lower()
@@ -1001,8 +1049,9 @@ def _planned_change_count(
         )
         deal_id = str((deal or {}).get("id") or "")
         if evidence.reply_only(timeline) and deal and current == STAGE["discovery_scheduled"]:
-            if deal_id:
-                changed.add(deal_id)
+            if calendar_api_ok and not policy.deal_has_post_freeze_manual_edit(deal, settings):
+                if deal_id:
+                    changed.add(deal_id)
             continue
         write = evidence_move(current, target, timeline, ev, settings=settings, deal=deal) if target else None
         if write and deal_id:
@@ -1075,7 +1124,7 @@ def planned_change_person_keys(
     memory: Memory | None = None,
 ) -> set[str]:
     """People reconcile would write, from unprocessed events only."""
-    del calendar_api_ok, held_events
+    del held_events
     keys: set[str] = set()
     upcoming_emails = {e.lower() for e in (upcoming_emails or set())}
     for timeline in timelines.values():
@@ -1099,7 +1148,8 @@ def planned_change_person_keys(
             past_grace=not (email and email in upcoming_emails),
         )
         if evidence.reply_only(timeline) and deal and current == STAGE["discovery_scheduled"]:
-            keys.add(timeline.key)
+            if calendar_api_ok and not policy.deal_has_post_freeze_manual_edit(deal, settings):
+                keys.add(timeline.key)
             continue
         write = evidence_move(current, target, timeline, ev, settings=settings, deal=deal) if target else None
         if write and deal:
@@ -1176,6 +1226,7 @@ def run(
                 dry_run=dry_run,
                 budget=budget,
                 held_events=held_events,
+                calendar_api_ok=calendar_api_ok,
             )
         except Exception as exc:
             report.errors.append(f"reconcile {timeline.display_name()}: {exc}")

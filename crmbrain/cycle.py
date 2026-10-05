@@ -84,6 +84,7 @@ def _queue_cap_review(memory: Memory, report: CycleReport, ev: Engagement) -> No
             {
                 "person_key": ev.email or ev.phone or ev.display_name() or ev.external_id,
                 "email": ev.email,
+                "phone": ev.phone,
                 "name": ev.display_name(),
                 "company": ev.company,
                 "reason": "cap",
@@ -263,6 +264,7 @@ def _record_person_intent_no(
             {
                 "person_key": ev.email or ev.phone or ev.display_name(),
                 "email": ev.email,
+                "phone": ev.phone,
                 "name": ev.display_name(),
                 "company": ev.company,
                 "intent": decision.intent,
@@ -452,6 +454,7 @@ def _handle_engagement(
                 {
                     "person_key": ev.email or ev.phone or ev.display_name(),
                     "email": ev.email,
+                    "phone": ev.phone,
                     "name": ev.display_name(),
                     "company": ev.company,
                     "intent": decision.intent,
@@ -718,6 +721,7 @@ def _apply_transcript_intelligence(
                 {
                     "person_key": ev.email or ev.phone or ev.display_name(),
                     "email": ev.email,
+                    "phone": ev.phone,
                     "name": ev.display_name(),
                     "company": ev.company,
                     "reason": "poc_hint",
@@ -737,6 +741,7 @@ def _apply_transcript_intelligence(
                     {
                         "person_key": ev.email or ev.phone or ev.display_name(),
                         "email": ev.email,
+                        "phone": ev.phone,
                         "name": ev.display_name(),
                         "company": ev.company,
                         "reason": "paperwork",
@@ -1426,8 +1431,11 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                 starts = [e.start for e in snap.events if e.start]
                 calendar_last = max(starts) if starts else now_utc()
             report.calendar_api_ok = snap.calendar_api_ok
+            hs.calendar_api_ok = snap.calendar_api_ok
+            hs.calendar_api_error = snap.calendar_api_error or ""
             if not snap.calendar_api_ok:
                 calendar_error = snap.calendar_api_error or "calendar api unavailable"
+                hs.calendar_api_error = calendar_error
                 if _is_calendar_auth_error(calendar_error):
                     _stale_source_warning(report, "calendar", calendar_error)
                 else:
@@ -1436,6 +1444,8 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             calendar_error = str(exc)
             logger.warning("calendar attendees unavailable: %s", exc)
             report.calendar_api_ok = False
+            hs.calendar_api_ok = False
+            hs.calendar_api_error = calendar_error
             if _is_calendar_auth_error(str(exc)):
                 _stale_source_warning(report, "calendar", str(exc))
             else:

@@ -646,6 +646,12 @@ def should_move_stage(
 
 MANUAL_SOURCE_TYPES = frozenset({"CRM_UI", "USER"})
 INTEGRATION_SOURCE_TYPES = frozenset({"API", "INTEGRATION", "AUTOMATION_PLATFORM", "MERGE_OBJECTS"})
+MANUAL_HISTORY_PROPS = (
+    "dealstage",
+    "amount",
+    "hs_manual_forecast_category",
+    "hs_forecast_category",
+)
 
 
 def _parse_hs_datetime(value: object) -> datetime | None:
@@ -702,7 +708,7 @@ def last_manual_modification(deal: dict | None) -> datetime | None:
         return hook
     latest: datetime | None = None
     history = deal.get("propertiesWithHistory") or {}
-    for key in ("dealstage", "amount"):
+    for key in MANUAL_HISTORY_PROPS:
         for row in history.get(key) or []:
             if not isinstance(row, dict):
                 continue
@@ -727,6 +733,18 @@ def event_predates_manual_edit(ev: Engagement, deal: dict | None) -> bool:
         return False
     occurred = _aware(ev.occurred_at)
     return bool(occurred and occurred < manual)
+
+
+def deal_has_post_freeze_manual_edit(deal: dict | None, settings: Settings | None) -> bool:
+    """True when Josh edited stage, amount, or forecast after CRMBRAIN_MANUAL_FREEZE_AT."""
+    freeze = getattr(settings, "manual_freeze_at", None) if settings else None
+    if not freeze or not deal:
+        return False
+    manual = last_manual_modification(deal)
+    if not manual:
+        return False
+    freeze_at = _aware(freeze)
+    return bool(freeze_at and manual > freeze_at)
 
 
 def deal_is_locked(deal: dict | None) -> bool:
@@ -905,6 +923,8 @@ def may_mutate_existing_deal(
     if deal_is_locked(deal):
         return False
     if event_predates_freeze(ev, settings):
+        return False
+    if deal_has_post_freeze_manual_edit(deal, settings):
         return False
     if event_predates_manual_edit(ev, deal):
         return False
