@@ -504,6 +504,144 @@ class Memory:
             return None
         return resp.json()
 
+    def _person_intent_keys(self, email: str = "", phone: str = "", name: str = "", person_key: str = "") -> list[str]:
+        from crmbrain.config import digits_phone
+        from crmbrain.evidence import person_key as make_person_key
+
+        keys: list[str] = []
+        pk = (person_key or "").strip() or make_person_key(email, phone, name)
+        if pk:
+            keys.append(pk)
+        email_l = (email or "").strip().lower()
+        if email_l:
+            keys.append(f"email:{email_l}")
+        digits = digits_phone(phone)
+        if len(digits) >= 10:
+            keys.append(f"phone:{digits[-10:]}")
+        named = " ".join((name or "").lower().split())
+        if named:
+            keys.append(f"name:{named}")
+        seen: set[str] = set()
+        out: list[str] = []
+        for key in keys:
+            if key and key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+
+    def remember_person_intent(self, ev, decision) -> None:
+        """Persist a confident day_job/personal classification for later cycles."""
+        if self._skip_side_write("person_intents"):
+            return
+        intent_name = (getattr(decision, "intent", None) or "").strip()
+        if intent_name not in {"day_job", "personal"}:
+            return
+        display = ""
+        if hasattr(ev, "display_name"):
+            display = ev.display_name() or ""
+        email = (getattr(ev, "email", "") or "").strip().lower()
+        phone = getattr(ev, "phone", "") or ""
+        name = display or getattr(ev, "name", "") or ""
+        keys = self._person_intent_keys(email, phone, name)
+        row = {
+            "person_key": keys[0] if keys else "",
+            "email": email,
+            "phone": phone,
+            "name": name,
+            "intent": intent_name,
+            "confidence": float(getattr(decision, "confidence", 0.9) or 0.9),
+            "reason": getattr(decision, "reason", "") or "",
+        }
+        if not (row["person_key"] or row["email"] or row["phone"] or row["name"]):
+            return
+        store = self._local.setdefault("person_intents", [])
+        keys = set(
+            self._person_intent_keys(row["email"], row["phone"], row["name"], row["person_key"])
+        )
+        store[:] = [
+            existing
+            for existing in store
+            if not keys & set(
+                self._person_intent_keys(
+                    existing.get("email") or "",
+                    existing.get("phone") or "",
+                    existing.get("name") or "",
+                    existing.get("person_key") or "",
+                )
+            )
+        ]
+        store.append(row)
+        self.save_local()
+
+    def lookup_prior_non_sales_intent(self, ev):
+        """Find a prior day_job/personal classification for this person/phone."""
+        from crmbrain.models import IntentDecision
+
+        display = ev.display_name() if hasattr(ev, "display_name") else ""
+        keys = set(
+            self._person_intent_keys(
+                getattr(ev, "email", "") or "",
+                getattr(ev, "phone", "") or "",
+                display or getattr(ev, "name", "") or "",
+            )
+        )
+        if not keys:
+            return None
+
+        def _match(row: dict) -> bool:
+            if (row.get("intent") or "") not in {"day_job", "personal"}:
+                return False
+            other = set(
+                self._person_intent_keys(
+                    row.get("email") or "",
+                    row.get("phone") or "",
+                    row.get("name") or "",
+                    row.get("person_key") or "",
+                )
+            )
+            return bool(keys & other)
+
+        def _as_decision(row: dict) -> IntentDecision:
+            try:
+                confidence = float(row.get("confidence") or 0.9)
+            except (TypeError, ValueError):
+                confidence = 0.9
+            return IntentDecision(
+                verdict="no",
+                intent=str(row.get("intent") or ""),
+                confidence=max(0.75, min(1.0, confidence)),
+                reason=str(row.get("reason") or "Prior day_job/personal classification"),
+            )
+
+        for row in self._local.get("person_intents") or []:
+            if _match(row):
+                return _as_decision(row)
+        for row in self._local.get("review_queue") or []:
+            if _match(row):
+                return _as_decision(row)
+        if self.use_supabase:
+            from crmbrain.config import digits_phone
+
+            try:
+                params = {
+                    "intent": "in.(day_job,personal)",
+                    "select": "person_key,email,phone,name,intent,confidence,reason",
+                    "limit": "50",
+                }
+                digits = digits_phone(getattr(ev, "phone", "") or "")
+                email = (getattr(ev, "email", "") or "").strip().lower()
+                if len(digits) >= 10:
+                    tail = digits[-10:]
+                    params["or"] = f"(phone.ilike.*{tail}*,person_key.ilike.*{tail}*)"
+                elif email:
+                    params["email"] = f"eq.{email}"
+                for row in self._sb_schema("GET", "review_queue", params=params) or []:
+                    if _match(row):
+                        return _as_decision(row)
+            except Exception as exc:
+                self._record_error("lookup_prior_non_sales_intent", exc)
+        return None
+
     def enqueue_review(self, row: dict) -> None:
         if self._skip_side_write("review_queue"):
             return
