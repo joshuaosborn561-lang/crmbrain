@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS crmbrain.review_queue (
   id bigserial PRIMARY KEY,
   person_key text NOT NULL,
   email text,
+  phone text,
   name text,
   company text,
   intent text,
