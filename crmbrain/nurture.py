@@ -396,6 +396,8 @@ def next_weekday_midnight(now: datetime) -> datetime:
 
 
 def ticker_fired_on(row: dict, day) -> bool:
+    if not str(row.get("slack_ts") or "").strip():
+        return False
     stamped = parse_signal_at(row.get("last_fired_at") or "")
     if not stamped:
         return False
@@ -2303,6 +2305,11 @@ def fire_gate(
         if not activity and row.get("open_booked"):
             patch = {"status": "stopped", "stop_reason": "booked", "stopped_at": now.isoformat()}
             return "booked", patch
+    sent_at = parse_signal_at(row.get("last_sent_at"))
+    if sent_at and now - sent_at < timedelta(days=TICKER_DAYS):
+        nxt = sent_at + timedelta(days=TICKER_DAYS)
+        patch = {"status": "active", "stop_reason": "emailed_recently", "next_fire_at": nxt.isoformat()}
+        return "emailed_recently", patch
     if gmail_sent_at:
         nxt = gmail_sent_at + timedelta(days=TICKER_DAYS)
         patch = {"status": "active", "stop_reason": "emailed_recently", "next_fire_at": nxt.isoformat()}
@@ -2426,26 +2433,32 @@ def fire_due_rows(
         cards.append({**card, "ticker_id": row.get("id"), "email": row.get("email"), "name": row.get("name")})
         report.ticker_drafts.append(row.get("email") or row.get("name") or row.get("id"))
         report.nurture_cards.append(card)
+        slack_ok = False
         if post_on:
             try:
                 from crmbrain import slack_notify
 
                 posted_msg = (slack or slack_notify).post_blocks(settings, card["text"], card["blocks"])
-                if posted_msg and row.get("id"):
-                    memory.patch_ticker(
-                        str(row["id"]),
-                        {
-                            "slack_channel": posted_msg.get("channel") or settings.slack_channel,
-                            "slack_ts": posted_msg.get("ts") or "",
-                            "draft_subject": draft.subject,
-                            "draft_body": draft.body,
-                            "nurture_state": "queued",
-                        },
-                    )
+                if posted_msg and str(posted_msg.get("ts") or "").strip():
+                    slack_ok = True
+                    if row.get("id"):
+                        memory.patch_ticker(
+                            str(row["id"]),
+                            {
+                                "slack_channel": posted_msg.get("channel") or settings.slack_channel,
+                                "slack_ts": posted_msg.get("ts") or "",
+                                "draft_subject": draft.subject,
+                                "draft_body": draft.body,
+                                "nurture_state": "queued",
+                            },
+                        )
             except Exception as exc:
                 report.errors.append(f"slack ticker: {exc}")
-        next_fire = (now + timedelta(days=TICKER_DAYS)).isoformat()
-        memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
+        if slack_ok:
+            next_fire = (now + timedelta(days=TICKER_DAYS)).isoformat()
+            memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
+        elif post_on:
+            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} slack_post_failed")
     return cards
 
 
@@ -3061,25 +3074,15 @@ def _pick_one_per_company(rows: list[dict]) -> tuple[list[dict], int]:
     return unique, dropped
 
 
-def sample_hubspot_nurture_cards(
+def collect_hubspot_nurture_rows(
     settings: Settings,
-    limit: int = 10,
     *,
     hs=None,
     gmail=None,
-    out_path: str | None = None,
 ) -> dict[str, Any]:
-    """Read HubSpot Nurture-stage deals and compose sample cards.
-
-    Cards come from dealstage 3486952153 only. Hard-excluded people, archived
-    rows, Closed Won clients/domains, and Client Renewals contacts are dropped.
-    One card per company per run.
-    """
-    from pathlib import Path
-
+    """v11 sample eligibility: HubSpot Nurture deals, verified met/booked, one per company."""
     from crmbrain.config import email_domain
 
-    limit = max(1, int(limit or 10))
     gmail = gmail_client_for_cards(settings, gmail)
     if hs is None:
         if not getattr(settings, "hubspot_token", ""):
@@ -3088,15 +3091,21 @@ def sample_hubspot_nurture_cards(
 
         hs = HubSpot(settings)
     won_emails, won_domains, renewal_emails = _harvest_block_sets(hs)
-    search = hs.search_objects
-    nurture_deals = search(
-        "deals",
-        [
-            {"propertyName": "dealstage", "operator": "EQ", "value": STAGE["nurture"]},
-        ],
-        _SAMPLE_DEAL_PROPS,
-        max_results=400,
-    )
+    search = getattr(hs, "search_objects", None)
+    if not callable(search):
+        return {"rows": [], "skipped": {"hubspot_unavailable": 1}, "dealstage": STAGE["nurture"]}
+    try:
+        nurture_deals = search(
+            "deals",
+            [
+                {"propertyName": "dealstage", "operator": "EQ", "value": STAGE["nurture"]},
+            ],
+            _SAMPLE_DEAL_PROPS,
+            max_results=400,
+        )
+    except Exception as exc:
+        logger.warning("hubspot nurture search failed: %s", exc)
+        return {"rows": [], "skipped": {"hubspot_unavailable": 1}, "dealstage": STAGE["nurture"]}
     skipped: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -3300,11 +3309,202 @@ def sample_hubspot_nurture_cards(
                     "booked": extra.get("booked"),
                 }
             )
-    attached = [attach_gmail_thread(row) for row in candidates]
+    attached = [attach_gmail_thread(row, gmail) for row in candidates]
     picked, dropped = _pick_one_per_company(attached)
     if dropped:
         skipped["same_company"] = skipped.get("same_company", 0) + dropped
     picked.sort(key=_card_rank, reverse=True)
+    return {"rows": picked, "skipped": skipped, "dealstage": STAGE["nurture"]}
+
+
+def matching_ticker_row(existing: list[dict], row: dict) -> dict | None:
+    deal = str(row.get("hs_deal_id") or "").strip()
+    contact = str(row.get("hs_contact_id") or "").strip()
+    email = (row.get("email") or "").strip().lower()
+    for ticker in existing or []:
+        if deal and str(ticker.get("hs_deal_id") or "").strip() == deal:
+            return ticker
+        if contact and str(ticker.get("hs_contact_id") or "").strip() == contact:
+            return ticker
+        if email and (ticker.get("email") or "").strip().lower() == email:
+            return ticker
+    return None
+
+
+def ticker_row_from_nurture_card(row: dict, *, now: datetime | None = None) -> dict:
+    """New HubSpot Nurture enrollments are due now unless last_sent_at is inside 90 days."""
+    now = _aware(now or now_utc())
+    extra = dict(row.get("extra") or {})
+    extra["source_ref"] = str(row.get("hs_deal_id") or extra.get("source_ref") or "")
+    extra.setdefault("deal_stage", STAGE["nurture"])
+    extra.setdefault("last_touch_snippet", row.get("last_touch_snippet") or "")
+    extra.setdefault("met", row.get("met"))
+    extra.setdefault("booked", row.get("booked"))
+    extra.setdefault("meeting_at", row.get("meeting_at"))
+    extra.setdefault(NURTURE_THREAD_PROP, row.get(NURTURE_THREAD_PROP) or "")
+    extra.setdefault(NURTURE_SUBJECT_PROP, row.get(NURTURE_SUBJECT_PROP) or "")
+    candidate = TickerCandidate(
+        name=str(row.get("name") or ""),
+        email=str(row.get("email") or ""),
+        phone=str(row.get("phone") or ""),
+        company=str(row.get("company") or ""),
+        reason=str(row.get("reason") or ""),
+        last_signal=parse_signal_at(row.get("signal_at")) or now,
+        hs_contact_id=str(row.get("hs_contact_id") or ""),
+        hs_deal_id=str(row.get("hs_deal_id") or ""),
+        source="hubspot",
+        extra=extra,
+    )
+    ticker = nurture_row_from_candidate(candidate, now)
+    sent = parse_signal_at(row.get("last_sent_at"))
+    if sent and now - sent < timedelta(days=TICKER_DAYS):
+        ticker["next_fire_at"] = (sent + timedelta(days=TICKER_DAYS)).isoformat()
+        ticker["last_sent_at"] = sent.isoformat()
+    else:
+        ticker["next_fire_at"] = now.isoformat()
+        if sent:
+            ticker["last_sent_at"] = sent.isoformat()
+    ticker["source"] = "hubspot"
+    ticker["source_ref"] = str(row.get("hs_deal_id") or "")
+    return ticker
+
+
+def enroll_hubspot_nurture_deals(
+    settings: Settings,
+    memory: Memory,
+    report: CycleReport | None = None,
+    *,
+    hs=None,
+    gmail=None,
+    now: datetime | None = None,
+    write: bool = True,
+) -> dict[str, Any]:
+    """Enroll HubSpot Nurture-stage deals using the v11 sample path. Due now."""
+    now = _aware(now or now_utc())
+    collected = collect_hubspot_nurture_rows(settings, hs=hs, gmail=gmail)
+    existing = list(memory.list_ticker() or [])
+    skipped = dict(collected.get("skipped") or {})
+    would: list[dict] = []
+    enrolled: list[dict] = []
+    for row in collected.get("rows") or []:
+        match = matching_ticker_row(existing, row)
+        if match and (match.get("status") or "active") == "active":
+            skipped["already_enrolled"] = skipped.get("already_enrolled", 0) + 1
+            continue
+        payload = dict(row)
+        if match and match.get("last_sent_at"):
+            payload["last_sent_at"] = match.get("last_sent_at")
+        ticker = ticker_row_from_nurture_card(payload, now=now)
+        would.append(ticker)
+        if write and not getattr(settings, "dry_run", False):
+            memory.enroll_ticker(ticker)
+            existing.append(ticker)
+            enrolled.append(ticker)
+            if report is not None:
+                report.ticker_enrolled.append(f"{ticker.get('name') or ticker.get('email')} hubspot")
+    due_now = [
+        row
+        for row in would
+        if str(row.get("next_fire_at") or "") <= now.isoformat()
+    ]
+    return {
+        "eligible": len(collected.get("rows") or []),
+        "would_enroll": len(would),
+        "enrolled": len(enrolled),
+        "skipped": skipped,
+        "rows": would,
+        "next_five": due_now[:5],
+    }
+
+
+def legacy_nurture_reset_candidates(
+    rows: list[dict],
+    nurture_deal_ids: set[str] | None = None,
+) -> list[dict]:
+    """Active source-null ticker rows that are not a current HubSpot Nurture deal."""
+    mapped = {str(x).strip() for x in (nurture_deal_ids or set()) if str(x).strip()}
+    out: list[dict] = []
+    for row in rows or []:
+        if (row.get("status") or "active") != "active":
+            continue
+        if str(row.get("source") or "").strip():
+            continue
+        deal = str(row.get("hs_deal_id") or "").strip()
+        if deal and deal in mapped:
+            continue
+        out.append(row)
+    return out
+
+
+def apply_legacy_nurture_reset(
+    memory: Memory,
+    rows: list[dict] | None = None,
+    *,
+    nurture_deal_ids: set[str] | None = None,
+    write: bool = False,
+) -> dict[str, Any]:
+    existing = list(rows if rows is not None else memory.list_ticker() or [])
+    targets = legacy_nurture_reset_candidates(existing, nurture_deal_ids)
+    if write:
+        for row in targets:
+            memory.stop_ticker(
+                email=row.get("email"),
+                hs_contact_id=row.get("hs_contact_id"),
+                stop_reason="legacy_reset",
+                ticker_id=str(row.get("id") or "") or None,
+            )
+    return {
+        "count": len(targets),
+        "ids": [str(r.get("id") or "") for r in targets],
+        "emails": [str(r.get("email") or "") for r in targets],
+        "wrote": write,
+    }
+
+
+def nurture_enroll_dry_run_text(result: dict[str, Any]) -> str:
+    skipped = result.get("skipped") or {}
+    lines = [
+        f"Eligible: {result.get('eligible', 0)}",
+        f"Would enroll: {result.get('would_enroll', 0)}",
+        "Excluded: "
+        + (
+            ", ".join(f"{k}={v}" for k, v in sorted(skipped.items()))
+            if skipped
+            else "none"
+        ),
+        "Would post tomorrow (first 5):",
+    ]
+    next_five = result.get("next_five") or []
+    if not next_five:
+        lines.append("  (none due)")
+    for i, row in enumerate(next_five, 1):
+        lines.append(
+            f"  {i}. {row.get('name') or ''} <{row.get('email') or ''}> "
+            f"{row.get('reason') or ''} deal={row.get('hs_deal_id') or ''}"
+        )
+    return "\n".join(lines)
+
+
+def sample_hubspot_nurture_cards(
+    settings: Settings,
+    limit: int = 10,
+    *,
+    hs=None,
+    gmail=None,
+    out_path: str | None = None,
+) -> dict[str, Any]:
+    """Read HubSpot Nurture-stage deals and compose sample cards.
+
+    Cards come from dealstage 3486952153 only. Hard-excluded people, archived
+    rows, Closed Won clients/domains, and Client Renewals contacts are dropped.
+    One card per company per run.
+    """
+    from pathlib import Path
+
+    limit = max(1, int(limit or 10))
+    collected = collect_hubspot_nurture_rows(settings, hs=hs, gmail=gmail)
+    picked = list(collected.get("rows") or [])
+    skipped = dict(collected.get("skipped") or {})
     cards: list[dict[str, Any]] = []
     for row in picked[:limit]:
         draft = compose_nurture_draft(row)

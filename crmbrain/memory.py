@@ -292,9 +292,15 @@ class Memory:
     def _ticker_already_active(self, row: dict) -> bool:
         email = (row.get("email") or "").strip().lower()
         hs = str(row.get("hs_contact_id") or "").strip()
+        deal = str(row.get("hs_deal_id") or "").strip()
+        source_ref = str(row.get("source_ref") or "").strip()
         for existing in self._local.get("ticker", []):
             if (existing.get("status") or "active") != "active":
                 continue
+            if deal and str(existing.get("hs_deal_id") or "").strip() == deal:
+                return True
+            if source_ref and str(existing.get("source_ref") or "").strip() == source_ref:
+                return True
             if email and (existing.get("email") or "").strip().lower() == email:
                 return True
             if hs and str(existing.get("hs_contact_id") or "").strip() == hs:

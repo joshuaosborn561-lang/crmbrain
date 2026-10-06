@@ -736,6 +736,7 @@ def test_fire_due_writes_cards_when_post_off(tmp_path: Path):
     )
     assert cards
     assert report.nurture_cards
+    assert not memory.get_ticker("t-roof").get("last_fired_at")
     assert cards[0]["subject"] != "Roofing?"
     assert cards[0]["subject"] == "Kelly Roofing follow up"
     assert "Josh Osborn" in cards[0]["body"]
@@ -1081,12 +1082,15 @@ def test_settings_daily_cap_default_five():
 
 
 def test_monday_7am_posts_five_5pm_posts_zero_leftovers_next_weekday(tmp_path: Path):
-    settings = make_settings(nurture_post_enabled=False, nurture_max_per_weekday=5)
+    settings = make_settings(nurture_post_enabled=True, nurture_max_per_weekday=5)
     memory = Memory(settings, data_dir=tmp_path)
     memory._local["ticker"] = [_due_nurture_row(i) for i in range(8)]
     monday_7am = datetime(2026, 10, 5, 7, 0, tzinfo=CDT)
     monday_5pm = datetime(2026, 10, 5, 17, 0, tzinfo=CDT)
-    morning = fire_due_rows(settings, memory, CycleReport(), now=monday_7am, gmail=FakeGmail())
+    slack = FakeSlack()
+    morning = fire_due_rows(
+        settings, memory, CycleReport(), now=monday_7am, gmail=FakeGmail(), slack=slack
+    )
     assert len(morning) == 5
     assert count_posted_today(memory, now=monday_7am) == 5
     leftover = [
@@ -1097,7 +1101,9 @@ def test_monday_7am_posts_five_5pm_posts_zero_leftovers_next_weekday(tmp_path: P
     ]
     assert len(leftover) == 3
     assert all(not row.get("last_fired_at") for row in leftover)
-    evening = fire_due_rows(settings, memory, CycleReport(), now=monday_5pm, gmail=FakeGmail())
+    evening = fire_due_rows(
+        settings, memory, CycleReport(), now=monday_5pm, gmail=FakeGmail(), slack=FakeSlack()
+    )
     assert evening == []
     assert count_posted_today(memory, now=monday_5pm) == 5
     still_leftover = [

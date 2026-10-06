@@ -51,6 +51,26 @@ def _parse_sample_cards(argv: list[str]) -> tuple[int | None, str | None, list[s
     return count, out_path, rest
 
 
+def _wants_nurture_enroll_dry_run(argv: list[str]) -> tuple[bool, list[str]]:
+    if "--nurture-enroll-dry-run" not in argv:
+        return False, argv
+    idx = argv.index("--nurture-enroll-dry-run")
+    return True, argv[:idx] + argv[idx + 1 :]
+
+
+def _run_nurture_enroll_dry_run(settings: Settings) -> int:
+    from crmbrain.memory import Memory
+    from crmbrain.nurture import enroll_hubspot_nurture_deals, nurture_enroll_dry_run_text
+
+    if not settings.hubspot_token:
+        print("HubSpot token missing. Run this on the Railway crmbrain service.")
+        return 2
+    memory = Memory(settings)
+    result = enroll_hubspot_nurture_deals(settings, memory, write=False)
+    print(nurture_enroll_dry_run_text(result))
+    return 0
+
+
 def _run_sample_cards(settings: Settings, count: int, out_path: str | None) -> int:
     import json
 
@@ -86,6 +106,7 @@ def main() -> int:
     dry_run = _wants_dry_run(raw)
     reextract_since, raw = _parse_reextract_since(raw)
     sample_n, sample_out, raw = _parse_sample_cards(raw)
+    enroll_dry, raw = _wants_nurture_enroll_dry_run(raw)
     args = [a for a in raw if a != "--dry-run"]
     settings = Settings.from_env()
     if dry_run:
@@ -97,6 +118,8 @@ def main() -> int:
             lookback_start_at=reextract_since,
             lookback_override=True,
         )
+    if enroll_dry:
+        return _run_nurture_enroll_dry_run(settings)
     if sample_n is not None:
         return _run_sample_cards(settings, sample_n, sample_out)
     cmd = args[0] if args else "auto"
@@ -113,7 +136,8 @@ def main() -> int:
     else:
         print(
             "usage: python -m crmbrain [auto|cycle|briefs|google-scopes] "
-            "[--dry-run] [--reextract-since YYYY-MM-DD] [--sample-cards N] [--out PATH]"
+            "[--dry-run] [--reextract-since YYYY-MM-DD] [--sample-cards N] [--out PATH] "
+            "[--nurture-enroll-dry-run]"
         )
         return 2
     print(report.summary_text())
