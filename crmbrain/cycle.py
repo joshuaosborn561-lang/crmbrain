@@ -1675,6 +1675,12 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         report.skipped.append("prune skipped (dry-run)")
 
     if not settings.dry_run:
+        try:
+            from crmbrain.nurture import enroll_hubspot_nurture_deals
+
+            enroll_hubspot_nurture_deals(settings, memory, report, hs=hs, gmail=gmail)
+        except Exception as exc:
+            report.errors.append(f"nurture enroll: {exc}")
         _fire_ticker(settings, memory, report)
     _flush_memory_errors(memory, report)
     memory.finish_run(run_id, _finish_status(settings, report), report.as_dict())
