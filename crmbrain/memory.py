@@ -504,6 +504,206 @@ class Memory:
             return None
         return resp.json()
 
+    def _person_intent_identity(
+        self, email: str = "", phone: str = "", name: str = "", person_key: str = ""
+    ) -> tuple[list[str], list[str], list[str], list[str]]:
+        """Emails, last-10 phones, names, and raw keys. person_key may be prefixed or raw."""
+        from crmbrain.config import digits_phone
+
+        emails: list[str] = []
+        phones: list[str] = []
+        names: list[str] = []
+        raws: list[str] = []
+
+        def _add(bucket: list[str], value: str) -> None:
+            if value and value not in bucket:
+                bucket.append(value)
+
+        def _add_email(value: str) -> None:
+            low = (value or "").strip().lower()
+            if low:
+                _add(emails, low)
+
+        def _add_phone(value: str) -> None:
+            digits = digits_phone(value)
+            if len(digits) >= 10:
+                _add(phones, digits[-10:])
+
+        def _add_name(value: str) -> None:
+            named = " ".join((value or "").lower().split())
+            if named:
+                _add(names, named)
+
+        def _ingest_person_key(pk: str) -> None:
+            pk = (pk or "").strip()
+            if not pk:
+                return
+            _add(raws, pk)
+            low = pk.lower()
+            if low.startswith("email:"):
+                _add_email(pk.split(":", 1)[1])
+            elif low.startswith("phone:"):
+                _add_phone(pk.split(":", 1)[1])
+            elif low.startswith("name:"):
+                _add_name(pk.split(":", 1)[1])
+            else:
+                digits = digits_phone(pk)
+                if len(digits) >= 10:
+                    _add_phone(pk)
+                else:
+                    _add_name(pk)
+
+        _add_email(email)
+        _add_phone(phone)
+        _add_name(name)
+        _ingest_person_key(person_key)
+        return emails, phones, names, raws
+
+    def _person_intent_keys(self, email: str = "", phone: str = "", name: str = "", person_key: str = "") -> list[str]:
+        emails, phones, names, raws = self._person_intent_identity(email, phone, name, person_key)
+        keys: list[str] = []
+        seen: set[str] = set()
+
+        def _push(key: str) -> None:
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+
+        for item in emails:
+            _push(f"email:{item}")
+        for item in phones:
+            _push(f"phone:{item}")
+        for item in names:
+            _push(f"name:{item}")
+        for item in raws:
+            _push(item)
+        return keys
+
+    def _prior_non_sales_row_matches(self, ev, row: dict) -> bool:
+        """day_job/personal sticks if email, last-10 phone, or normalized name overlaps."""
+        if (row.get("intent") or "") not in {"day_job", "personal"}:
+            return False
+        display = ev.display_name() if hasattr(ev, "display_name") else ""
+        ev_emails, ev_phones, ev_names, ev_raws = self._person_intent_identity(
+            getattr(ev, "email", "") or "",
+            getattr(ev, "phone", "") or "",
+            display or getattr(ev, "name", "") or "",
+        )
+        row_emails, row_phones, row_names, row_raws = self._person_intent_identity(
+            row.get("email") or "",
+            row.get("phone") or "",
+            row.get("name") or "",
+            row.get("person_key") or "",
+        )
+        return bool(
+            set(ev_emails) & set(row_emails)
+            or set(ev_phones) & set(row_phones)
+            or set(ev_names) & set(row_names)
+            or set(ev_raws) & set(row_raws)
+        )
+
+    def remember_person_intent(self, ev, decision) -> None:
+        """Persist a confident day_job/personal classification for later cycles."""
+        if self._skip_side_write("person_intents"):
+            return
+        intent_name = (getattr(decision, "intent", None) or "").strip()
+        if intent_name not in {"day_job", "personal"}:
+            return
+        display = ""
+        if hasattr(ev, "display_name"):
+            display = ev.display_name() or ""
+        email = (getattr(ev, "email", "") or "").strip().lower()
+        phone = getattr(ev, "phone", "") or ""
+        name = display or getattr(ev, "name", "") or ""
+        keys = self._person_intent_keys(email, phone, name)
+        row = {
+            "person_key": keys[0] if keys else "",
+            "email": email,
+            "phone": phone,
+            "name": name,
+            "intent": intent_name,
+            "confidence": float(getattr(decision, "confidence", 0.9) or 0.9),
+            "reason": getattr(decision, "reason", "") or "",
+        }
+        if not (row["person_key"] or row["email"] or row["phone"] or row["name"]):
+            return
+        store = self._local.setdefault("person_intents", [])
+        keys = set(
+            self._person_intent_keys(row["email"], row["phone"], row["name"], row["person_key"])
+        )
+        store[:] = [
+            existing
+            for existing in store
+            if not keys & set(
+                self._person_intent_keys(
+                    existing.get("email") or "",
+                    existing.get("phone") or "",
+                    existing.get("name") or "",
+                    existing.get("person_key") or "",
+                )
+            )
+        ]
+        store.append(row)
+        self.save_local()
+
+    def lookup_prior_non_sales_intent(self, ev):
+        """Find a prior day_job/personal classification by phone or by name."""
+        from crmbrain.models import IntentDecision
+
+        display = ev.display_name() if hasattr(ev, "display_name") else ""
+        ev_emails, ev_phones, ev_names, ev_raws = self._person_intent_identity(
+            getattr(ev, "email", "") or "",
+            getattr(ev, "phone", "") or "",
+            display or getattr(ev, "name", "") or "",
+        )
+        if not (ev_emails or ev_phones or ev_names or ev_raws):
+            return None
+
+        def _as_decision(row: dict) -> IntentDecision:
+            try:
+                confidence = float(row.get("confidence") or 0.9)
+            except (TypeError, ValueError):
+                confidence = 0.9
+            return IntentDecision(
+                verdict="no",
+                intent=str(row.get("intent") or ""),
+                confidence=max(0.75, min(1.0, confidence)),
+                reason=str(row.get("reason") or "Prior day_job/personal classification"),
+            )
+
+        for row in self._local.get("person_intents") or []:
+            if self._prior_non_sales_row_matches(ev, row):
+                return _as_decision(row)
+        for row in self._local.get("review_queue") or []:
+            if self._prior_non_sales_row_matches(ev, row):
+                return _as_decision(row)
+        if self.use_supabase:
+            try:
+                params = {
+                    "intent": "in.(day_job,personal)",
+                    "select": "person_key,email,phone,name,intent,confidence,reason",
+                    "limit": "50",
+                }
+                ors: list[str] = []
+                for tail in ev_phones:
+                    ors.append(f"phone.ilike.*{tail}*")
+                    ors.append(f"person_key.ilike.*{tail}*")
+                for mail in ev_emails:
+                    ors.append(f"email.eq.{mail}")
+                for named in ev_names:
+                    token = "*".join(part for part in named.split() if part)
+                    if token:
+                        ors.append(f"name.ilike.*{token}*")
+                        ors.append(f"person_key.ilike.*{token}*")
+                if ors:
+                    params["or"] = f"({','.join(ors)})"
+                for row in self._sb_schema("GET", "review_queue", params=params) or []:
+                    if self._prior_non_sales_row_matches(ev, row):
+                        return _as_decision(row)
+            except Exception as exc:
+                self._record_error("lookup_prior_non_sales_intent", exc)
+        return None
+
     def enqueue_review(self, row: dict) -> None:
         if self._skip_side_write("review_queue"):
             return

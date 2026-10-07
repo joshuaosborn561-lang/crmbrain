@@ -259,6 +259,7 @@ def _record_person_intent_no(
     if line not in report.review_queue:
         report.review_queue.append(line)
     report.skipped.append(f"{ev.source}:{label} {decision.intent or 'no'}")
+    intent.remember_person_intent(memory, ev, decision)
     if hasattr(memory, "enqueue_review"):
         memory.enqueue_review(
             {
@@ -362,6 +363,7 @@ def _handle_engagement(
         return
     decision = intent.classify(settings, ev)
     intent.apply_deal_holder_veto(ev, decision)
+    intent.apply_prior_non_sales_intent(ev, memory, settings)
     if is_personal_family_intent(decision.intent):
         report.skipped.append(f"{ev.source}:{ev.display_name() or ev.phone} {decision.intent}")
         memory.mark_processed(ev.source, ev.external_id, {"skip": decision.intent or "personal"})
@@ -1125,7 +1127,7 @@ def apply_gmail_stage_update(
             memory.mark_processed(ev.source, ev.external_id, {"skip": "non_deal"})
         return
     if not getattr(ev, "_person_intent", None):
-        intent.attach_person_intent(settings, [ev] + list(held_events or []))
+        intent.attach_person_intent(settings, [ev] + list(held_events or []), memory)
     if intent.person_blocks_deal(ev, settings):
         _record_person_intent_no(
             report,
@@ -1587,7 +1589,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                         held_this_cycle.append(ev)
             except Exception as exc:
                 report.errors.append(f"gmail: {exc}")
-        intent.attach_person_intent(settings, windowed)
+        intent.attach_person_intent(settings, windowed, memory)
         for ev in windowed:
             if ev.source == "gmail" or ev.extra.get("create_new"):
                 continue

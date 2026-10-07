@@ -71,6 +71,11 @@ STRICT_DISCOVERY_HINTS = (
     "retainer",
 )
 SALESGLIDER_INTRO_HINTS = ("salesglider intro", "sg intro")
+SALESGLIDER_OFFER_HINTS = (
+    "salesglider",
+    "sg intro",
+    "salesglider intro",
+)
 FAMILY_ONLY_HINTS = (
     "love you",
     "pick up the kids",
@@ -274,6 +279,12 @@ def is_salesglider_intro(ev: Engagement) -> bool:
     return any(h in blob for h in SALESGLIDER_INTRO_HINTS)
 
 
+def has_salesglider_offer_talk(ev: Engagement) -> bool:
+    """SalesGlider-offer language, not generic pricing / POC / contract talk."""
+    blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}"
+    return bool(has_word_hint(blob, SALESGLIDER_OFFER_HINTS) or has_word_hint(blob, SALESGLIDER_INTRO_HINTS))
+
+
 def personal_allowed_for_sales_intro(ev: Engagement) -> bool:
     """Hard exclude. Jeremy Ciotola is personal and never opens a deal or card."""
     del ev
@@ -337,10 +348,13 @@ def cube_has_sales_intent(
         return False
     if getattr(decision, "intent", "") in CONFIDENT_NO_INTENTS and decision.verdict == "no":
         return False
+    extra = ev.extra or {}
     blob = f"{_blob(ev)} {(ev.transcript or '')[:4000]}"
     if has_word_hint(blob, STRICT_DISCOVERY_HINTS):
-        return True
-    extra = ev.extra or {}
+        if ev.source != "cube_acr":
+            return True
+        if has_salesglider_offer_talk(ev) or extra.get("already_prospect") or extra.get("has_sg_deal") or extra.get("closed_won"):
+            return True
     if extra.get("intent_gemini_yes"):
         return True
     if getattr(decision, "via", "heuristic") == "gemini" and is_confident_sales(decision, min_confidence):

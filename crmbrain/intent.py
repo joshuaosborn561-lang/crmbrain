@@ -13,12 +13,20 @@ from typing import Any
 
 import requests
 
-from crmbrain.config import JOSH_DOMAINS, NON_SALES_TITLE_HINTS, STAGE, Settings, is_client_context
+from crmbrain.config import (
+    JOSH_DOMAINS,
+    NON_SALES_TITLE_HINTS,
+    STAGE,
+    Settings,
+    digits_phone,
+    is_client_context,
+)
 from crmbrain.models import Engagement, IntentDecision
 from crmbrain.policy import (
     CONFIDENT_NO_INTENTS,
     NEVER_OPEN_DEAL_SOURCES,
     STRICT_DISCOVERY_HINTS,
+    has_salesglider_offer_talk,
     has_word_hint,
     is_closed_won_client,
 )
@@ -108,7 +116,13 @@ KNOWN_NON_SALES_PEOPLE = {
     "cynthia hernandez": "learning",
     "alex branning": "personal",
     "seth kingdon": "vendor",
+    "cameron hawkins": "day_job",
 }
+# Last-10 US digits. Cameron Hawkins is Josh's Insight day-job counterpart.
+KNOWN_NON_SALES_PHONES = {
+    "2145466567": "day_job",
+}
+STICKY_NON_SALES_INTENTS = frozenset({"day_job", "personal"})
 
 INTENT_PROMPT = """You classify whether a meeting or thread is a SalesGlider SALES opportunity.
 
@@ -124,8 +138,7 @@ NOT a sales opportunity:
 - Mentors (example: recurring "Mark/Josh" call)
 - Vendors/partners (example: Seth Kingdon, SEO partner)
 - Lunches, recruiters
-- Josh's Insight/Cisco day job (insight.com, DotsTech, "Meraki Discussion")
-- Existing clients' internal ops calls (no new commercial paper)
+- Josh's Insight/Cisco day job (insight.com, DotsTech, "Meraki Discussion", Cameron Hawkins)
 
 Do NOT mark learning because someone said "how do you" or "learn about" — those are normal discovery questions. learning = Josh is the student (Chorbie / Marketing Masterclass only).
 Do NOT mark vendor because the word "vendor" appears in a sales call (prospects talk about their vendors). vendor = Josh's supplier (Seth Kingdon / SEO partner) only.
@@ -273,6 +286,17 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
                 reason=f"Known non-opportunity: {person}",
             )
 
+    phone_digits = digits_phone(ev.phone)
+    if len(phone_digits) >= 10:
+        mapped = KNOWN_NON_SALES_PHONES.get(phone_digits[-10:])
+        if mapped and not deal_holder:
+            return IntentDecision(
+                verdict="no",
+                intent=mapped,
+                confidence=0.93,
+                reason=f"Known non-opportunity phone: {phone_digits[-10:]}",
+            )
+
     if ev.source in {"smartlead", "heyreach"}:
         return IntentDecision(
             verdict="yes",
@@ -360,6 +384,13 @@ def heuristic_intent(ev: Engagement) -> IntentDecision:
 
     if ev.source in {"cube_acr", "fireflies"}:
         sales_hit = has_word_hint(blob, STRICT_DISCOVERY_HINTS)
+        if ev.source == "cube_acr" and sales_hit and not deal_holder and not has_salesglider_offer_talk(ev):
+            return IntentDecision(
+                verdict="review",
+                intent="",
+                confidence=0.4,
+                reason="Cube keywords without SalesGlider-offer talk",
+            )
         if not sales_hit:
             return IntentDecision(
                 verdict="review",
@@ -688,6 +719,51 @@ def attach_timeline_intent(settings: Settings | None, engagements: list[Engageme
     return evs[0]
 
 
+def _cohort_overrides_prior_non_sales(events: list[Engagement]) -> bool:
+    return any(
+        _has_salesglider_deal(item)
+        or is_calendly_booking(item)
+        or has_client_commerce(item)
+        or has_salesglider_offer_talk(item)
+        for item in events
+    )
+
+
+def apply_prior_non_sales_intent(
+    ev: Engagement,
+    memory,
+    settings: Settings | None = None,
+    events: list[Engagement] | None = None,
+) -> IntentDecision | None:
+    """A prior day_job/personal classification sticks unless SG-offer / booking / deal exists."""
+    current = getattr(ev, "_person_intent", None)
+    if isinstance(current, IntentDecision) and is_confident_no_intent(
+        current, getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    ):
+        return current
+    if memory is None or not hasattr(memory, "lookup_prior_non_sales_intent"):
+        return current if isinstance(current, IntentDecision) else None
+    cohort = events or _cohort(ev)
+    if _cohort_overrides_prior_non_sales(cohort):
+        return current if isinstance(current, IntentDecision) else None
+    prior = memory.lookup_prior_non_sales_intent(ev)
+    if not isinstance(prior, IntentDecision):
+        return current if isinstance(current, IntentDecision) else None
+    ev._person_intent = prior
+    extra = ev.extra
+    extra["intent_no"] = True
+    extra["prior_non_sales_intent"] = prior.intent
+    return prior
+
+
+def remember_person_intent(memory, ev: Engagement, decision: IntentDecision | None, settings: Settings | None = None) -> None:
+    if memory is None or not hasattr(memory, "remember_person_intent") or not isinstance(decision, IntentDecision):
+        return
+    min_c = getattr(settings, "intent_min_confidence", 0.75) if settings else 0.75
+    if is_confident_no_intent(decision, min_c) and (decision.intent or "") in STICKY_NON_SALES_INTENTS:
+        memory.remember_person_intent(ev, decision)
+
+
 def person_blocks_engagements(
     settings: Settings | None, engagements: list[Engagement] | None
 ) -> bool:
@@ -729,10 +805,16 @@ def _merged_engagement(events: list[Engagement]) -> Engagement:
     )
 
 
-def attach_person_intent(settings: Settings | None, events: list[Engagement]) -> dict[str, IntentDecision]:
+def attach_person_intent(
+    settings: Settings | None,
+    events: list[Engagement],
+    memory=None,
+) -> dict[str, IntentDecision]:
     """Classify each person from all cycle evidence. A confident listed 'no' wins.
 
     Reuses a decision already attached on the cohort so Gemini is not called again.
+    A prior day_job/personal classification from memory beats a later sales/poc_hint
+    unless this cycle has SalesGlider-offer talk, a Calendly booking, or a deal.
     """
     groups: dict[str, list[Engagement]] = {}
     for ev in events or []:
@@ -746,10 +828,15 @@ def attach_person_intent(settings: Settings | None, events: list[Engagement]) ->
         cached = [getattr(ev, "_person_intent", None) for ev in evs]
         if cached and all(isinstance(item, IntentDecision) for item in cached):
             winner = apply_deal_holder_veto(evs[0], cached[0]) or cached[0]
+            if memory is not None and not is_confident_no_intent(winner, min_c):
+                prior = apply_prior_non_sales_intent(evs[0], memory, settings, events=evs)
+                if isinstance(prior, IntentDecision) and is_confident_no_intent(prior, min_c):
+                    winner = prior
             out[key] = winner
             for ev in evs:
                 ev._person_intent = winner
                 ev._person_events = evs
+            remember_person_intent(memory, evs[0], winner, settings)
             continue
         winner = None
         for ev in evs:
@@ -762,6 +849,11 @@ def attach_person_intent(settings: Settings | None, events: list[Engagement]) ->
         if winner is None:
             winner = classify(settings, evs[0])
         winner = apply_deal_holder_veto(evs[0], winner) or winner
+        if memory is not None and not is_confident_no_intent(winner, min_c):
+            prior = apply_prior_non_sales_intent(evs[0], memory, settings, events=evs)
+            if isinstance(prior, IntentDecision) and is_confident_no_intent(prior, min_c):
+                winner = prior
+        remember_person_intent(memory, evs[0], winner, settings)
         out[key] = winner
         for ev in evs:
             ev._person_intent = winner

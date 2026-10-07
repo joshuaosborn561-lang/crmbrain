@@ -44,15 +44,23 @@ MEETING_CRM_SOURCES = frozenset({"calendly", "fireflies", "cube_acr", "allo"})
 
 
 def _decision_for(
-    settings: Settings | None, timeline: PersonTimeline, ev: Engagement | None = None
+    settings: Settings | None,
+    timeline: PersonTimeline,
+    ev: Engagement | None = None,
+    memory: Memory | None = None,
 ) -> IntentDecision:
     """Reuse a person-level decision already attached on this timeline."""
     ev = ev or representative_engagement(timeline)
     cached = getattr(ev, "_person_intent", None)
     if isinstance(cached, IntentDecision):
+        if memory is not None:
+            intent.apply_prior_non_sales_intent(
+                ev, memory, settings, events=list(timeline.engagements) or [ev]
+            )
+            cached = getattr(ev, "_person_intent", None) or cached
         return cached
     if timeline.engagements:
-        intent.attach_person_intent(settings, list(timeline.engagements))
+        intent.attach_person_intent(settings, list(timeline.engagements), memory)
     return getattr(ev, "_person_intent", None) or intent.classify(settings, ev)
 
 
@@ -272,7 +280,7 @@ def _commit(
     ):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} excluded")
         return False
-    _decision_for(settings, timeline, ev)
+    _decision_for(settings, timeline, ev, memory)
     if intent.person_blocks_deal(ev, settings):
         report.skipped.append(f"reconcile:{timeline.display_name() or ev.email} person_intent_no")
         return False
@@ -410,14 +418,15 @@ def apply_timeline(
     contact, company_deals = _stamp_timeline(hs, timeline, ev)
     if is_excluded_contact(ev, contact):
         report.skipped.append(f"{timeline.display_name()} excluded")
-        return _decision_for(settings, timeline, ev)
+        return _decision_for(settings, timeline, ev, memory)
     if policy.is_unidentified_cube_phone(ev, contact):
         _queue_review(memory, report, timeline, reason="unknown_phone", dry_run=dry_run)
-        return _decision_for(settings, timeline, ev)
-    decision = _decision_for(settings, timeline, ev)
+        return _decision_for(settings, timeline, ev, memory)
+    decision = _decision_for(settings, timeline, ev, memory)
     intent.apply_deal_holder_veto(ev, decision)
     if intent.person_blocks_deal(ev, settings):
         report.skipped.append(f"{timeline.display_name()} {decision.intent}, skip HubSpot")
+        intent.remember_person_intent(memory, ev, decision, settings)
         _queue_review(
             memory,
             report,
@@ -444,6 +453,16 @@ def apply_timeline(
         _queue_review(memory, report, timeline, decision, reason="poc_hint", dry_run=dry_run)
         if target == STAGE["signed"]:
             target = STAGE["discovery_completed"] if KIND_HELD in kinds else current or ""
+        extra = ev.extra or {}
+        if (
+            not deal
+            and ev.source == "cube_acr"
+            and not policy.has_salesglider_offer_talk(ev)
+            and not policy.contact_is_prospect(timeline.contact, timeline.deals)
+            and not extra.get("has_sg_deal")
+            and not extra.get("already_prospect")
+        ):
+            return decision
 
     if not deal and policy.only_held_call_evidence(timeline.engagements):
         if intent.is_confident_non_sales(decision, settings.intent_min_confidence):
@@ -629,7 +648,7 @@ def restore_missing_deals(
         if policy.is_unidentified_cube_phone(ev, contact):
             _queue_review(memory, report, timeline, reason="unknown_phone", dry_run=dry_run)
             continue
-        decision = _decision_for(settings, timeline, ev)
+        decision = _decision_for(settings, timeline, ev, memory)
         intent.apply_deal_holder_veto(ev, decision)
         if ev.source in COLD_CREATE_SOURCES and not evidence.has_meeting_evidence(timeline):
             continue
@@ -900,7 +919,7 @@ def reeval_discovery_scheduled(
             if deal not in timeline.deals:
                 timeline.deals.append(deal)
         ev = representative_engagement(timeline)
-        decision = _decision_for(settings, timeline, ev)
+        decision = _decision_for(settings, timeline, ev, memory)
         if intent.person_blocks_deal(ev, settings):
             _queue_review(
                 memory,
@@ -1131,7 +1150,7 @@ def planned_change_person_keys(
         if not _timeline_has_unprocessed(timeline, memory):
             continue
         ev = representative_engagement(timeline)
-        decision = _decision_for(settings, timeline, ev)
+        decision = _decision_for(settings, timeline, ev, memory)
         if intent.person_blocks_deal(ev, settings):
             continue
         current = _current_stage(timeline)
@@ -1188,7 +1207,7 @@ def run(
     budget = budget or WriteBudget.from_settings(settings)
     timelines = evidence.build_timelines(engagements)
     _attach_hubspot(hs, timelines)
-    intent.attach_person_intent(settings, engagements)
+    intent.attach_person_intent(settings, engagements, memory)
     if not skip_abort:
         would = _planned_change_count(hs, settings, timelines, upcoming_emails, held_events, calendar_api_ok)
         open_n = _count_open_deals(hs, timelines)
