@@ -1,5 +1,7 @@
 """Cube day_job / bare POC must not open HubSpot contacts or deals."""
 
+from datetime import datetime, timezone
+
 from crmbrain.config import STAGE
 from crmbrain.cycle import _handle_engagement
 from crmbrain.evidence import KIND_POC, build_timelines, kind_for
@@ -12,7 +14,7 @@ from crmbrain.intent import (
     is_confident_sales,
 )
 from crmbrain.memory import Memory
-from crmbrain.models import CycleReport, Engagement
+from crmbrain.models import CycleReport, Engagement, IntentDecision
 from crmbrain.policy import (
     cube_has_sales_intent,
     has_salesglider_offer_talk,
@@ -27,6 +29,12 @@ from tests.test_crm_gating import FakeHubSpot, make_settings
 
 
 CAMERON_PHONE = "+12145466567"
+# Wed Oct 7 2026 12:14pm CT Cube ACR with Cameron Hawkins (QA archived HS 566332551868 / 353203115728).
+OCT7_CAMERON_FILE_ID = "118kfFlx5neGUHJKUW1ZjobS58TIyM3ng"
+OCT7_GROK_SEO_BODY = (
+    "Josh and Cameron talked about Grok bots and an SEO friend who might help "
+    "with the site. They walked the tech stack and pricing for the bot work. "
+) * 4
 DAY_JOB_BODY = (
     "Insight Cisco Meraki discussion about the Okta renewal quote and the "
     "Microsoft to Microsoft migration. Pricing around one hundred fifty thousand. "
@@ -118,6 +126,145 @@ def test_cameron_hawkins_cube_poc_creates_nothing(tmp_path):
     assert hs.contacts == []
     assert hs.deals == []
     assert any("day_job" in s for s in report.skipped)
+
+
+def test_oct7_cameron_day_job_phone_stays_day_job_despite_tech_bots_pricing(tmp_path):
+    ev = _cube(
+        external_id=OCT7_CAMERON_FILE_ID,
+        name="Cameron Hawkins",
+        phone=CAMERON_PHONE,
+        transcript=OCT7_GROK_SEO_BODY,
+        raw_subject=(
+            "Cameron Hawkins (+1 214-546-6567) (phone) 2026-10-07 12-14-00 - transcript.docx"
+        ),
+    )
+    ev.occurred_at = datetime(2026, 10, 7, 17, 14, tzinfo=timezone.utc)
+    decision = heuristic_intent(ev)
+    assert decision.intent == "day_job"
+    assert decision.verdict == "no"
+    assert not cube_has_sales_intent(ev)
+    assert not is_cube_business_discovery(ev)
+    assert not may_create_hubspot_contact(ev)
+
+    hs, _, report = _handle(tmp_path / "handle", ev)
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert any("day_job" in s for s in report.skipped)
+
+    hs2 = FakeHubSpot()
+    report2 = CycleReport()
+    timelines = build_timelines([ev])
+    apply_timeline(
+        next(iter(timelines.values())),
+        make_settings(),
+        hs2,
+        Memory(make_settings(), data_dir=tmp_path / "recon"),
+        report2,
+    )
+    restore_missing_deals(
+        hs2, make_settings(), Memory(make_settings(), data_dir=tmp_path / "restore"), report2, timelines
+    )
+    assert hs2.contacts == []
+    assert hs2.deals == []
+
+
+def test_prior_day_job_is_checked_by_phone_and_by_name(tmp_path):
+    settings = make_settings()
+    by_phone_memory = Memory(settings, data_dir=tmp_path / "phone")
+    by_phone_memory.remember_person_intent(
+        _cube(
+            external_id="persist-phone",
+            name="Unknown Caller",
+            phone="+12145550310",
+            transcript=DAY_JOB_BODY,
+        ),
+        IntentDecision(verdict="no", intent="day_job", confidence=0.93, reason="prior day_job"),
+    )
+    later_same_phone = _cube(
+        external_id="later-phone",
+        name="Riley Chen",
+        phone="+12145550310",
+        transcript=POC_PRICING_BODY,
+        raw_subject="Riley Chen tech bots pricing",
+    )
+    prior_phone = by_phone_memory.lookup_prior_non_sales_intent(later_same_phone)
+    assert prior_phone is not None
+    assert prior_phone.intent == "day_job"
+    hs, _, report = _handle(
+        tmp_path / "phone-handle", later_same_phone, memory=by_phone_memory, settings=settings
+    )
+    assert hs.contacts == []
+    assert hs.deals == []
+    assert report.skipped or report.review_queue
+
+    by_name_memory = Memory(settings, data_dir=tmp_path / "name")
+    by_name_memory.remember_person_intent(
+        _cube(
+            external_id="persist-name",
+            name="Sam Rivera",
+            phone="",
+            transcript=DAY_JOB_BODY,
+        ),
+        IntentDecision(verdict="no", intent="day_job", confidence=0.93, reason="prior day_job"),
+    )
+    later_same_name = _cube(
+        external_id="later-name",
+        name="Sam Rivera",
+        phone="+15550009999",
+        transcript=POC_PRICING_BODY,
+        raw_subject="Sam Rivera Grok bots pricing",
+    )
+    prior_name = by_name_memory.lookup_prior_non_sales_intent(later_same_name)
+    assert prior_name is not None
+    assert prior_name.intent == "day_job"
+    hs2, _, report2 = _handle(
+        tmp_path / "name-handle", later_same_name, memory=by_name_memory, settings=settings
+    )
+    assert hs2.contacts == []
+    assert hs2.deals == []
+    assert report2.skipped or report2.review_queue
+
+    raw_phone = Memory(settings, data_dir=tmp_path / "raw-phone")
+    raw_phone._local.setdefault("review_queue", []).append(
+        {
+            "person_key": "+12145550311",
+            "intent": "day_job",
+            "confidence": 0.93,
+            "reason": "review_queue raw phone",
+        }
+    )
+    assert (
+        raw_phone.lookup_prior_non_sales_intent(
+            _cube(
+                external_id="raw-phone",
+                name="Pat Lee",
+                phone="+12145550311",
+                transcript=OCT7_GROK_SEO_BODY,
+            )
+        ).intent
+        == "day_job"
+    )
+
+    raw_name = Memory(settings, data_dir=tmp_path / "raw-name")
+    raw_name._local.setdefault("review_queue", []).append(
+        {
+            "person_key": "Cameron Hawkins",
+            "intent": "personal",
+            "confidence": 0.9,
+            "reason": "review_queue raw name",
+        }
+    )
+    assert (
+        raw_name.lookup_prior_non_sales_intent(
+            _cube(
+                external_id="raw-name",
+                name="Cameron Hawkins",
+                phone="+15551230000",
+                transcript=OCT7_GROK_SEO_BODY,
+            )
+        ).intent
+        == "personal"
+    )
 
 
 def test_bare_poc_cube_without_salesglider_does_not_create(tmp_path):

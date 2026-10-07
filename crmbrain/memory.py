@@ -504,30 +504,103 @@ class Memory:
             return None
         return resp.json()
 
-    def _person_intent_keys(self, email: str = "", phone: str = "", name: str = "", person_key: str = "") -> list[str]:
+    def _person_intent_identity(
+        self, email: str = "", phone: str = "", name: str = "", person_key: str = ""
+    ) -> tuple[list[str], list[str], list[str], list[str]]:
+        """Emails, last-10 phones, names, and raw keys. person_key may be prefixed or raw."""
         from crmbrain.config import digits_phone
-        from crmbrain.evidence import person_key as make_person_key
 
+        emails: list[str] = []
+        phones: list[str] = []
+        names: list[str] = []
+        raws: list[str] = []
+
+        def _add(bucket: list[str], value: str) -> None:
+            if value and value not in bucket:
+                bucket.append(value)
+
+        def _add_email(value: str) -> None:
+            low = (value or "").strip().lower()
+            if low:
+                _add(emails, low)
+
+        def _add_phone(value: str) -> None:
+            digits = digits_phone(value)
+            if len(digits) >= 10:
+                _add(phones, digits[-10:])
+
+        def _add_name(value: str) -> None:
+            named = " ".join((value or "").lower().split())
+            if named:
+                _add(names, named)
+
+        def _ingest_person_key(pk: str) -> None:
+            pk = (pk or "").strip()
+            if not pk:
+                return
+            _add(raws, pk)
+            low = pk.lower()
+            if low.startswith("email:"):
+                _add_email(pk.split(":", 1)[1])
+            elif low.startswith("phone:"):
+                _add_phone(pk.split(":", 1)[1])
+            elif low.startswith("name:"):
+                _add_name(pk.split(":", 1)[1])
+            else:
+                digits = digits_phone(pk)
+                if len(digits) >= 10:
+                    _add_phone(pk)
+                else:
+                    _add_name(pk)
+
+        _add_email(email)
+        _add_phone(phone)
+        _add_name(name)
+        _ingest_person_key(person_key)
+        return emails, phones, names, raws
+
+    def _person_intent_keys(self, email: str = "", phone: str = "", name: str = "", person_key: str = "") -> list[str]:
+        emails, phones, names, raws = self._person_intent_identity(email, phone, name, person_key)
         keys: list[str] = []
-        pk = (person_key or "").strip() or make_person_key(email, phone, name)
-        if pk:
-            keys.append(pk)
-        email_l = (email or "").strip().lower()
-        if email_l:
-            keys.append(f"email:{email_l}")
-        digits = digits_phone(phone)
-        if len(digits) >= 10:
-            keys.append(f"phone:{digits[-10:]}")
-        named = " ".join((name or "").lower().split())
-        if named:
-            keys.append(f"name:{named}")
         seen: set[str] = set()
-        out: list[str] = []
-        for key in keys:
+
+        def _push(key: str) -> None:
             if key and key not in seen:
                 seen.add(key)
-                out.append(key)
-        return out
+                keys.append(key)
+
+        for item in emails:
+            _push(f"email:{item}")
+        for item in phones:
+            _push(f"phone:{item}")
+        for item in names:
+            _push(f"name:{item}")
+        for item in raws:
+            _push(item)
+        return keys
+
+    def _prior_non_sales_row_matches(self, ev, row: dict) -> bool:
+        """day_job/personal sticks if email, last-10 phone, or normalized name overlaps."""
+        if (row.get("intent") or "") not in {"day_job", "personal"}:
+            return False
+        display = ev.display_name() if hasattr(ev, "display_name") else ""
+        ev_emails, ev_phones, ev_names, ev_raws = self._person_intent_identity(
+            getattr(ev, "email", "") or "",
+            getattr(ev, "phone", "") or "",
+            display or getattr(ev, "name", "") or "",
+        )
+        row_emails, row_phones, row_names, row_raws = self._person_intent_identity(
+            row.get("email") or "",
+            row.get("phone") or "",
+            row.get("name") or "",
+            row.get("person_key") or "",
+        )
+        return bool(
+            set(ev_emails) & set(row_emails)
+            or set(ev_phones) & set(row_phones)
+            or set(ev_names) & set(row_names)
+            or set(ev_raws) & set(row_raws)
+        )
 
     def remember_person_intent(self, ev, decision) -> None:
         """Persist a confident day_job/personal classification for later cycles."""
@@ -574,32 +647,17 @@ class Memory:
         self.save_local()
 
     def lookup_prior_non_sales_intent(self, ev):
-        """Find a prior day_job/personal classification for this person/phone."""
+        """Find a prior day_job/personal classification by phone or by name."""
         from crmbrain.models import IntentDecision
 
         display = ev.display_name() if hasattr(ev, "display_name") else ""
-        keys = set(
-            self._person_intent_keys(
-                getattr(ev, "email", "") or "",
-                getattr(ev, "phone", "") or "",
-                display or getattr(ev, "name", "") or "",
-            )
+        ev_emails, ev_phones, ev_names, ev_raws = self._person_intent_identity(
+            getattr(ev, "email", "") or "",
+            getattr(ev, "phone", "") or "",
+            display or getattr(ev, "name", "") or "",
         )
-        if not keys:
+        if not (ev_emails or ev_phones or ev_names or ev_raws):
             return None
-
-        def _match(row: dict) -> bool:
-            if (row.get("intent") or "") not in {"day_job", "personal"}:
-                return False
-            other = set(
-                self._person_intent_keys(
-                    row.get("email") or "",
-                    row.get("phone") or "",
-                    row.get("name") or "",
-                    row.get("person_key") or "",
-                )
-            )
-            return bool(keys & other)
 
         def _as_decision(row: dict) -> IntentDecision:
             try:
@@ -614,29 +672,33 @@ class Memory:
             )
 
         for row in self._local.get("person_intents") or []:
-            if _match(row):
+            if self._prior_non_sales_row_matches(ev, row):
                 return _as_decision(row)
         for row in self._local.get("review_queue") or []:
-            if _match(row):
+            if self._prior_non_sales_row_matches(ev, row):
                 return _as_decision(row)
         if self.use_supabase:
-            from crmbrain.config import digits_phone
-
             try:
                 params = {
                     "intent": "in.(day_job,personal)",
                     "select": "person_key,email,phone,name,intent,confidence,reason",
                     "limit": "50",
                 }
-                digits = digits_phone(getattr(ev, "phone", "") or "")
-                email = (getattr(ev, "email", "") or "").strip().lower()
-                if len(digits) >= 10:
-                    tail = digits[-10:]
-                    params["or"] = f"(phone.ilike.*{tail}*,person_key.ilike.*{tail}*)"
-                elif email:
-                    params["email"] = f"eq.{email}"
+                ors: list[str] = []
+                for tail in ev_phones:
+                    ors.append(f"phone.ilike.*{tail}*")
+                    ors.append(f"person_key.ilike.*{tail}*")
+                for mail in ev_emails:
+                    ors.append(f"email.eq.{mail}")
+                for named in ev_names:
+                    token = "*".join(part for part in named.split() if part)
+                    if token:
+                        ors.append(f"name.ilike.*{token}*")
+                        ors.append(f"person_key.ilike.*{token}*")
+                if ors:
+                    params["or"] = f"({','.join(ors)})"
                 for row in self._sb_schema("GET", "review_queue", params=params) or []:
-                    if _match(row):
+                    if self._prior_non_sales_row_matches(ev, row):
                         return _as_decision(row)
             except Exception as exc:
                 self._record_error("lookup_prior_non_sales_intent", exc)
