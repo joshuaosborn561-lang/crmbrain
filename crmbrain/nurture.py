@@ -1842,6 +1842,56 @@ def _numbers_in(text: str) -> set[str]:
     return {m.group(0).replace(",", "") for m in _NUMBER_RE.finditer(text or "")}
 
 
+def _allowed_meeting_date_numbers(row: dict | None) -> set[str]:
+    """Day/month/year digits from dates the opener may render."""
+    row = row or {}
+    extra = _row_extra(row)
+    allowed: set[str] = set()
+    phrase = _call_date_phrase(row)
+    if phrase:
+        allowed |= _numbers_in(phrase)
+    for key in ("signal_at",) + _MEETING_DATE_KEYS:
+        raw = row.get(key) or extra.get(key)
+        stamp = parse_signal_at(raw)
+        if not stamp:
+            continue
+        local = chicago_meeting_date(stamp)
+        allowed |= _numbers_in(chicago_date_phrase(stamp))
+        allowed.add(str(local.day))
+        allowed.add(f"{local.day:02d}")
+        allowed.add(str(local.month))
+        allowed.add(f"{local.month:02d}")
+        allowed.add(str(local.year))
+    return allowed
+
+
+def _card_source_detail(row: dict) -> str:
+    campaign = str(row.get("campaign") or "").strip()
+    if campaign and campaign != "-":
+        return campaign
+    deal = str(row.get("hs_deal_id") or "").strip()
+    if deal and deal != "-":
+        return deal
+    extra = _row_extra(row)
+    ref = str(row.get("source_ref") or extra.get("source_ref") or "").strip()
+    if not ref or ref == "-":
+        return ""
+    if ref.isdigit():
+        return ref
+    parts = ref.split(":")
+    if "deal" in parts:
+        idx = parts.index("deal")
+        if idx + 1 < len(parts) and parts[idx + 1] and parts[idx + 1] != "-":
+            return parts[idx + 1]
+    return ""
+
+
+def _card_source_label(row: dict) -> str:
+    source = str(row.get("source") or "unknown").strip() or "unknown"
+    detail = _card_source_detail(row)
+    return f"{source} / {detail}" if detail else source
+
+
 def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureDraft:
     """Spec draft: opener from snippet, industry proof, meeting guarantee, Josh Osborn."""
     name = str(row.get("name") or "")
@@ -1928,6 +1978,7 @@ def validate_draft(draft: NurtureDraft, row: dict | None = None) -> NurtureDraft
     allowed = _numbers_in(str((row or {}).get("last_touch_snippet") or ""))
     allowed |= _numbers_in(GENERAL_PROOF)
     allowed |= _numbers_in(" ".join(CASE_STUDIES.values()))
+    allowed |= _allowed_meeting_date_numbers(row)
     opener = body.split("\n", 1)[0]
     extra_nums = _numbers_in(opener) - allowed
     if extra_nums:
@@ -2065,8 +2116,9 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
     signal = parse_signal_at(row.get("signal_at"))
     signal_line = signal.astimezone(CDT).strftime("%b %-d, %Y") if signal else "unknown"
     snippet = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)[:120]
-    source = row.get("source") or "unknown"
-    campaign = row.get("campaign") or ""
+    source_label = _card_source_label(row)
+    they_plain = f'\nThey said: "{snippet}"' if snippet.strip() else ""
+    they_md = f'\n*They said:* "{snippet}"' if snippet.strip() else ""
     ticker_id = str(row.get("id") or "")
     thread_kind = str(row.get("thread_kind") or ("reply" if row.get("gmail_thread_id") else "new_thread"))
     thread_label = "new thread" if thread_kind == "new_thread" else "thread reply"
@@ -2084,10 +2136,10 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
         f"To: {row.get('email') or row.get('phone')}\n"
         f"Why: {why}\n"
         f"Thread: {thread_label}\n"
-        f"Source: {source} / {campaign}\n"
+        f"Source: {source_label}\n"
         f"{source_id_line}"
-        f"Signal: {signal_line}\n"
-        f'They said: "{snippet}"\n'
+        f"Signal: {signal_line}"
+        f"{they_plain}\n"
         f"Subject: {draft.subject}\n\n{draft.body}"
     )
     blocks = [
@@ -2103,10 +2155,10 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
                     f"*To:* {row.get('email') or row.get('phone') or row.get('name')}\n"
                     f"*Why:* {why}\n"
                     f"*Thread:* {thread_label}\n"
-                    f"*Source:* {source} / {campaign or '-'}\n"
+                    f"*Source:* {source_label}\n"
                     + (f"*Meeting source:* {source_id}\n" if source_id else "")
-                    + f"*Signal:* {signal_line}\n"
-                    f'*They said:* "{snippet}"'
+                    + f"*Signal:* {signal_line}"
+                    + they_md
                 ),
             },
         },
