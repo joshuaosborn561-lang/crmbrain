@@ -1052,10 +1052,10 @@ def _flush_memory_errors(memory: Memory, report: CycleReport) -> None:
             report.errors.append(msg)
 
 
-def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport, *, now=None) -> None:
+def _fire_ticker(settings: Settings, memory: Memory, report: CycleReport, *, now=None, hs=None) -> None:
     from crmbrain.nurture import fire_due_rows
 
-    fire_due_rows(settings, memory, report, now=now)
+    fire_due_rows(settings, memory, report, now=now, hs=hs)
 
 
 def _mail_contact(hs: HubSpot, ev: Engagement) -> dict | None:
@@ -1683,7 +1683,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             enroll_hubspot_nurture_deals(settings, memory, report, hs=hs, gmail=gmail)
         except Exception as exc:
             report.errors.append(f"nurture enroll: {exc}")
-        _fire_ticker(settings, memory, report)
+        _fire_ticker(settings, memory, report, hs=hs)
     _flush_memory_errors(memory, report)
     memory.finish_run(run_id, _finish_status(settings, report), report.as_dict())
     _flush_memory_errors(memory, report)

@@ -27,7 +27,7 @@ from crmbrain.config import (
 )
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
-from crmbrain.policy import deal_is_locked, event_predates_freeze, is_meeting_held, is_meeting_scheduled
+from crmbrain.policy import deal_is_locked, is_meeting_held, is_meeting_scheduled
 from crmbrain.ticker import (
     HARD_STOPS,
     MEETING_GUARANTEE,
@@ -2320,11 +2320,8 @@ def fire_gate(
             nxt = latest + timedelta(days=TICKER_DAYS)
             patch = {"status": "active", "stop_reason": "emailed_recently", "next_fire_at": nxt.isoformat()}
             return "emailed_recently", patch
-    if settings and event_predates_freeze(
-        Engagement(source="nurture", external_id=str(row.get("id") or ""), occurred_at=parse_signal_at(row.get("signal_at"))),
-        settings,
-    ):
-        return "manual_freeze", {}
+    # CRMBRAIN_MANUAL_FREEZE_AT protects HubSpot deal writes only. Nurture ticker
+    # rows are Slack approval cards Josh must approve, so the freeze never applies.
     return "", {}
 
 
@@ -2353,6 +2350,49 @@ def select_due_with_cap(
     return posted, rolled
 
 
+def _row_meeting_at(row: dict) -> datetime | None:
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    for key in ("meeting_at", "gmail_booking_at"):
+        stamp = parse_signal_at(row.get(key) or extra.get(key))
+        if stamp:
+            return _aware(stamp)
+    return None
+
+
+def row_has_future_meeting(row: dict, *, now: datetime, hs=None) -> bool:
+    """G4 without Google Calendar: ticker booked/meeting_at, then HubSpot meetings.
+
+    Gmail Calendly/Google booking evidence is applied later via
+    apply_gmail_meeting_evidence (skip_nurture=future_booking).
+    """
+    now = _aware(now)
+    meeting_at = _row_meeting_at(row)
+    if meeting_at and meeting_at > now:
+        return True
+    extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+    booked = bool(row.get("booked") or extra.get("booked"))
+    if booked and meeting_at is None:
+        return True
+    cid = str(row.get("hs_contact_id") or "").strip()
+    if hs is not None and cid and hasattr(hs, "contact_has_future_meetings"):
+        try:
+            return bool(hs.contact_has_future_meetings(cid, now=now))
+        except Exception:
+            return False
+    return False
+
+
+def _sort_due(rows: list[dict], *, now: datetime) -> list[dict]:
+    due = [
+        r
+        for r in rows
+        if (r.get("status") or "") == "active"
+        and str(r.get("next_fire_at") or "") <= now.isoformat()
+    ]
+    due.sort(key=lambda r: parse_signal_at(r.get("signal_at") or r.get("next_fire_at")) or now)
+    return due
+
+
 def fire_due_rows(
     settings: Settings,
     memory: Memory,
@@ -2361,8 +2401,13 @@ def fire_due_rows(
     now: datetime | None = None,
     slack=None,
     gmail=None,
+    hs=None,
 ) -> list[dict]:
-    """Evaluate due ticker rows. Post Block Kit only when NURTURE_POST_ENABLED."""
+    """Evaluate due ticker rows. Post Block Kit only when NURTURE_POST_ENABLED.
+
+    Walks the due list in signal order until the daily cap of cards is used.
+    Rows skipped by a gate never consume a slot.
+    """
     now = _aware(now or now_utc())
     if getattr(settings, "supabase_url", "") and getattr(settings, "supabase_key", "") and memory.use_supabase:
         if any("ticker_supabase_unavailable" in e or "due_ticker" in e for e in memory.errors):
@@ -2388,34 +2433,54 @@ def fire_due_rows(
     gmail = gmail_client_for_cards(settings, gmail)
     cap = nurture_daily_cap(settings)
     already = count_posted_today(memory, now=now)
-    posted, rolled = select_due_with_cap(
-        due, now=now, max_per_weekday=cap, already_posted=already
-    )
-    for row in rolled:
-        memory.reschedule_ticker(str(row.get("id") or row.get("email")), row["next_fire_at"])
-        report.ticker_skipped.append(f"{row.get('email') or row.get('name')} rolled")
+    remaining = max(0, int(cap) - max(0, int(already)))
+    ordered = _sort_due(due, now=now)
+    next_day = next_weekday_midnight(now).isoformat()
     post_on = bool(getattr(settings, "nurture_post_enabled", False))
-    for row in posted:
+    used = 0
+
+    def _key(r: dict) -> str:
+        return str(r.get("id") or r.get("email"))
+
+    def _label(r: dict) -> str:
+        return str(r.get("email") or r.get("name") or "")
+
+    for idx, row in enumerate(ordered):
+        if used >= remaining:
+            for rest in ordered[idx:]:
+                memory.reschedule_ticker(_key(rest), next_day)
+                report.ticker_skipped.append(f"{_label(rest)} rolled")
+            break
         if deal_is_locked({"properties": {"crmbrain_locked": row.get("crmbrain_locked")}}):
-            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} locked")
+            memory.reschedule_ticker(_key(row), next_day)
+            report.ticker_skipped.append(f"{_label(row)} locked")
             continue
-        reason, patch = fire_gate(row, settings=settings, now=now)
+        future = row_has_future_meeting(row, now=now, hs=hs)
+        reason, patch = fire_gate(row, settings=settings, now=now, future_meetings=future)
         if reason:
-            if patch:
-                if patch.get("status") == "stopped":
-                    memory.stop_ticker(
-                        email=row.get("email"),
-                        hs_contact_id=row.get("hs_contact_id"),
-                        stop_reason=patch.get("stop_reason"),
-                    )
-                elif patch.get("next_fire_at"):
-                    memory.bump_ticker(str(row.get("id") or row.get("email")), patch["next_fire_at"], now.isoformat())
-            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} {reason}")
+            if patch.get("status") == "stopped":
+                memory.stop_ticker(
+                    email=row.get("email"),
+                    hs_contact_id=row.get("hs_contact_id"),
+                    stop_reason=patch.get("stop_reason"),
+                    ticker_id=str(row.get("id") or "") or None,
+                )
+            elif patch.get("next_fire_at"):
+                memory.bump_ticker(_key(row), patch["next_fire_at"], now.isoformat())
+            else:
+                memory.reschedule_ticker(_key(row), next_day)
+            report.ticker_skipped.append(f"{_label(row)} {reason}")
             continue
         row = attach_gmail_thread(row, gmail)
         row = apply_gmail_meeting_evidence(row, gmail)
         if row.get("skip_nurture") == "future_booking":
-            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} future_booking")
+            memory.stop_ticker(
+                email=row.get("email"),
+                hs_contact_id=row.get("hs_contact_id"),
+                stop_reason="booked",
+                ticker_id=str(row.get("id") or "") or None,
+            )
+            report.ticker_skipped.append(f"{_label(row)} future_booking")
             continue
         row["reason"] = infer_nurture_reason(
             reason=str(row.get("reason") or ""),
@@ -2427,12 +2492,14 @@ def fire_due_rows(
         row["last_touch_snippet"] = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)
         draft = compose_nurture_draft(row)
         if not draft.valid:
+            memory.reschedule_ticker(_key(row), next_day)
             report.review_queue.append(f"{row.get('name')} G7 {draft.reject_reason}")
             continue
         card = build_nurture_card(row, draft)
         cards.append({**card, "ticker_id": row.get("id"), "email": row.get("email"), "name": row.get("name")})
         report.ticker_drafts.append(row.get("email") or row.get("name") or row.get("id"))
         report.nurture_cards.append(card)
+        used += 1
         slack_ok = False
         if post_on:
             try:
@@ -2456,9 +2523,9 @@ def fire_due_rows(
                 report.errors.append(f"slack ticker: {exc}")
         if slack_ok:
             next_fire = (now + timedelta(days=TICKER_DAYS)).isoformat()
-            memory.bump_ticker(str(row.get("id") or row.get("email")), next_fire, now.isoformat())
+            memory.bump_ticker(_key(row), next_fire, now.isoformat())
         elif post_on:
-            report.ticker_skipped.append(f"{row.get('email') or row.get('name')} slack_post_failed")
+            report.ticker_skipped.append(f"{_label(row)} slack_post_failed")
     return cards
 
 
@@ -3331,6 +3398,42 @@ def matching_ticker_row(existing: list[dict], row: dict) -> dict | None:
     return None
 
 
+def matching_ticker_rows(existing: list[dict], row: dict) -> list[dict]:
+    deal = str(row.get("hs_deal_id") or "").strip()
+    contact = str(row.get("hs_contact_id") or "").strip()
+    email = (row.get("email") or "").strip().lower()
+    out: list[dict] = []
+    for ticker in existing or []:
+        if (
+            (deal and str(ticker.get("hs_deal_id") or "").strip() == deal)
+            or (contact and str(ticker.get("hs_contact_id") or "").strip() == contact)
+            or (email and (ticker.get("email") or "").strip().lower() == email)
+        ):
+            out.append(ticker)
+    return out
+
+
+REENROLL_OK_STOP_REASONS = frozenset({"", "legacy_reset"})
+
+
+def stopped_row_blocks_reenroll(ticker: dict, *, now: datetime) -> bool:
+    """A stopped ticker row keeps the person out of nurture.
+
+    legacy_reset rows never block. booked stops expire after TICKER_DAYS so a
+    no-show can come back; every other stop reason (removed, unsubscribed,
+    client, do_not_contact...) is permanent until a human re-activates it.
+    """
+    if (ticker.get("status") or "active") != "stopped":
+        return False
+    reason = str(ticker.get("stop_reason") or "").strip()
+    if reason in REENROLL_OK_STOP_REASONS:
+        return False
+    if reason == "booked":
+        stopped = parse_signal_at(ticker.get("stopped_at"))
+        return not stopped or _aware(now) - _aware(stopped) < timedelta(days=TICKER_DAYS)
+    return True
+
+
 def ticker_row_from_nurture_card(row: dict, *, now: datetime | None = None) -> dict:
     """New HubSpot Nurture enrollments are due now unless last_sent_at is inside 90 days."""
     now = _aware(now or now_utc())
@@ -3387,10 +3490,14 @@ def enroll_hubspot_nurture_deals(
     would: list[dict] = []
     enrolled: list[dict] = []
     for row in collected.get("rows") or []:
-        match = matching_ticker_row(existing, row)
-        if match and (match.get("status") or "active") == "active":
+        matches = matching_ticker_rows(existing, row)
+        if any((m.get("status") or "active") == "active" for m in matches):
             skipped["already_enrolled"] = skipped.get("already_enrolled", 0) + 1
             continue
+        if any(stopped_row_blocks_reenroll(m, now=now) for m in matches):
+            skipped["stopped"] = skipped.get("stopped", 0) + 1
+            continue
+        match = matches[0] if matches else None
         payload = dict(row)
         if match and match.get("last_sent_at"):
             payload["last_sent_at"] = match.get("last_sent_at")
