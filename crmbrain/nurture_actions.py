@@ -15,6 +15,8 @@ from crmbrain.nurture import (
     VIEW_EDIT,
     attach_gmail_thread,
     compose_nurture_draft,
+    is_nurture_thread_reply,
+    nurture_subject,
     persist_nurture_thread,
     cooldown_until,
     edit_modal,
@@ -27,9 +29,35 @@ from crmbrain.policy import deal_is_locked
 logger = logging.getLogger(__name__)
 
 
-def _confirm(settings: Settings, slack, channel: str, ts: str, row: dict, outcome: str, detail: str = "") -> None:
-    blocks = outcome_blocks(row, outcome, detail)
-    text = f"Nurture {outcome}: {row.get('name') or row.get('email')}"
+def _confirm(
+    settings: Settings,
+    slack,
+    channel: str,
+    ts: str,
+    row: dict,
+    outcome: str,
+    detail: str = "",
+    *,
+    subject: str = "",
+    body: str = "",
+    to: str = "",
+    thread_kind: str = "",
+    actor_user_id: str = "",
+    now=None,
+) -> None:
+    blocks = outcome_blocks(
+        row,
+        outcome,
+        detail,
+        subject=subject,
+        body=body,
+        to=to,
+        thread_kind=thread_kind,
+        actor_user_id=actor_user_id,
+        now=now,
+    )
+    status = (blocks[1]["text"]["text"] if len(blocks) > 1 else outcome) if blocks else outcome
+    text = f"{status}: {row.get('name') or row.get('email')}"
     if slack is None:
         from crmbrain import slack_notify
 
@@ -61,34 +89,73 @@ def send_nurture_reply(
     channel: str = "",
     ts: str = "",
     action: str = "approve",
+    actor_user_id: str = "",
 ) -> dict[str, Any]:
     """Idempotent Gmail send. First touch starts a new thread; later ones reply there."""
     claim = memory.claim_nurture_action(ticker_id, action)
     row = memory.get_ticker(ticker_id) or {}
     channel = channel or str(row.get("slack_channel") or settings.slack_channel)
     ts = ts or str(row.get("slack_ts") or "")
+    to = str(row.get("email") or "")
     if claim in {"already_sent", "already_removed", "in_progress"}:
-        _confirm(settings, slack, channel, ts, row, claim)
+        _confirm(
+            settings,
+            slack,
+            channel,
+            ts,
+            row,
+            claim,
+            subject=str(row.get("draft_subject") or ""),
+            body=str(row.get("draft_body") or ""),
+            to=to,
+            thread_kind=str(row.get("thread_kind") or ""),
+            actor_user_id=actor_user_id,
+        )
         return {"ok": False, "outcome": claim, "ticker_id": ticker_id}
     blocked = _blocked_send(settings, row)
     if blocked:
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
-        _confirm(settings, slack, channel, ts, row, blocked, "Send blocked.")
+        _confirm(
+            settings,
+            slack,
+            channel,
+            ts,
+            row,
+            blocked,
+            "Send blocked.",
+            subject=str(row.get("draft_subject") or ""),
+            body=str(row.get("draft_body") or ""),
+            to=to,
+            actor_user_id=actor_user_id,
+        )
         return {"ok": False, "outcome": blocked, "ticker_id": ticker_id}
-    to = str(row.get("email") or "")
     if not to:
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
-        _confirm(settings, slack, channel, ts, row, "error", "Missing email.")
+        _confirm(settings, slack, channel, ts, row, "error", "Missing email.", actor_user_id=actor_user_id)
         return {"ok": False, "outcome": "error", "reason": "no_email"}
     client = gmail or Gmail(settings)
     row = attach_gmail_thread(row)
     draft = compose_nurture_draft(row)
-    sub = subject if subject is not None else (row.get("draft_subject") or draft.subject)
+    reply = is_nurture_thread_reply(row)
+    raw_sub = subject if subject is not None else (row.get("draft_subject") or draft.subject)
+    sub = nurture_subject(str(raw_sub or draft.subject), reply=reply)
     bod = body if body is not None else (row.get("draft_body") or draft.body)
     checked = validate_draft(NurtureDraft(subject=sub, body=bod), row)
     if not checked.valid:
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
-        _confirm(settings, slack, channel, ts, row, "error", f"G7 {checked.reject_reason}")
+        _confirm(
+            settings,
+            slack,
+            channel,
+            ts,
+            row,
+            "error",
+            f"G7 {checked.reject_reason}",
+            subject=sub,
+            body=bod,
+            to=to,
+            actor_user_id=actor_user_id,
+        )
         return {"ok": False, "outcome": "error", "reason": checked.reject_reason}
     thread_id = str(row.get("nurture_thread_id") or "")
     thread_kind = str(row.get("thread_kind") or ("reply" if thread_id else "new_thread"))
@@ -108,13 +175,25 @@ def send_nurture_reply(
             subject=sub,
             body=bod,
             thread_id=thread_id,
-            in_reply_to=str(row.get("in_reply_to") or ""),
-            references=str(row.get("references") or row.get("in_reply_to") or ""),
+            in_reply_to=str(row.get("in_reply_to") or "") if thread_id else "",
+            references=(str(row.get("references") or row.get("in_reply_to") or "") if thread_id else ""),
         )
     except Exception as exc:
         logger.warning("nurture send failed: %s", exc)
         memory.patch_ticker(ticker_id, {"nurture_state": "queued"})
-        _confirm(settings, slack, channel, ts, row, "error", str(exc))
+        _confirm(
+            settings,
+            slack,
+            channel,
+            ts,
+            row,
+            "error",
+            str(exc),
+            subject=sub,
+            body=bod,
+            to=to,
+            actor_user_id=actor_user_id,
+        )
         return {"ok": False, "outcome": "error", "reason": str(exc)}
     stored_id = ""
     if isinstance(sent, dict):
@@ -130,29 +209,47 @@ def send_nurture_reply(
                 persist_nurture_thread(HubSpot(settings), row, stored_id, stored_subject)
             except Exception as exc:
                 logger.warning("nurture_thread_id hubspot write skipped: %s", exc)
-    cool = cooldown_until(now_utc())
+    sent_at = now_utc()
+    cool = cooldown_until(sent_at)
     memory.patch_ticker(
         ticker_id,
         {
             "nurture_state": "sent",
             "stop_reason": "emailed_recently",
             "next_fire_at": cool.isoformat(),
-            "last_sent_at": now_utc().isoformat(),
+            "last_sent_at": sent_at.isoformat(),
             "gmail_message_id": (sent or {}).get("id") if isinstance(sent, dict) else "",
             "nurture_thread_id": stored_id or None,
             "nurture_thread_subject": stored_subject or None,
             "gmail_thread_id": stored_id or None,
             "original_subject": stored_subject or None,
             "thread_kind": "reply" if stored_id else thread_kind,
+            "draft_subject": sub,
+            "draft_body": bod,
         },
     )
-    _confirm(settings, slack, channel, ts, row, "sent")
+    _confirm(
+        settings,
+        slack,
+        channel,
+        ts,
+        row,
+        "sent",
+        subject=sub,
+        body=bod,
+        to=to,
+        thread_kind=thread_kind,
+        actor_user_id=actor_user_id,
+        now=sent_at,
+    )
     return {
         "ok": True,
         "outcome": "sent",
         "ticker_id": ticker_id,
         "cooldown_until": cool.isoformat(),
         "thread_kind": thread_kind,
+        "subject": sub,
+        "body": bod,
     }
 
 
@@ -164,17 +261,24 @@ def remove_from_nurture(
     slack=None,
     channel: str = "",
     ts: str = "",
+    actor_user_id: str = "",
 ) -> dict[str, Any]:
     """Permanent hard stop. Idempotent."""
     claim = memory.claim_nurture_action(ticker_id, "remove")
     row = memory.get_ticker(ticker_id) or {}
     channel = channel or str(row.get("slack_channel") or settings.slack_channel)
     ts = ts or str(row.get("slack_ts") or "")
+    email_kwargs = dict(
+        subject=str(row.get("draft_subject") or ""),
+        body=str(row.get("draft_body") or ""),
+        to=str(row.get("email") or ""),
+        actor_user_id=actor_user_id,
+    )
     if claim == "already_removed":
-        _confirm(settings, slack, channel, ts, row, "already_removed")
+        _confirm(settings, slack, channel, ts, row, "already_removed", **email_kwargs)
         return {"ok": False, "outcome": "already_removed", "ticker_id": ticker_id}
     if claim == "already_sent":
-        _confirm(settings, slack, channel, ts, row, "already_sent")
+        _confirm(settings, slack, channel, ts, row, "already_sent", **email_kwargs)
         return {"ok": False, "outcome": "already_sent", "ticker_id": ticker_id}
     memory.stop_ticker(
         email=row.get("email"),
@@ -184,7 +288,7 @@ def remove_from_nurture(
     )
     memory.patch_ticker(ticker_id, {"nurture_state": "removed", "stop_reason": "do_not_contact"})
     row = memory.get_ticker(ticker_id) or row
-    _confirm(settings, slack, channel, ts, row, "removed")
+    _confirm(settings, slack, channel, ts, row, "removed", now=now_utc(), **email_kwargs)
     return {"ok": True, "outcome": "removed", "ticker_id": ticker_id}
 
 
@@ -224,6 +328,7 @@ def handle_block_action(
     ticker_id = str(action.get("value") or "")
     channel = str((payload.get("channel") or {}).get("id") or "")
     ts = str((payload.get("message") or {}).get("ts") or "")
+    actor_user_id = str((payload.get("user") or {}).get("id") or "")
     if action_id == ACTION_EDIT:
         return open_edit_modal(
             settings,
@@ -236,10 +341,26 @@ def handle_block_action(
         )
     if action_id == ACTION_APPROVE:
         return send_nurture_reply(
-            settings, memory, ticker_id, gmail=gmail, slack=slack, channel=channel, ts=ts, action="approve"
+            settings,
+            memory,
+            ticker_id,
+            gmail=gmail,
+            slack=slack,
+            channel=channel,
+            ts=ts,
+            action="approve",
+            actor_user_id=actor_user_id,
         )
     if action_id == ACTION_REMOVE:
-        return remove_from_nurture(settings, memory, ticker_id, slack=slack, channel=channel, ts=ts)
+        return remove_from_nurture(
+            settings,
+            memory,
+            ticker_id,
+            slack=slack,
+            channel=channel,
+            ts=ts,
+            actor_user_id=actor_user_id,
+        )
     return {"ok": False, "outcome": "unknown_action"}
 
 
@@ -268,6 +389,7 @@ def handle_view_submission(
     body = ((values.get("nurture_body") or {}).get("body") or {}).get("value") or ""
     channel = str(meta.get("channel") or "")
     ts = str(meta.get("ts") or "")
+    actor_user_id = str((payload.get("user") or {}).get("id") or "")
     return send_nurture_reply(
         settings,
         memory,
@@ -279,4 +401,5 @@ def handle_view_submission(
         channel=channel,
         ts=ts,
         action="edit",
+        actor_user_id=actor_user_id,
     )

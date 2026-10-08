@@ -586,6 +586,9 @@ def test_thread_reply_headers():
     assert headers["References"] == "<abc@mail>"
     already = thread_reply_headers("Re: HVAC update", in_reply_to="<x>")
     assert already["Subject"] == "Re: HVAC update"
+    fresh = thread_reply_headers("Roof River City follow up")
+    assert fresh["Subject"] == "Roof River City follow up"
+    assert "In-Reply-To" not in fresh
 
 
 def test_signature_verification():
