@@ -1508,19 +1508,36 @@ def _topic_from_snippet(snippet: str) -> str:
     return part.strip(" ,")
 
 
+def is_nurture_thread_reply(row: dict | None) -> bool:
+    """True when we will send into the stored Gmail nurture thread."""
+    return bool(stored_nurture_thread_id(row))
+
+
+def nurture_subject(subject: str, *, reply: bool) -> str:
+    """Prefix Re: only when this is a real thread reply."""
+    sub = _no_dashes((subject or "").strip())
+    if not sub:
+        return sub
+    if reply:
+        return sub if sub.lower().startswith("re:") else f"Re: {sub}"
+    if sub.lower().startswith("re:"):
+        sub = sub[3:].strip()
+    return sub
+
+
 def compose_nurture_subject(row: dict) -> str:
     """New nurture emails get a clean subject. Replies use the stored nurture subject."""
     stored = stored_nurture_thread_id(row)
     original = stored_nurture_thread_subject(row)
     if stored and original:
-        return thread_reply_headers(original)["Subject"]
+        return nurture_subject(original, reply=True)
     company = nurture_company_label(
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
         str(row.get("email") or ""),
     )
     if company:
-        return _no_dashes(f"{company} follow up")
+        return nurture_subject(f"{company} follow up", reply=False)
     return "Following up"
 
 
@@ -1892,6 +1909,99 @@ def _card_source_label(row: dict) -> str:
     return f"{source} / {detail}" if detail else source
 
 
+NURTURE_WHY_PLAIN = {
+    "met": "we already met",
+    "booked": "had a meeting booked",
+    "kicked_can": "asked us to check back later",
+    "timing_later": "asked us to check back later",
+    "no_show": "booked and didn't show",
+    "never_booked": "no meeting yet",
+}
+
+
+def plain_nurture_why(row: dict) -> str:
+    why = infer_nurture_reason(
+        reason=str(row.get("reason") or ""),
+        deal_stage=str(row.get("deal_stage") or ""),
+        extra=row.get("extra") if isinstance(row.get("extra"), dict) else row,
+        booked=bool((row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
+        met=bool((row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
+    )
+    return NURTURE_WHY_PLAIN.get(why, why.replace("_", " ").strip())
+
+
+def last_touch_line(row: dict) -> str:
+    extra = _row_extra(row)
+    stamp = _row_meeting_at(row)
+    kind = ""
+    if stamp:
+        why = infer_nurture_reason(
+            reason=str(row.get("reason") or ""),
+            deal_stage=str(row.get("deal_stage") or ""),
+            extra=row.get("extra") if isinstance(row.get("extra"), dict) else row,
+            booked=bool(row.get("booked") or extra.get("booked")),
+            met=bool(row.get("met") or extra.get("met")),
+        )
+        kind = "call" if why == "met" else ("meeting" if why == "booked" else "touch")
+    else:
+        for key, label in (
+            ("held_at", "call"),
+            ("gmail_followup_at", "call"),
+            ("last_sent_at", "email"),
+            ("last_activity", "touch"),
+            ("signal_at", "touch"),
+        ):
+            stamp = parse_signal_at(row.get(key) or extra.get(key))
+            if stamp:
+                kind = label
+                break
+    if not stamp or not kind:
+        return ""
+    return f"Last: {kind} {chicago_date_phrase(stamp)}"
+
+
+def card_people_header(row: dict) -> str:
+    name = str(row.get("name") or row.get("email") or "this contact").strip()
+    company = nurture_company_label(
+        str(row.get("company") or ""),
+        str(row.get("dealname") or row.get("deal_name") or ""),
+        str(row.get("email") or ""),
+    )
+    text = f"Nurture email to {name} ({company})" if company else f"Nurture email to {name}"
+    return text[:150]
+
+
+def card_context_line(row: dict) -> str:
+    parts: list[str] = []
+    email = str(row.get("email") or "").strip()
+    if email:
+        parts.append(email)
+    why = plain_nurture_why(row)
+    if why:
+        parts.append(why)
+    last = last_touch_line(row)
+    if last:
+        parts.append(last)
+    return " · ".join(parts)
+
+
+def chicago_clock(now: datetime | None = None) -> str:
+    local = _aware(now or now_utc()).astimezone(CDT)
+    hour = int(local.strftime("%I"))
+    return f"{hour}:{local.strftime('%M')}{local.strftime('%p').lower()} CT"
+
+
+def email_preview_mrkdwn(to: str, subject: str, body: str, *, heading: str) -> str:
+    return f"*{heading}*\n*To:* {to}\n*Subject:* {subject}\n\n```{body}```"
+
+
+def _gmail_kind_label(thread_kind: str) -> str:
+    kind = str(thread_kind or "").strip()
+    if kind in {"reply", "thread reply"}:
+        return "thread reply"
+    return "new email"
+
+
 def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureDraft:
     """Spec draft: opener from snippet, industry proof, meeting guarantee, Josh Osborn."""
     name = str(row.get("name") or "")
@@ -2113,62 +2223,41 @@ def apply_reenrollment(existing: list[dict], candidate: TickerCandidate, now: da
 
 
 def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
-    signal = parse_signal_at(row.get("signal_at"))
-    signal_line = signal.astimezone(CDT).strftime("%b %-d, %Y") if signal else "unknown"
-    snippet = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)[:120]
-    source_label = _card_source_label(row)
-    they_plain = f'\nThey said: "{snippet}"' if snippet.strip() else ""
-    they_md = f'\n*They said:* "{snippet}"' if snippet.strip() else ""
     ticker_id = str(row.get("id") or "")
-    thread_kind = str(row.get("thread_kind") or ("reply" if row.get("gmail_thread_id") else "new_thread"))
-    thread_label = "new thread" if thread_kind == "new_thread" else "thread reply"
-    why = infer_nurture_reason(
-        reason=str(row.get("reason") or ""),
-        deal_stage=str(row.get("deal_stage") or ""),
-        extra=row.get("extra") if isinstance(row.get("extra"), dict) else row,
-        booked=bool((row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
-        met=bool((row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
-    )
+    to = str(row.get("email") or row.get("phone") or "").strip()
+    header = card_people_header(row)
+    context = card_context_line(row)
+    preview = email_preview_mrkdwn(to, draft.subject, draft.body, heading="Email that will send")
     source_id = draft.spoken_source_id or draft.meeting_source_id or meeting_source_id(row)
-    source_id_line = f"Meeting source: {source_id}\n" if source_id else ""
+    deal_id = str(row.get("hs_deal_id") or _card_source_detail(row) or "").strip()
     fallback = (
-        f"90-day ticker (approve before send)\n"
-        f"To: {row.get('email') or row.get('phone')}\n"
-        f"Why: {why}\n"
-        f"Thread: {thread_label}\n"
-        f"Source: {source_label}\n"
-        f"{source_id_line}"
-        f"Signal: {signal_line}"
-        f"{they_plain}\n"
-        f"Subject: {draft.subject}\n\n{draft.body}"
+        f"{header}\n"
+        f"{context}\n"
+        f"To: {to}\n"
+        f"Subject: {draft.subject}\n\n"
+        f"{draft.body}"
     )
-    blocks = [
+    blocks: list[dict[str, Any]] = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "90-day ticker (approve before send)", "emoji": True},
+            "text": {"type": "plain_text", "text": header, "emoji": True},
         },
+    ]
+    if context:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": context}],
+            }
+        )
+    blocks.append({"type": "divider"})
+    blocks.append(
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"*To:* {row.get('email') or row.get('phone') or row.get('name')}\n"
-                    f"*Why:* {why}\n"
-                    f"*Thread:* {thread_label}\n"
-                    f"*Source:* {source_label}\n"
-                    + (f"*Meeting source:* {source_id}\n" if source_id else "")
-                    + f"*Signal:* {signal_line}"
-                    + they_md
-                ),
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Subject:* {draft.subject}\n\n```{draft.body}```",
-            },
-        },
+            "text": {"type": "mrkdwn", "text": preview},
+        }
+    )
+    blocks.append(
         {
             "type": "actions",
             "block_id": f"nurture_actions_{ticker_id}",
@@ -2194,8 +2283,15 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
                     "value": ticker_id,
                 },
             ],
-        },
-    ]
+        }
+    )
+    if deal_id and deal_id != "-":
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"HubSpot deal {deal_id}"}],
+            }
+        )
     return {
         "text": fallback,
         "blocks": blocks,
@@ -2207,27 +2303,78 @@ def build_nurture_card(row: dict, draft: NurtureDraft) -> dict[str, Any]:
     }
 
 
-def outcome_blocks(row: dict, outcome: str, detail: str = "") -> list[dict]:
-    label = {
-        "sent": "Sent from Josh's Gmail as a thread reply or new 1:1. Removed from nurture for 90 days.",
-        "removed": "Removed from nurture permanently. Ticker row stopped.",
-        "already_sent": "Already sent. Buttons are locked (idempotent).",
-        "already_removed": "Already removed. Buttons are locked.",
-        "disabled": "NURTURE_SEND_ENABLED is off. Nothing was sent.",
-        "error": detail or "Send failed.",
-    }.get(outcome, detail or outcome)
-    return [
+def outcome_status_line(
+    outcome: str,
+    *,
+    actor_user_id: str = "",
+    thread_kind: str = "",
+    now: datetime | None = None,
+    detail: str = "",
+) -> str:
+    who = f"<@{actor_user_id}>" if str(actor_user_id or "").strip() else "Josh"
+    when = chicago_clock(now)
+    if outcome == "removed":
+        return f"Removed by {who} {when}; no email sent"
+    if outcome == "already_removed":
+        return f"Already removed by {who}. No email sent."
+    if outcome == "already_sent":
+        return f"Already sent. Buttons are locked."
+    if outcome == "disabled":
+        return "NURTURE_SEND_ENABLED is off. Nothing was sent."
+    if outcome == "error":
+        return detail or "Send failed."
+    kind = _gmail_kind_label(thread_kind)
+    return f"Sent {when} by {who} from Josh's Gmail ({kind})"
+
+
+def outcome_blocks(
+    row: dict,
+    outcome: str,
+    detail: str = "",
+    *,
+    subject: str = "",
+    body: str = "",
+    to: str = "",
+    thread_kind: str = "",
+    actor_user_id: str = "",
+    now: datetime | None = None,
+) -> list[dict]:
+    header = card_people_header(row)
+    status = outcome_status_line(
+        outcome,
+        actor_user_id=actor_user_id,
+        thread_kind=thread_kind,
+        now=now,
+        detail=detail,
+    )
+    to = str(to or row.get("email") or row.get("phone") or "").strip()
+    subject = str(subject or row.get("draft_subject") or "").strip()
+    body = str(body or row.get("draft_body") or "").strip()
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": header, "emoji": True},
+        },
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"*Nurture:* {row.get('name') or row.get('email')}\n"
-                    f"*Outcome:* {label}"
-                ),
-            },
-        }
+            "text": {"type": "mrkdwn", "text": status},
+        },
     ]
+    if subject or body or to:
+        heading = "Email that sent" if outcome in {"sent", "already_sent"} else "Email that would have sent"
+        if outcome == "removed":
+            heading = "Email that would have sent"
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": email_preview_mrkdwn(to, subject, body, heading=heading),
+                },
+            }
+        )
+    return blocks
 
 
 def edit_modal(row: dict, draft: NurtureDraft, channel: str = "", ts: str = "") -> dict[str, Any]:
@@ -2279,14 +2426,22 @@ def verify_slack_signature(secret: str, timestamp: str, body: bytes | str, signa
     return hmac.compare_digest(digest, signature)
 
 
-def thread_reply_headers(subject: str, in_reply_to: str = "", references: str = "") -> dict[str, str]:
-    sub = (subject or "").strip()
-    if sub and not sub.lower().startswith("re:"):
-        sub = f"Re: {sub}"
-    refs = references or in_reply_to
-    headers = {"Subject": sub}
+def thread_reply_headers(
+    subject: str,
+    in_reply_to: str = "",
+    references: str = "",
+    *,
+    thread_id: str = "",
+) -> dict[str, str]:
+    reply = bool(
+        str(in_reply_to or "").strip()
+        or str(references or "").strip()
+        or str(thread_id or "").strip()
+    )
+    headers = {"Subject": nurture_subject(subject, reply=reply)}
     if in_reply_to:
         headers["In-Reply-To"] = in_reply_to
+    refs = references or in_reply_to
     if refs:
         headers["References"] = refs
     return headers

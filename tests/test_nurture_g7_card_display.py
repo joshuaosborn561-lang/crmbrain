@@ -50,33 +50,39 @@ def test_random_47_meetings_claim_is_still_rejected():
     assert draft.reject_reason == "invented_number"
 
 
-def _card_section(card: dict) -> str:
-    return next(b["text"]["text"] for b in card["blocks"] if b.get("type") == "section")
+def _card_blob(card: dict) -> str:
+    parts = [card.get("text") or ""]
+    for block in card.get("blocks") or []:
+        text = block.get("text")
+        if isinstance(text, dict):
+            parts.append(text.get("text") or "")
+        for el in block.get("elements") or []:
+            raw = el.get("text")
+            parts.append(raw.get("text") if isinstance(raw, dict) else (raw or ""))
+    return "\n".join(parts)
 
 
 def test_card_omits_empty_they_said_and_bare_hubspot_source():
     row = _george_row()
     draft = compose_nurture_draft(row)
     card = build_nurture_card(row, draft)
-    section = _card_section(card)
-    assert "They said" not in card["text"]
-    assert "They said" not in section
-    assert '""' not in card["text"]
-    assert "Source: hubspot\n" in card["text"]
-    assert "*Source:* hubspot\n" in section
-    assert " / -" not in card["text"]
-    assert " / -" not in section
+    blob = _card_blob(card)
+    assert "They said" not in blob
+    assert "Source: hubspot" not in blob
+    assert " / -" not in blob
+    assert "Email that will send" in blob
+    assert "Nurture email to George Stradiota" in blob
 
 
-def test_card_shows_hubspot_deal_id_and_keeps_snippet():
+def test_card_shows_hubspot_deal_id_in_footer_not_they_said():
     row = _george_row(
         hs_deal_id="351112233",
         last_touch_snippet="Check back after our busy season.",
     )
     draft = compose_nurture_draft(row)
     card = build_nurture_card(row, draft)
-    section = _card_section(card)
-    assert "Source: hubspot / 351112233" in card["text"]
-    assert "*Source:* hubspot / 351112233" in section
-    assert '*They said:* "Check back after our busy season."' in section
-    assert 'They said: "Check back after our busy season."' in card["text"]
+    blob = _card_blob(card)
+    assert "HubSpot deal 351112233" in blob
+    assert "Source: hubspot" not in blob
+    assert "They said" not in blob
+    assert "Email that will send" in blob

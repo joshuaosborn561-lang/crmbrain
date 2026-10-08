@@ -485,7 +485,12 @@ class Gmail:
         """Send a 1:1 reply in the original Gmail thread. Needs gmail.send."""
         from crmbrain.nurture import thread_reply_headers
 
-        headers = thread_reply_headers(subject, in_reply_to=in_reply_to, references=references)
+        headers = thread_reply_headers(
+            subject,
+            in_reply_to=in_reply_to,
+            references=references,
+            thread_id=thread_id,
+        )
         msg = MIMEText(body)
         msg["to"] = to
         msg["from"] = "joshua@salesglidergrowth.com"

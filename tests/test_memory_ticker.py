@@ -275,9 +275,12 @@ def test_fire_ticker_posts_subject_and_body_for_approval(tmp_path: Path, monkeyp
     assert posted == []
     assert report.nurture_cards
     card = report.nurture_cards[0]
-    assert "90-day ticker (approve before send)" in card["text"]
+    assert "Nurture email to Jackie Darkazalli" in card["text"]
     assert "To: jackie@kellyroofing.com" in card["text"]
-    assert "Why: kicked_can" in card["text"]
+    assert "asked us to check back later" in card["text"]
+    assert "Email that will send" in "".join(
+        (b.get("text") or {}).get("text") or "" for b in card["blocks"] if b.get("type") == "section"
+    )
     assert card["subject"] != "Roofing?"
     assert "busy season" in card["subject"].lower() or "Kelly Roofing" in card["subject"]
     assert "Josh Osborn" in card["body"]
