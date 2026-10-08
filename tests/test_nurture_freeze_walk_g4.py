@@ -153,7 +153,13 @@ def test_past_meeting_at_does_not_stop_row(tmp_path: Path):
     settings = _freeze_settings()
     memory = Memory(settings, data_dir=tmp_path)
     past = (MONDAY - timedelta(days=12)).isoformat()
-    row = _pre_freeze_row(0, meeting_at=past)
+    row = _pre_freeze_row(
+        0,
+        meeting_at=past,
+        reason="met",
+        met=True,
+        last_touch_snippet="Check back after our busy season. Sep 24.",
+    )
     memory._local["ticker"] = [row]
     cards = fire_due_rows(
         settings, memory, CycleReport(), now=MONDAY, gmail=FakeGmail(), slack=FakeSlack()
