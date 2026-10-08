@@ -22,9 +22,7 @@ from crmbrain.nurture import (
     validate_draft,
     NurtureDraft,
 )
-from crmbrain.policy import deal_is_locked, event_predates_freeze
-from crmbrain.models import Engagement
-from crmbrain.ticker import parse_signal_at
+from crmbrain.policy import deal_is_locked
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +44,6 @@ def _blocked_send(settings: Settings, row: dict) -> str:
     if not getattr(settings, "nurture_send_enabled", False):
         return "disabled"
     if deal_is_locked({"properties": {"crmbrain_locked": row.get("crmbrain_locked")}}):
-        return "error"
-    if event_predates_freeze(
-        Engagement(
-            source="nurture",
-            external_id=str(row.get("id") or ""),
-            occurred_at=parse_signal_at(row.get("signal_at")),
-        ),
-        settings,
-    ):
         return "error"
     return ""
 
