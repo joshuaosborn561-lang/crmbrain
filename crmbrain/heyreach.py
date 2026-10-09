@@ -4,7 +4,7 @@ import time
 
 from crmbrain.config import Settings
 from crmbrain.http_mcp import McpClient
-from crmbrain.leadmagic import usable_linkedin
+from crmbrain.identity import usable_linkedin
 from crmbrain.models import Engagement
 
 

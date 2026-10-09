@@ -40,7 +40,6 @@ def make_settings(**kwargs) -> Settings:
         heyreach_linkedin_account_id=1,
         enrichment_url="",
         enrichment_client_tag="salesglider",
-        leadmagic_key="",
         slack_token="",
         slack_channel="C0BHBDTMRFY",
         supabase_url="https://example.supabase.co",

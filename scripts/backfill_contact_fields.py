@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fill empty HubSpot phones/emails and apply safe CRM deal cleanup.
 
-Never overwrites a real email or phone. LeadMagic is charged only when a
-value is found. Does not move deal stages.
+Never overwrites a real email or phone. Missing emails stay empty unless a
+known SmartLead address is already mapped. Does not move deal stages.
 """
 from __future__ import annotations
 
@@ -18,13 +18,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crmbrain.config import STAGE, Settings, is_client_context  # noqa: E402
-from crmbrain.leadmagic import (  # noqa: E402
-    find_email,
-    find_mobile,
-    looks_like_email,
-    looks_like_phone,
-    usable_linkedin,
-)
+from crmbrain.identity import looks_like_email, looks_like_phone, usable_linkedin  # noqa: E402
 
 JUNK_LI = "dnyanoba-mulgir"
 BLANK_DEALS = ("344689944309", "344775829222", "344678917830", "344713141954")
@@ -253,23 +247,6 @@ def run() -> dict:
                 rec["email"] = props["email"]
                 rec["need_email"] = False
                 rec["domain"] = rec["email"].split("@")[1]
-        if rec["need_email"] and (rec["domain"] or rec["company"]):
-            found = find_email(settings, rec["first"], rec["last"], rec["domain"], rec["company"])
-            if found:
-                more = safe_patch(settings, rec, email=found) or {}
-                props.update(more)
-                if more.get("email"):
-                    rec["email"] = more["email"]
-                    rec["need_email"] = False
-                    rec["domain"] = rec["email"].split("@")[1]
-        if rec["need_phone"] and rec["email"]:
-            mobile = find_mobile(settings, rec["email"], rec["linkedin"])
-            if mobile:
-                more = safe_patch(settings, rec, phone=mobile) or {}
-                props.update(more)
-                if more.get("phone"):
-                    rec["phone"] = more["phone"]
-                    rec["need_phone"] = False
         if props:
             patched.append({"id": rec["id"], "name": rec["name"], **props})
         elif rec["need_email"] or rec["need_phone"]:

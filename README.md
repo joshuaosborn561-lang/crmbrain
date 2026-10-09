@@ -111,7 +111,7 @@ Full cycle:
 7. Prunes Appointment Scheduled junk with no meeting evidence
 8. Extracts relational notes onto the contact (Fireflies / Cube every cycle, including a notes refresh if the transcript was already processed)
 9. Fills empty deal `amount` when the transcript states a retainer / proposal / package price
-10. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs come from the email-waterfall MCP.
+10. Queues a HeyReach LinkedIn request (campaign 530529) for anyone Josh called, emailed, or talked to on LinkedIn. Missing profile URLs, emails, and phones come from the email-waterfall MCP only.
 11. Enrolls **met/booked** contacts on a repeating 90-day ticker; Slack gets a Block Kit card (when `NURTURE_POST_ENABLED`), nothing sends unless Josh clicks Approve/Edit and `NURTURE_SEND_ENABLED` is on
 12. If a Josh meeting is about two hours out, emails one Laura-style brief to `joshua@salesglidergrowth.com`
 13. Reconciles HubSpot to the per-person evidence timeline (create / restore / advance / regress). Upcoming Calendar events are always scanned (next 30 days), not just the email lookback. Low-confidence meetings go to `crmbrain.review_queue`.

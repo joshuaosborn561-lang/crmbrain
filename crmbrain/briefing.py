@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from crmbrain.config import CDT, Settings, digits_phone, now_utc
 from crmbrain.gmail_client import Gmail
 from crmbrain.hubspot import HubSpot
-from crmbrain.leadmagic import usable_linkedin
+from crmbrain.identity import usable_linkedin
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.sources.gmail_scan import is_josh_meeting, parse_calendly, parse_meeting_at

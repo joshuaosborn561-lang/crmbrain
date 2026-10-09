@@ -5,7 +5,7 @@ import time
 
 from crmbrain.config import Settings
 from crmbrain.http_mcp import McpClient
-from crmbrain.leadmagic import find_email, find_mobile, usable_linkedin
+from crmbrain.identity import usable_linkedin
 from crmbrain.models import Engagement
 
 
@@ -43,8 +43,6 @@ def enrich(settings: Settings, ev: Engagement) -> Engagement:
             ev = _enrich_waterfall(settings, ev, domain)
         except Exception:
             pass
-    if (not ev.email or not ev.phone) and settings.leadmagic_key:
-        ev = _enrich_leadmagic(settings, ev)
     return ev
 
 
@@ -107,20 +105,6 @@ def _enrich_waterfall(settings: Settings, ev: Engagement, domain: str) -> Engage
                 return _apply_row(ev, row)
     if rows:
         return _apply_row(ev, rows[0])
-    return ev
-
-
-def _enrich_leadmagic(settings: Settings, ev: Engagement) -> Engagement:
-    if not ev.email and (ev.first_name or ev.last_name) and (ev.domain or ev.company):
-        found = find_email(settings, ev.first_name, ev.last_name, ev.domain, ev.company)
-        if found:
-            ev.email = found
-            if not ev.domain and "@" in found:
-                ev.domain = found.split("@", 1)[1]
-    if not ev.phone:
-        mobile = find_mobile(settings, ev.email, ev.linkedin_url)
-        if mobile:
-            ev.phone = mobile
     return ev
 
 

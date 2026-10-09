@@ -39,7 +39,7 @@ from crmbrain.memory import Memory
 from crmbrain.deal_write import authorize_deal_write, commit_amount_write, commit_deal_write, propose_deal_write
 from crmbrain.policy import INCREMENT_NO_SHOW
 from crmbrain.models import CycleReport, Engagement
-from crmbrain.leadmagic import should_skip_email, usable_linkedin
+from crmbrain.identity import should_skip_email, usable_linkedin
 from crmbrain.sources import cube_acr, fireflies, gmail_scan, rvm, smartlead
 from crmbrain.sources.cube_acr import CubeAuthError
 from crmbrain.sources.gmail_scan import is_junk_crm_email
