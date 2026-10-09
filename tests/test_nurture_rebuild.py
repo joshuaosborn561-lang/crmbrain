@@ -412,7 +412,8 @@ def test_t22_t26_drafts():
     assert "q4" not in first
     assert "it's been a few months" in first
     assert d.subject != "Morgan?"
-    assert d.subject == "Following up"
+    assert d.subject != "Following up"
+    assert d.subject == "Morgan follow up"
 
     roof = compose_nurture_draft(
         {

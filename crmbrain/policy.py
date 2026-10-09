@@ -1782,6 +1782,42 @@ def contact_has_meeting_evidence(contact: dict, deals: list[dict] | None = None)
     return False
 
 
+def contact_has_protected_deal(deals: list[dict] | None = None) -> bool:
+    """True when any associated deal must keep the contact in HubSpot.
+
+    Nurture, any open new-business stage, Closed Won, and every Clients /
+    renewals-pipeline stage protect the contact. Closed Lost does not.
+    """
+    for deal in deals or []:
+        if is_archived_hs_row(deal):
+            continue
+        props = deal.get("properties") or {}
+        stage = canonicalize_stage(props.get("dealstage") or "")
+        pipeline = deal_pipeline(deal)
+        if pipeline == RENEWAL_PIPELINE:
+            return True
+        if stage and stage != STAGE["closed_lost"]:
+            return True
+    return False
+
+
+def is_bot_or_junk_identity(email: str = "", name: str = "") -> bool:
+    """Fireflies/Otter notetakers and system addresses must never become contacts."""
+    if email and (is_notetaker_email_local(email) or is_system_address_local(email)):
+        return True
+    blob = f"{name or ''} {email or ''}".lower()
+    return "notetaker" in blob
+
+
+def may_prune_unengaged_from_source(source: str) -> bool:
+    """Only leftover Smartlead / HeyReach / RVM rows may be pruned on re-scan.
+
+    Gmail (including Josh's own outbound / nurture sends) must never archive
+    a contact just because the message appeared in the lookback window.
+    """
+    return (source or "").strip().lower() in TICKER_WITHOUT_HUBSPOT
+
+
 def is_blank_contact(contact: dict) -> bool:
     props = contact.get("properties") or {}
     identity = (

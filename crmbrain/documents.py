@@ -55,13 +55,33 @@ COMPLETED_HINTS = (
     "signing is complete",
     "fully executed",
 )
-VIEWED_HINTS = ("viewed", "opened the document", "document was viewed")
+VIEWED_HINTS = ("viewed", "opened the document", "document was viewed", "has viewed the document")
 SENT_HINTS = ("sent you", "document was sent", "has sent", "sent a document")
+PAYMENT_LINK_HINTS = (
+    "payment link",
+    "sent a payment link",
+    "sent you a payment link",
+    "pay.hubspot.com",
+    "payments.hubspot.com",
+    "complete your payment",
+    "hubspot payment",
+    "here's your payment",
+    "here is your payment",
+)
+VIEWER_NAME_RE = re.compile(
+    r"([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+){1,3})\s+has viewed",
+    re.I,
+)
 
 
 def is_signature_mail(subject: str, sender: str) -> bool:
     blob = f"{subject} {sender}".lower()
-    return any(h in blob for h in ("pandadoc", "docusign"))
+    return any(h in blob for h in ("pandadoc", "getpandadoc", "docusign"))
+
+
+def is_payment_link_mail(subject: str, sender: str, snippet: str = "", body: str = "") -> bool:
+    blob = f"{subject} {sender} {snippet} {body}".lower()
+    return any(h in blob for h in PAYMENT_LINK_HINTS)
 
 
 def is_payment_mail(subject: str, sender: str, snippet: str = "") -> bool:
@@ -197,13 +217,18 @@ def document_name(subject: str, body: str) -> str:
     text = f"{subject}\n{body}"
     for pattern in (
         r"(?:document|agreement|proposal)\s+[\"']([^\"']{3,120})[\"']",
+        r"has viewed\s+(.{3,120}?)(?:\.|$)",
         r"viewed\s+(.{3,120}?)\s+(?:on|in)\s+pandadoc",
         r"sent you\s+(.{3,120}?)(?:\.|$)",
         r"completed\s+(.{3,120}?)(?:\.|$)",
+        r"(SalesGlider[^.\n]{3,120}?(?:SOW|statement of work|agreement)[^.\n]{0,80})",
     ):
         match = re.search(pattern, text, re.I)
         if match:
-            return re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
+            raw = re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
+            if raw.lower() in {"the document", "document", "a document", "your document"}:
+                continue
+            return raw
     return ""
 
 
@@ -223,5 +248,40 @@ def stage_from_signature_mail(subject: str, sender: str, snippet: str, body: str
                 return "", amount, name
             return STAGE["contract_signed_unpaid"], amount, name
         if any(h in blob for h in VIEWED_HINTS):
-            return STAGE["proposal_sent"], amount, name
+            if free:
+                return "", amount, name
+            return STAGE["contract_signed_unpaid"], amount, name
     return "", amount, name
+
+
+def viewer_name_from_text(subject: str, body: str = "") -> str:
+    """'Christian Batten has viewed the document' → the viewer, not Josh."""
+    text = f"{subject}\n{body}"
+    match = VIEWER_NAME_RE.search(text)
+    if not match:
+        return ""
+    name = re.sub(r"\s+", " ", match.group(1)).strip(" -:|")
+    if not name or is_josh_address(name) or name.lower() in {"pandadoc", "docusign", "hubspot"}:
+        return ""
+    return name
+
+
+def emails_from_signature_mail(subject: str, body: str = "") -> list[str]:
+    """Prospect emails in a PandaDoc/DocuSign notification body."""
+    out: list[str] = []
+    for match in PAYER_EMAIL_RE.finditer(f"{subject}\n{body}"):
+        email = match.group(0).strip().lower()
+        if _skip_payer_email(email) or email in out:
+            continue
+        out.append(email)
+    return out
+
+
+def company_from_document_name(name: str) -> str:
+    """'SalesGlider Growth Partners SOW - BPL Technology Group' → company tail."""
+    raw = (name or "").strip()
+    if " - " in raw:
+        tail = raw.split(" - ", 1)[-1].strip(" -:|")
+        if tail and "salesglider" not in tail.lower():
+            return tail
+    return ""

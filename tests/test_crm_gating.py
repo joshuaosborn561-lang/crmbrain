@@ -78,6 +78,10 @@ class FakeHubSpot:
         del contact_id, deal_id
         return ""
 
+    def associated_company_name(self, *, contact_id="", deal_id=""):
+        del contact_id, deal_id
+        return ""
+
     def find_contact(self, email="", phone="", name=""):
         from crmbrain.config import is_zoom_room_address
 
@@ -155,8 +159,14 @@ class FakeHubSpot:
 
     def upsert_contact(self, ev):
         from crmbrain.names import prefer_contact_name
-        from crmbrain.policy import resolve_engagement_contact
+        from crmbrain.policy import is_bot_or_junk_identity, resolve_engagement_contact
 
+        if is_bot_or_junk_identity(
+            ev.email or "",
+            ev.display_name() or ev.name or f"{ev.first_name} {ev.last_name}".strip(),
+        ):
+            self.writes.append(("upsert_contact_skipped", ev.source, ev.email or ev.phone))
+            return {"id": "", "properties": {}, "skipped": "notetaker"}
         existing = resolve_engagement_contact(self, ev)
         if not existing and (ev.extra or {}).get("name_ambiguous"):
             return {"id": "", "properties": {}, "skipped": "ambiguous_name"}

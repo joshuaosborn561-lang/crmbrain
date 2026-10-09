@@ -409,12 +409,12 @@ class HubSpot:
                 contacts.append(c.json())
         return contacts
 
-    def associated_company_industry(self, *, contact_id: str = "", deal_id: str = "") -> str:
-        """HubSpot company.industry for the associated company — not the contact field."""
-        cache = getattr(self, "_company_industry_cache", None)
+    def _associated_company_props(self, *, contact_id: str = "", deal_id: str = "") -> dict[str, str]:
+        """HubSpot company name/industry for the associated company record."""
+        cache = getattr(self, "_company_props_cache", None)
         if cache is None:
-            self._company_industry_cache = {}
-            cache = self._company_industry_cache
+            self._company_props_cache = {}
+            cache = self._company_props_cache
         for kind, oid in (("contact", contact_id), ("deal", deal_id)):
             key = f"{kind}:{oid}"
             if not oid:
@@ -430,7 +430,7 @@ class HubSpot:
                 retry=True,
                 timeout=READ_TIMEOUT,
             )
-            industry = ""
+            props: dict[str, str] = {}
             if resp.ok:
                 company_id = ""
                 for row in resp.json().get("results") or []:
@@ -446,11 +446,23 @@ class HubSpot:
                         timeout=20,
                     )
                     if c.ok:
-                        industry = str((c.json().get("properties") or {}).get("industry") or "").strip()
-            cache[key] = industry
-            if industry:
-                return industry
-        return ""
+                        raw = c.json().get("properties") or {}
+                        props = {
+                            "name": str(raw.get("name") or "").strip(),
+                            "industry": str(raw.get("industry") or "").strip(),
+                        }
+            cache[key] = props
+            if props:
+                return props
+        return {}
+
+    def associated_company_industry(self, *, contact_id: str = "", deal_id: str = "") -> str:
+        """HubSpot company.industry for the associated company — not the contact field."""
+        return self._associated_company_props(contact_id=contact_id, deal_id=deal_id).get("industry") or ""
+
+    def associated_company_name(self, *, contact_id: str = "", deal_id: str = "") -> str:
+        """HubSpot company.name for the associated company — not the contact field."""
+        return self._associated_company_props(contact_id=contact_id, deal_id=deal_id).get("name") or ""
 
     def find_contact(self, email: str = "", phone: str = "", name: str = "") -> dict | None:
         if email and is_zoom_room_address(email):
@@ -550,6 +562,12 @@ class HubSpot:
         if self._is_excluded(ev):
             logger.info("skip hubspot contact write for excluded person")
             return {"id": "", "properties": {}, "skipped": "non_deal"}
+        if policy.is_bot_or_junk_identity(
+            ev.email or "",
+            ev.display_name() or ev.name or f"{ev.first_name} {ev.last_name}".strip(),
+        ):
+            logger.info("skip hubspot contact write for notetaker/system address")
+            return {"id": "", "properties": {}, "skipped": "notetaker"}
         existing = policy.resolve_engagement_contact(self, ev)
         if not existing and (ev.extra or {}).get("name_ambiguous"):
             return {"id": "", "properties": {}, "skipped": "ambiguous_name"}
