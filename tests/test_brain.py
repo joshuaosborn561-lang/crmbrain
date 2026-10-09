@@ -37,6 +37,7 @@ from crmbrain.sources.gmail_scan import (
     parse_meeting_at,
     real_person_emails,
 )
+from crmbrain.nurture import CASE_STUDIES, GENERAL_PROOF, TRADES_PROOF, strip_ps_tail
 from crmbrain.ticker import (
     MEETING_GUARANTEE,
     VERTICALS,
@@ -274,24 +275,23 @@ def test_nurture_copy_has_no_dashes():
 
 def test_nurture_roofing_uses_roi_case_study():
     subject, body = draft_email("Jackie Darkazalli", "Kelly Roofing", "kicked_can")
-    assert subject == "Roofing?"
-    assert "roofing pipeline" in body.lower() or "roofers" in body.lower()
-    assert "$2M" in body
-    assert "$100K" in body
-    assert "14+" in body
+    assert subject == "Kelly Roofing follow up"
+    assert "done-for-you outbound" in body.lower()
+    assert CASE_STUDIES["roofing"].split("closed")[0][:10] in body or "$100K" in body
     assert "AirPods" not in body
+    assert "Worth a look?" not in body
     assert MEETING_GUARANTEE in body
     assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
+    assert "PS:" in body
     assert "Quick bump" not in subject
     assert infer_industry("Kelly Roofing")["key"] == "roofing"
 
 
 def test_nurture_hvac_from_company_or_campaign():
     subject, body = draft_email("Joel Stewart", "The Chill Brothers", "never_booked")
-    assert subject == "Quick update"
-    assert "pipeline last quarter" in body
-    assert "14+" in body
+    assert subject == "The Chill Brothers follow up"
+    assert "done-for-you outbound" in body.lower()
 
     subject, body = draft_email(
         "Joel Stewart",
@@ -299,9 +299,8 @@ def test_nurture_hvac_from_company_or_campaign():
         "never_booked",
         extras={"campaign_name": "SG HVAC owners"},
     )
-    assert subject == "HVAC update"
-    assert "what we're doing in HVAC" in body
-    assert "HVAC clients" in body
+    assert subject == "The Chill Brothers follow up"
+    assert TRADES_PROOF.rstrip(".") in body
     assert "$100K" in body
     assert MEETING_GUARANTEE in body
     assert not has_free_poc_offer(body)
@@ -310,12 +309,13 @@ def test_nurture_hvac_from_company_or_campaign():
 
 def test_nurture_generalized_when_industry_unknown():
     subject, body = draft_email("Pat Lee", "Acme Holdings", "never_booked")
-    assert subject == "Quick update"
+    assert subject == "Acme Holdings follow up"
     assert infer_industry("Acme Holdings") is None
     assert infer_industry("RLP Mechanical")["key"] == "hvac"
     assert infer_industry("Talent Unify")["key"] == "staffing"
     assert infer_industry("IntegriBuilt")["key"] == "construction"
     assert infer_industry("RDS Fire Systems")["key"] == "construction"
+    assert GENERAL_PROOF.rstrip(".") in body
     assert "$2M" in body and "pipeline last quarter" in body
     assert "$100K" in body and "first 3 months" in body
     assert "14+" in body
@@ -325,17 +325,16 @@ def test_nurture_generalized_when_industry_unknown():
     assert not has_free_poc_offer(body)
     assert "Josh Osborn" in body
     assert "HVAC" not in body
-    assert "roofing" not in body.lower()
     no_show_subject, _ = draft_email("Pat Lee", "Acme Holdings", "no_show")
-    assert no_show_subject == "Pat"
+    assert no_show_subject == "Acme Holdings follow up"
 
 
 def test_nurture_industry_from_title_and_explicit():
     assert infer_industry("GRN Plano", extras={"title": "President, Executive Search"})["key"] == "staffing"
     assert infer_industry("CyberGuard360")["key"] == "msp"
     subject, body = draft_email("Rob", "Northside GC", extras={"industry": "construction"})
-    assert subject == "Construction update"
-    assert "construction" in body.lower()
+    assert subject == "Northside GC follow up"
+    assert TRADES_PROOF.rstrip(".") in body or "trades" in body.lower()
     assert MEETING_GUARANTEE in body
     assert not has_free_poc_offer(body)
 
@@ -373,10 +372,17 @@ def test_nurture_drafts_never_pitch_free_poc():
         assert "free 10k" not in body.lower()
         assert "proof of concept" not in body.lower()
         assert "test list" not in body.lower()
-        assert "$2M" in body
-        assert "$100K" in body
-        assert "14+" in body
+        assert MEETING_GUARANTEE in body
         assert "Josh Osborn" in body
+        assert "PS:" in body
+        assert "AirPods" not in body
+        assert "Worth a look?" not in body
+        assert any(
+            proof.rstrip(".").lower() in body.lower()
+            for proof in (*CASE_STUDIES.values(), GENERAL_PROOF)
+        )
+        main = strip_ps_tail(body)
+        assert 90 <= len(main.split()) <= 110
 
 
 def test_default_offer_is_meeting_guarantee_not_free_poc():

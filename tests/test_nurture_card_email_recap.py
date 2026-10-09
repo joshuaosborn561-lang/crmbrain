@@ -251,7 +251,7 @@ def test_edit_send_shows_edited_email(tmp_path: Path, monkeypatch):
     memory._local["ticker"] = [_roofing_row()]
     slack = FakeSlack()
     edited_body = compose_nurture_draft(_roofing_row()).body.replace(
-        "following up on our Apr 2 call", "circling back on the April walkthrough"
+        "After our Apr 2 call", "circling back on the April walkthrough"
     )
     out = send_nurture_reply(
         settings,

@@ -58,6 +58,34 @@ def _wants_nurture_enroll_dry_run(argv: list[str]) -> tuple[bool, list[str]]:
     return True, argv[:idx] + argv[idx + 1 :]
 
 
+def _parse_nurture_preview(argv: list[str]) -> tuple[str | None, list[str]]:
+    if "--nurture-preview" not in argv:
+        return None, argv
+    idx = argv.index("--nurture-preview")
+    if idx + 1 >= len(argv) or str(argv[idx + 1]).startswith("-"):
+        return "", argv[:idx] + argv[idx + 1 :]
+    return str(argv[idx + 1]), argv[:idx] + argv[idx + 2 :]
+
+
+def _run_nurture_preview(settings: Settings, ticker_id: str) -> int:
+    from crmbrain.memory import Memory
+    from crmbrain.nurture import compose_nurture_draft
+
+    tid = str(ticker_id or "").strip()
+    if not tid:
+        print("usage: python -m crmbrain --nurture-preview <ticker_id>")
+        return 2
+    row = Memory(settings).get_ticker(tid)
+    if not row:
+        print(f"ticker not found: {tid}")
+        return 2
+    draft = compose_nurture_draft(row)
+    print(f"Subject: {draft.subject}")
+    print()
+    print(draft.body)
+    return 0
+
+
 def _run_nurture_enroll_dry_run(settings: Settings) -> int:
     from crmbrain.memory import Memory
     from crmbrain.nurture import enroll_hubspot_nurture_deals, nurture_enroll_dry_run_text
@@ -107,6 +135,7 @@ def main() -> int:
     reextract_since, raw = _parse_reextract_since(raw)
     sample_n, sample_out, raw = _parse_sample_cards(raw)
     enroll_dry, raw = _wants_nurture_enroll_dry_run(raw)
+    preview_id, raw = _parse_nurture_preview(raw)
     args = [a for a in raw if a != "--dry-run"]
     settings = Settings.from_env()
     if dry_run:
@@ -120,6 +149,8 @@ def main() -> int:
         )
     if enroll_dry:
         return _run_nurture_enroll_dry_run(settings)
+    if preview_id is not None:
+        return _run_nurture_preview(settings, preview_id)
     if sample_n is not None:
         return _run_sample_cards(settings, sample_n, sample_out)
     cmd = args[0] if args else "auto"
@@ -137,7 +168,7 @@ def main() -> int:
         print(
             "usage: python -m crmbrain [auto|cycle|briefs|google-scopes] "
             "[--dry-run] [--reextract-since YYYY-MM-DD] [--sample-cards N] [--out PATH] "
-            "[--nurture-enroll-dry-run]"
+            "[--nurture-enroll-dry-run] [--nurture-preview TICKER_ID]"
         )
         return 2
     print(report.summary_text())

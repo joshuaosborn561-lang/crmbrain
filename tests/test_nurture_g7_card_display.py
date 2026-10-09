@@ -42,8 +42,8 @@ def test_random_47_meetings_claim_is_still_rejected():
         "Hey George, circling back on 47 meetings.\n\n"
         f"{GENERAL_PROOF}\n\n"
         f"{MEETING_GUARANTEE}\n\n"
-        "Worth a look?\n\n"
-        "Josh Osborn"
+        "Josh Osborn\n\n"
+        "PS: if timing was the holdup last time, we can start whenever you say go."
     )
     draft = validate_draft(NurtureDraft(subject="George", body=body), row)
     assert draft.valid is False
