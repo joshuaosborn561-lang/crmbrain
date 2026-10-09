@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,70 @@ import requests
 from crmbrain.config import Settings, now_utc
 
 logger = logging.getLogger(__name__)
+
+# Live crmbrain.ticker columns plus gmail_message_id (added 2026-10-09).
+# PostgREST rejects the whole PATCH if any key is missing from the table.
+TICKER_COLUMNS = frozenset(
+    {
+        "id",
+        "name",
+        "email",
+        "phone",
+        "company",
+        "hs_contact_id",
+        "hs_deal_id",
+        "reason",
+        "status",
+        "last_fired_at",
+        "next_fire_at",
+        "created_at",
+        "updated_at",
+        "source",
+        "source_ref",
+        "signal_at",
+        "campaign",
+        "campaign_id",
+        "industry",
+        "industry_basis",
+        "last_touch_snippet",
+        "stop_reason",
+        "stopped_at",
+        "nurture_state",
+        "nurture_action",
+        "gmail_thread_id",
+        "in_reply_to",
+        "slack_channel",
+        "slack_ts",
+        "draft_subject",
+        "draft_body",
+        "last_sent_at",
+        "nurture_thread_id",
+        "nurture_thread_subject",
+        "original_subject",
+        "thread_kind",
+        "references",
+        "deal_stage",
+        "met",
+        "booked",
+        "meeting_at",
+        "gmail_message_id",
+    }
+)
+_UNKNOWN_TICKER_COL_RE = re.compile(
+    r"Could not find the '([^']+)' column",
+    re.I,
+)
+
+
+def known_ticker_fields(fields: dict | None) -> dict:
+    """Keep only columns crmbrain.ticker is allowed to PATCH."""
+    return {key: value for key, value in dict(fields or {}).items() if key in TICKER_COLUMNS}
+
+
+def unknown_ticker_column(exc: BaseException) -> str:
+    """PostgREST PGRST204 missing-column name, or empty."""
+    match = _UNKNOWN_TICKER_COL_RE.search(str(exc))
+    return str(match.group(1) or "").strip() if match else ""
 
 
 def _run_started_stamp(row: dict | None) -> datetime | None:
@@ -114,9 +179,10 @@ class Memory:
         del op
         return bool(self.dry_run)
 
-    def _record_error(self, op: str, exc: BaseException) -> None:
+    def _record_error(self, op: str, exc: BaseException, *, level: str = "warning") -> None:
         msg = f"memory {op}: {exc}"
-        logger.warning(msg)
+        log = getattr(logger, level, logger.warning)
+        log(msg)
         if msg not in self.errors:
             self.errors.append(msg)
 
@@ -452,22 +518,49 @@ class Memory:
             if row:
                 row.update(fields)
             return row
+        dropped = [key for key in dict(fields or {}) if key not in TICKER_COLUMNS]
+        body = known_ticker_fields(fields)
+        if dropped:
+            logger.error(
+                "ticker patch dropped unknown columns %s for id=%s",
+                dropped,
+                ticker_id,
+            )
         found = None
         for t in self._local.get("ticker", []):
             if str(t.get("id")) == str(ticker_id):
                 t.update(fields)
                 found = t
         self.save_local()
-        if self.use_supabase:
-            try:
-                self._sb_schema(
-                    "PATCH",
-                    "ticker",
-                    json_body=fields,
-                    params={"id": f"eq.{ticker_id}"},
-                )
-            except Exception as exc:
-                self._record_error("patch_ticker", exc)
+        if self.use_supabase and body:
+            pending = dict(body)
+            while pending:
+                try:
+                    self._sb_schema(
+                        "PATCH",
+                        "ticker",
+                        json_body=pending,
+                        params={"id": f"eq.{ticker_id}"},
+                    )
+                    break
+                except Exception as exc:
+                    missing = unknown_ticker_column(exc)
+                    logger.error(
+                        "ticker supabase update failed id=%s columns=%s: %s",
+                        ticker_id,
+                        sorted(pending),
+                        exc,
+                    )
+                    if missing and missing in pending:
+                        pending.pop(missing, None)
+                        logger.error(
+                            "retrying ticker patch without missing column %s id=%s",
+                            missing,
+                            ticker_id,
+                        )
+                        continue
+                    self._record_error("patch_ticker", exc, level="error")
+                    break
         return found
 
     def claim_nurture_action(self, ticker_id: str, action: str) -> str:
