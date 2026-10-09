@@ -167,7 +167,7 @@ def test_opener_rejects_raw_transcript_first_person_and_long_clause():
     assert "you mentioned let's" not in opener.lower()
     assert "website" in opener.lower()
     assert "you were focused on getting the website done first" in opener.lower()
-    assert len(opener.split()) <= 24
+    assert "done-for-you outbound" in opener.lower()
     assert draft.spoken_source_id == "ff-pat-website"
 
     long = " ".join(["pipeline"] * 21)
@@ -180,7 +180,8 @@ def test_opener_rejects_raw_transcript_first_person_and_long_clause():
             "last_touch_snippet": long,
         }
     )
-    assert "following up on our" in fallback.body.split("\n", 1)[0].lower()
+    assert "done-for-you outbound" in fallback.body.split("\n", 1)[0].lower()
+    assert "after our" in fallback.body.split("\n", 1)[0].lower()
     assert "you mentioned" not in fallback.body.split("\n", 1)[0].lower()
     assert not fallback.spoken_source_id
 
@@ -347,7 +348,8 @@ def test_sample_cards_come_from_hubspot_nurture_and_skip_exclusions(tmp_path):
             assert letters[0].isupper()
     assert jackie["reason"] in {"met", "booked", "kicked_can"}
     assert "Fit:" not in str(jackie["reason"])
-    assert jackie["body"].split("\n\n")[1].rstrip().endswith(".")
+    assert jackie["body"].split("\n\n")[1].rstrip().endswith("?")
+    assert jackie["body"].split("\n\n")[2].rstrip().endswith(".")
     assert "Quick follow up" not in jackie["subject"]
 
 
@@ -542,7 +544,7 @@ def test_sample_run_starts_new_threads_and_dedupes_company(tmp_path):
         assert card["subject"].endswith("follow up")
         if card["email"] == "pat@devx.com":
             assert card["subject"] == "Devx follow up"
-        proof = card["body"].split("\n\n")[1]
+        proof = card["body"].split("\n\n")[2]
         assert proof.rstrip().endswith(".")
 
 
@@ -570,7 +572,8 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
     opener = met.body.split("\n", 1)[0]
     assert "sep" in opener.lower()
     assert "fit:" not in opener.lower()
-    assert "following up on our" in opener.lower()
+    assert "after our" in opener.lower()
+    assert "done-for-you outbound" in opener.lower()
     assert "website" not in opener.lower()
 
     booked = compose_nurture_draft(
@@ -583,8 +586,8 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
     )
     booked_opener = booked.body.split("\n", 1)[0].lower()
     assert "on our call" not in booked_opener
-    assert "following up on our" not in booked_opener
-    assert "circling back" in booked_opener
+    assert "after our" not in booked_opener
+    assert "meeting we had booked" in booked_opener
     assert "mar" in booked_opener
 
     undated = compose_nurture_draft(
@@ -596,9 +599,9 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
         }
     )
     undated_opener = undated.body.split("\n", 1)[0].lower()
-    assert "wanted to circle back" in undated_opener
+    assert "done-for-you outbound" in undated_opener
     assert "on our call" not in undated_opener
-    assert "following up on our call" not in undated_opener
+    assert "after our" not in undated_opener
 
 
 def test_proof_line_varies_by_vertical():
@@ -614,11 +617,11 @@ def test_proof_line_varies_by_vertical():
         {"name": "Pat Reyes", "company": "HireRight", "industry": "staffing"}
     )
     generic = compose_nurture_draft({"name": "Pat Reyes", "company": "Mystery Co"})
-    assert roof.body.split("\n\n")[1].rstrip(".").lower() == CASE_STUDIES["roofing"].rstrip(".").lower()
-    assert hvac.body.split("\n\n")[1].rstrip(".").lower() == TRADES_PROOF.rstrip(".").lower()
-    assert staffing.body.split("\n\n")[1].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
-    assert generic.body.split("\n\n")[1].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
-    assert roof.body.split("\n\n")[1] != hvac.body.split("\n\n")[1]
+    assert roof.body.split("\n\n")[2].rstrip(".").lower() == CASE_STUDIES["roofing"].rstrip(".").lower()
+    assert hvac.body.split("\n\n")[2].rstrip(".").lower() == TRADES_PROOF.rstrip(".").lower()
+    assert staffing.body.split("\n\n")[2].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
+    assert generic.body.split("\n\n")[2].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
+    assert roof.body.split("\n\n")[2] != hvac.body.split("\n\n")[2]
 
 
 def test_new_thread_subject_uses_title_case_company_not_domain():
@@ -721,7 +724,7 @@ def test_every_proof_line_is_in_the_approved_set():
         assert line.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
     for industry in [row["key"] for row in VERTICALS] + ["staffing", "msp", "saas", "financial_advisors", "agency", ""]:
         draft = compose_nurture_draft({"name": "Pat Reyes", "company": "Acme", "industry": industry})
-        proof = draft.body.split("\n\n")[1]
+        proof = draft.body.split("\n\n")[2]
         assert proof in approved
         low = proof.lower()
         for bad in banned:
@@ -772,7 +775,7 @@ def test_focused_on_clause_requires_held_source_id():
     opener = ungrounded.body.split("\n", 1)[0].lower()
     assert "pricing" not in opener
     assert "focused on" not in opener
-    assert "following up on our" in opener
+    assert "after our" in opener
     assert not ungrounded.spoken_source_id
 
     grounded = compose_nurture_draft(
@@ -816,7 +819,7 @@ def test_booked_opener_upgrades_to_held_when_fireflies_is_near_date():
     )
     opener = hamdat.body.split("\n", 1)[0].lower()
     assert "meeting we had booked" not in opener
-    assert "following up on our" in opener
+    assert "after our" in opener
     assert "sep" in opener
     assert hamdat.meeting_source_id == "ff-hamdat-sep4"
 
@@ -876,7 +879,7 @@ def test_dan_mcgurl_fixture_does_not_invent_pricing_from_notes():
     notes_opener = notes_only.body.split("\n", 1)[0].lower()
     assert "pricing" not in notes_opener
     assert "focused on" not in notes_opener
-    assert "following up on our aug 18 call" in notes_opener
+    assert "after our aug 18 call" in notes_opener
     assert not notes_only.spoken_source_id
     assert not notes_only.meeting_source_id
     assert meeting_source_id(
@@ -908,7 +911,7 @@ def test_dan_mcgurl_fixture_does_not_invent_pricing_from_notes():
     assert "pricing" not in opener
     assert "focused on" not in opener
     assert "proposal" not in opener
-    assert "following up on our aug 18 call" in opener
+    assert "after our aug 18 call" in opener
     assert not grounded.spoken_source_id
     assert grounded.meeting_source_id == DAN_FF_ID
     clause, confidence = extract_spoken_want(DAN_MEETING_SUMMARY)
@@ -930,7 +933,8 @@ def test_brian_donigan_source_includes_its_date():
         }
     )
     undated_opener = undated.body.split("\n", 1)[0].lower()
-    assert "wanted to circle back" in undated_opener
+    assert "done-for-you outbound" in undated_opener
+    assert "after our" not in undated_opener
     assert not undated.meeting_source_id
     assert undated.meeting_source_id != "fireflies"
 
@@ -952,7 +956,7 @@ def test_brian_donigan_source_includes_its_date():
         }
     )
     dated_opener = dated.body.split("\n", 1)[0].lower()
-    assert "following up on our jul 15 call" in dated_opener
+    assert "after our jul 15 call" in dated_opener
     assert dated.meeting_source_id == "01BRIANDONIGANMEETIDXX"
     assert dated.meeting_source_id != "fireflies"
 
@@ -1066,7 +1070,7 @@ def test_jo_fried_gmail_followup_is_held_apr_1():
     assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "met"
     draft = compose_nurture_draft(row)
     opener = draft.body.split("\n", 1)[0].lower()
-    assert "following up on our apr 1 call" in opener
+    assert "after our apr 1 call" in opener
     assert "sep" not in opener
     assert "mar 27" not in opener
     assert "meeting we had booked" not in opener
@@ -1091,7 +1095,7 @@ def test_josh_brown_uses_web_booking_mar_30_not_createdate():
     assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "booked"
     draft = compose_nurture_draft(row)
     opener = draft.body.split("\n", 1)[0].lower()
-    assert "circling back on the mar 30 meeting we had booked" in opener
+    assert "mar 30 meeting we had booked" in opener
     assert "sep" not in opener
 
 
@@ -1107,7 +1111,8 @@ def test_undated_booked_uses_call_we_had_set_up():
         }
     )
     opener = draft.body.split("\n", 1)[0].lower()
-    assert opener == "hey jo, circling back on the call we had set up."
+    assert opener.startswith("hey jo, we do done-for-you outbound")
+    assert "call we had set up" in opener
     assert "sep" not in opener
     assert "meeting we had booked" not in opener
 
@@ -1141,6 +1146,7 @@ def test_shaun_and_hamdat_dates_need_real_booking_events():
     shaun_opener = shaun_createdate.body.split("\n", 1)[0].lower()
     assert "sep" not in shaun_opener
     assert "call we had set up" in shaun_opener
+    assert "done-for-you outbound" in shaun_opener
 
     hamdat = compose_nurture_draft(
         {
@@ -1155,7 +1161,7 @@ def test_shaun_and_hamdat_dates_need_real_booking_events():
         }
     )
     assert "sep 4" in hamdat.body.split("\n", 1)[0].lower()
-    assert "following up on our" in hamdat.body.split("\n", 1)[0].lower()
+    assert "after our" in hamdat.body.split("\n", 1)[0].lower()
 
 
 def test_held_date_rules_for_brian_dan_erik_and_jo():
@@ -1172,7 +1178,7 @@ def test_held_date_rules_for_brian_dan_erik_and_jo():
     brian_opener = brian.body.split("\n", 1)[0].lower()
     assert "feb" not in brian_opener
     assert "2027" not in brian_opener
-    assert "wanted to circle back" in brian_opener or "following up" in brian_opener
+    assert "done-for-you outbound" in brian_opener
 
     dan = compose_nurture_draft(
         {
@@ -1190,7 +1196,7 @@ def test_held_date_rules_for_brian_dan_erik_and_jo():
     dan_opener = dan.body.split("\n", 1)[0].lower()
     assert "aug 18" in dan_opener
     assert "aug 26" not in dan_opener
-    assert "following up on our" in dan_opener
+    assert "after our" in dan_opener
     assert dan.meeting_source_id == "01M08PYCZF2GVS80MNPQKH8ZPF"
 
     erik = compose_nurture_draft(
@@ -1217,7 +1223,7 @@ def test_held_date_rules_for_brian_dan_erik_and_jo():
         }
     )
     jo_opener = jo.body.split("\n", 1)[0].lower()
-    assert "following up on our apr 1 call" in jo_opener
+    assert "after our apr 1 call" in jo_opener
     assert "mar 27" not in jo_opener
 
 
@@ -1435,7 +1441,7 @@ def test_sample_cards_use_gmail_booking_and_followup_dates(tmp_path):
     )
     jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
     assert jo["reason"] == "met"
-    assert "following up on our apr 1 call" in jo["body"].split("\n", 1)[0].lower()
+    assert "after our apr 1 call" in jo["body"].split("\n", 1)[0].lower()
     assert "sep" not in jo["body"].split("\n", 1)[0].lower()
     josh = next(c for c in payload["cards"] if c["name"] == "Josh Brown")
     assert josh["reason"] == "booked"

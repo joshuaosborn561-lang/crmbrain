@@ -560,12 +560,27 @@ def draft_email(
     extras: dict | None = None,
 ) -> tuple[str, str]:
     """Josh's #nurture re-engage draft. Template only. Never sends mail."""
-    first = _first_name(name)
+    extras = extras or {}
     vertical = infer_industry(company, extras=extras, industry=industry)
-    if vertical:
-        subject = vertical["subject"]
-        body = _industry_body(first, vertical)
-    else:
-        subject = _general_subject(first, reason)
-        body = _general_body(first)
-    return _no_dashes(subject), _no_dashes(body)
+    row = {
+        "name": name,
+        "company": company,
+        "reason": reason,
+        "industry": (vertical or {}).get("key")
+        or industry
+        or extras.get("industry")
+        or extras.get("vertical")
+        or "",
+        "campaign": extras.get("campaign_name") or extras.get("campaign") or "",
+        "last_touch_snippet": extras.get("last_touch_snippet")
+        or extras.get("summary")
+        or extras.get("raw_subject")
+        or "",
+    }
+    for key, value in extras.items():
+        if key not in row or not row[key]:
+            row[key] = value
+    from crmbrain.nurture import compose_nurture_draft
+
+    draft = compose_nurture_draft(row)
+    return _no_dashes(draft.subject), _no_dashes(draft.body)

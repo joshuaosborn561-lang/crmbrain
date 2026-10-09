@@ -1996,6 +1996,159 @@ def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict
     return f"Hey {first}, it's been a few months since we connected."
 
 
+_PS_TAIL_RE = re.compile(r"\n+PS:\s*.+\Z", re.I | re.S)
+_PS_LINE_RE = re.compile(r"(?im)^PS:\s+\S+")
+
+OFFER_BIZ = {
+    "roofing": "roofing companies",
+    "hvac": "HVAC companies",
+    "construction": "construction companies",
+    "plumbing": "plumbing companies",
+    "electrical": "electrical companies",
+    "solar": "solar companies",
+    "trades": "trades companies",
+    "home_services": "home services companies",
+    "staffing": "staffing firms",
+    "msp": "IT and MSP companies",
+}
+
+THINKING_QUESTIONS = {
+    "roofing": "How many of your jobs this quarter came from people you didn't already know?",
+    "hvac": "How much of this quarter's work came from people who already knew your name?",
+    "construction": "How much of the pipeline this quarter came in without a referral?",
+    "plumbing": "How many of this quarter's jobs came from people you did not already know?",
+    "electrical": "How many of this quarter's jobs came from people you did not already know?",
+    "solar": "How much of this quarter's work came from people you did not already know?",
+    "trades": "How many of this quarter's jobs came from people you did not already know?",
+    "home_services": "How many of this quarter's jobs came from people you did not already know?",
+    "staffing": "How many of your placements this quarter started with a conversation you did not already have?",
+    "msp": "How many of your new accounts this quarter came from outbound instead of a referral?",
+}
+
+PS_BURNED = "PS: if you've been burned by an agency before, that's exactly why we guarantee the meetings."
+PS_REFERRALS = "PS: even when referrals are solid, a second channel means you are not waiting on the next intro."
+PS_BUSY = "PS: if the calendar is packed, that is the point. We only book meetings your team can take."
+PS_TIMING = "PS: if timing was the holdup last time, we can start whenever you say go and still guarantee the meetings."
+
+
+def strip_ps_tail(body: str) -> str:
+    return _PS_TAIL_RE.sub("", (body or "").strip()).strip()
+
+
+def _offer_audience(industry: str | None, company: str) -> str:
+    if company:
+        return company
+    return OFFER_BIZ.get(str(industry or "").strip().lower(), "their business")
+
+
+_OFFER_EXTRAS = (
+    "We build the list, write the emails, and book the meetings so you only take qualified calls.",
+    "We handle the prospecting and the follow up so your team can stay on the work.",
+)
+
+
+def _nurture_offer_line(first: str, row: dict, industry: str | None, company: str) -> str:
+    """Offer leads. A short nod to the earlier meeting is optional inside the line."""
+    first = _first_name(first)
+    audience = _offer_audience(industry, company)
+    date_phrase = _call_date_phrase(row)
+    spoken, _source_id = grounded_spoken_want(row)
+    met, booked = _row_meeting_flags(row)
+    lead = (
+        f"Hey {first}, we do done-for-you outbound that books qualified meetings "
+        f"for {audience}."
+    )
+    if met and date_phrase:
+        lead += f" After our {date_phrase} call I wanted to put that offer back in front of you."
+        if spoken:
+            clause = spoken[0].lower() + spoken[1:] if spoken else spoken
+            lead += f" Last time we talked, {clause}."
+    elif booked and date_phrase:
+        lead += (
+            f" After the {date_phrase} meeting we had booked I wanted to put "
+            "that offer back in front of you."
+        )
+    elif booked:
+        lead += " Circling back on the call we had set up, I wanted to put that offer back in front of you."
+    elif spoken:
+        clause = spoken[0].lower() + spoken[1:] if spoken else spoken
+        lead += f" Last time we talked, {clause}."
+    else:
+        lead += " I wanted to put that offer back in front of you."
+    return _no_dashes(lead)
+
+
+def _word_count(text: str) -> int:
+    return len([w for w in re.split(r"\s+", (text or "").strip()) if w])
+
+
+def _pad_offer_to_band(offer: str, question: str, proof: str) -> str:
+    """Keep the main body (no PS) in the ~90-110 word band Josh asked for."""
+    tail = f"{question} {proof} {MEETING_GUARANTEE} Josh Osborn"
+    extra = ""
+    for sentence in _OFFER_EXTRAS:
+        candidate = f"{offer}{extra} {sentence}".strip()
+        count = _word_count(f"{candidate} {tail}")
+        if count > MAX_BODY_WORDS:
+            break
+        extra = f"{extra} {sentence}"
+        if count >= 90:
+            break
+    return f"{offer}{extra}".strip()
+
+
+def _nurture_thinking_question(industry: str | None, snippet: str) -> str:
+    low = (snippet or "").lower()
+    key = str(industry or "").strip().lower()
+    if re.search(r"referral|word of mouth", low) or key == "roofing":
+        return THINKING_QUESTIONS["roofing"]
+    if re.search(r"slow season|busy season|when .{0,20}slows", low):
+        return "When the season slows down, where do you want the next jobs to come from?"
+    return THINKING_QUESTIONS.get(key, "How much of your new work this quarter came from people you did not already know?")
+
+
+def _nurture_ps_line(industry: str | None, snippet: str) -> str:
+    low = (snippet or "").lower()
+    key = str(industry or "").strip().lower()
+    if re.search(r"agenc|vendor|burned", low):
+        return PS_BURNED
+    if re.search(r"referral|word of mouth", low):
+        return PS_REFERRALS
+    if re.search(r"check back|later|next quarter|timing|in the fall|in the spring", low):
+        return PS_TIMING
+    if re.search(r"slammed|too busy|no time|packed calendar", low):
+        return PS_BUSY
+    if key in {"roofing", "hvac", "construction", "plumbing", "electrical", "solar", "trades", "home_services"}:
+        return PS_BURNED
+    return PS_TIMING
+
+
+def compose_nurture_body(row: dict, *, industry: str | None = None, company: str = "") -> str:
+    """Offer, thinking question, approved proof, guarantee, signature, then PS."""
+    first = _first_name(str(row.get("name") or ""))
+    snippet = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)
+    offer = _pad_offer_to_band(
+        _nurture_offer_line(first, row, industry, company),
+        _nurture_thinking_question(industry, snippet),
+        _proof_line(industry),
+    )
+    question = _nurture_thinking_question(industry, snippet)
+    proof = _proof_line(industry)
+    ps = _nurture_ps_line(industry, snippet)
+    return (
+        f"{offer}\n\n"
+        f"{question}\n\n"
+        f"{proof}\n\n"
+        f"{MEETING_GUARANTEE}\n\n"
+        f"Josh Osborn\n\n"
+        f"{ps}"
+    )
+
+
+def nurture_body_paragraphs(body: str) -> list[str]:
+    return [part.strip() for part in (body or "").split("\n\n") if part.strip()]
+
+
 def _numbers_in(text: str) -> set[str]:
     return {m.group(0).replace(",", "") for m in _NUMBER_RE.finditer(text or "")}
 
@@ -2145,18 +2298,17 @@ def _gmail_kind_label(thread_kind: str) -> str:
 
 
 def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureDraft:
-    """Spec draft: opener from snippet, industry proof, meeting guarantee, Josh Osborn."""
+    """Offer first, thinking question, approved proof, guarantee, signature, PS."""
+    del airpods
     name = str(row.get("name") or "")
-    first = _first_name(name)
     company = resolve_nurture_company(
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
         str(row.get("email") or ""),
         str(row.get("associated_company") or ""),
     )
-    label = company
-    if label:
-        row = {**row, "company": label}
+    if company:
+        row = {**row, "company": company}
     industry = (row.get("industry") or "") or None
     campaign = str(row.get("campaign") or "")
     if not industry:
@@ -2167,18 +2319,9 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
             website_text=str(row.get("website_text") or ""),
             hs_industry=str(row.get("hs_industry") or ""),
         )
-    raw_snippet = str(row.get("last_touch_snippet") or "")
-    snippet = scoped_snippet(raw_snippet, row)
-    use_airpods = AIRPODS_OFFER_LIVE if airpods is None else airpods
+    snippet = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)
     spoken, spoken_source_id = grounded_spoken_want(row)
-    opener = _no_dashes(_opener_from_snippet(first, raw_snippet, campaign, row))
-    proof = _proof_line(industry)
-    cta = MEETING_GUARANTEE
-    if use_airpods:
-        cta = f"{cta} {_airpods_line()}"
-    body = capitalize_body_lines(
-        _no_dashes(f"{opener}\n\n{proof}\n\n{cta}\n\nWorth a look?\n\nJosh Osborn")
-    )
+    body = capitalize_body_lines(_no_dashes(compose_nurture_body(row, industry=industry, company=company)))
     subject = compose_nurture_subject({**row, "last_touch_snippet": snippet})
     draft = NurtureDraft(
         subject=subject,
@@ -2202,14 +2345,19 @@ def validate_draft(draft: NurtureDraft, row: dict | None = None) -> NurtureDraft
         draft.valid = False
         draft.reject_reason = "dash"
         return draft
-    words = [w for w in re.split(r"\s+", body.strip()) if w]
+    main = strip_ps_tail(body)
+    words = [w for w in re.split(r"\s+", main) if w]
     if len(words) > MAX_BODY_WORDS:
         draft.valid = False
         draft.reject_reason = "too_long"
         return draft
-    if not body.strip().endswith("Josh Osborn"):
+    if not main.endswith("Josh Osborn"):
         draft.valid = False
         draft.reject_reason = "no_signature"
+        return draft
+    if not _PS_LINE_RE.search(body):
+        draft.valid = False
+        draft.reject_reason = "no_ps"
         return draft
     if MEETING_GUARANTEE not in body:
         draft.valid = False

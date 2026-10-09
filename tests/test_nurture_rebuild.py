@@ -410,7 +410,7 @@ def test_t22_t26_drafts():
     )
     first = d.body.split("\n", 1)[0].lower()
     assert "q4" not in first
-    assert "it's been a few months" in first
+    assert "done-for-you outbound" in first
     assert d.subject != "Morgan?"
     assert d.subject != "Following up"
     assert d.subject == "Morgan follow up"
@@ -428,7 +428,8 @@ def test_t22_t26_drafts():
     assert roof.subject == "Summit Roofs follow up"
     assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
     assert MEETING_GUARANTEE in roof.body
-    assert roof.body.strip().endswith("Josh Osborn")
+    assert "Josh Osborn" in roof.body
+    assert "PS:" in roof.body
 
     gen = compose_nurture_draft(
         {"name": "Casey Lin", "company": "Lin Holdings", "last_touch_snippet": "Maybe later this year."}
@@ -459,10 +460,13 @@ def test_t22_t26_drafts():
 
     on = compose_nurture_draft({"name": "Dana Ortiz", "industry": "hvac", "last_touch_snippet": "check back in the fall"}, airpods=True)
     off = compose_nurture_draft({"name": "Dana Ortiz", "industry": "hvac", "last_touch_snippet": "check back in the fall"}, airpods=False)
-    assert "AirPods" in on.body and "AirPods" not in off.body
-    assert len(on.body.split()) <= 110
+    assert "AirPods" not in on.body and "AirPods" not in off.body
+    from crmbrain.nurture import strip_ps_tail
+
+    assert len(strip_ps_tail(on.body).split()) <= 110
     assert "{" not in on.body
-    assert on.body.strip().endswith("Josh Osborn")
+    assert strip_ps_tail(on.body).endswith("Josh Osborn")
+    assert "PS:" in on.body
     assert GENERAL_PROOF or CASE_STUDIES["hvac"]
 
 
@@ -703,7 +707,8 @@ def test_sample_cards_file_has_ten_mixed():
     assert sum(1 for c in cards if c["source"] == "gmail") >= 1
     for card in cards:
         assert card["subject"]
-        assert card["body"].endswith("Josh Osborn")
+        assert "Josh Osborn" in card["body"]
+        assert "PS:" in card["body"]
         assert "—" not in card["body"]
         assert "AirPods" not in card["body"]
         assert "thread_id" in card
@@ -834,9 +839,9 @@ def test_opener_never_quotes_deal_name_or_wrong_capitalization():
     )
     opener = draft.body.split("\n", 1)[0]
     assert opener.startswith("Hey Robert")
-    assert "you mentioned" not in opener.lower() or "cyberguard" not in opener.lower()
+    assert "done-for-you outbound" in opener.lower()
+    assert "you mentioned" not in opener.lower()
     assert "robert Lawson - CyberGuard360" not in draft.body
-    assert "CyberGuard360" not in opener
 
 
 def test_bradley_lord_card_does_not_leak_lionel_francis():
@@ -982,9 +987,8 @@ def test_opener_never_quotes_own_name_company_or_stage():
     opener = scott.body.split("\n", 1)[0]
     assert "you mentioned" not in opener.lower()
     assert "scott hagan" not in opener.lower()
-    assert "finish line" not in opener.lower()
     assert "nurture" not in opener.lower()
-    assert "wanted to circle back" in opener.lower()
+    assert "done-for-you outbound" in opener.lower()
     assert "on our call" not in opener.lower()
     assert scott.subject != "Finish Line: Scott Hagan"
     assert scott.subject != "Scott Hagan"
@@ -1014,6 +1018,7 @@ def test_opener_never_quotes_own_name_company_or_stage():
     )
     assert "you replied a while back" not in met_neutral.body
     assert "jun" in met_neutral.body.lower()
+    assert "after our" in met_neutral.body.split("\n", 1)[0].lower()
     assert "call" in met_neutral.body.split("\n", 1)[0].lower()
 
 
