@@ -1531,14 +1531,18 @@ def compose_nurture_subject(row: dict) -> str:
     original = stored_nurture_thread_subject(row)
     if stored and original:
         return nurture_subject(original, reply=True)
-    company = nurture_company_label(
+    company = resolve_nurture_company(
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
         str(row.get("email") or ""),
+        str(row.get("associated_company") or row.get("hs_company") or ""),
     )
     if company:
         return nurture_subject(f"{company} follow up", reply=False)
-    return "Following up"
+    first = _first_name(str(row.get("name") or ""))
+    if first and first.lower() != "there":
+        return nurture_subject(f"{first} follow up", reply=False)
+    return "Checking in"
 
 
 def _airpods_line() -> str:
@@ -1613,6 +1617,117 @@ def title_company_name(name: str) -> str:
     return " ".join(parts)
 
 
+_DOMAIN_COMPANY_WORDS = tuple(
+    sorted(
+        (
+            "renovations",
+            "renovation",
+            "technology",
+            "technologies",
+            "mechanical",
+            "construction",
+            "solutions",
+            "services",
+            "partners",
+            "partner",
+            "roofing",
+            "roofs",
+            "roof",
+            "group",
+            "docs",
+            "city",
+            "river",
+            "west",
+            "east",
+            "north",
+            "south",
+            "tech",
+            "digital",
+            "marketing",
+            "heating",
+            "cooling",
+            "plumbing",
+            "electric",
+            "electrical",
+            "builders",
+            "homes",
+            "home",
+            "capital",
+            "media",
+            "systems",
+            "system",
+            "works",
+            "growth",
+            "sales",
+            "award",
+            "the",
+            "and",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _split_domain_words(raw: str) -> list[str]:
+    text = re.sub(r"[-_]+", " ", (raw or "").strip().lower())
+    if not text:
+        return []
+    if " " in text:
+        return [p for p in text.split() if p]
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        match = ""
+        for word in _DOMAIN_COMPANY_WORDS:
+            if text.startswith(word, i):
+                match = word
+                break
+        if match:
+            rest = text[i + len(match) :]
+            if rest and len(rest) <= 2 and rest not in set(_DOMAIN_COMPANY_WORDS):
+                match = ""
+        if match:
+            out.append(match)
+            i += len(match)
+            continue
+        j = i + 1
+        while j < len(text) and not any(text.startswith(w, j) for w in _DOMAIN_COMPANY_WORDS):
+            j += 1
+        out.append(text[i:j])
+        i = j
+    return out
+
+
+def _title_domain_parts(parts: list[str]) -> str:
+    titled: list[str] = []
+    known = set(_DOMAIN_COMPANY_WORDS)
+    for part in parts:
+        if not part:
+            continue
+        if part not in known and part.isalpha() and 2 <= len(part) <= 3 and not re.search(r"[aeiou]", part):
+            titled.append(part.upper())
+        else:
+            titled.append(title_company_name(part))
+    return " ".join(titled)
+
+
+def company_label_from_domain(host: str) -> str:
+    label = (host or "").strip().lower().split(".")[0]
+    if not label:
+        return ""
+    return _title_domain_parts(_split_domain_words(label))
+
+
+def company_from_email_domain(email: str) -> str:
+    from crmbrain.config import FREE_MAIL_DOMAINS, JOSH_DOMAINS, email_domain
+
+    host = email_domain(email)
+    if not host or host in FREE_MAIL_DOMAINS or host in JOSH_DOMAINS:
+        return ""
+    return company_label_from_domain(host)
+
+
 def is_domain_derived_company(company: str = "", email: str = "") -> bool:
     raw = (company or "").strip()
     if not raw:
@@ -1632,11 +1747,37 @@ def is_domain_derived_company(company: str = "", email: str = "") -> bool:
     }
 
 
-def nurture_company_label(company: str = "", dealname: str = "", email: str = "") -> str:
+def resolve_nurture_company(
+    company: str = "",
+    dealname: str = "",
+    email: str = "",
+    associated_company: str = "",
+) -> str:
+    """Contact company → associated HubSpot company → cleaned email domain."""
     raw = display_company_name(company, dealname, email)
-    if not raw or is_domain_derived_company(raw, email):
-        return ""
-    return title_company_name(raw)
+    if raw:
+        return title_company_name(raw)
+    assoc = (associated_company or "").strip()
+    if assoc and not is_bare_domain(assoc):
+        if not is_domain_derived_company(assoc, email):
+            return title_company_name(assoc)
+        return title_company_name(assoc)
+    domain_label = company_from_email_domain(email)
+    if domain_label:
+        return domain_label
+    leftover = (company or "").strip()
+    if leftover and not is_bare_domain(leftover):
+        return title_company_name(leftover)
+    return ""
+
+
+def nurture_company_label(
+    company: str = "",
+    dealname: str = "",
+    email: str = "",
+    associated_company: str = "",
+) -> str:
+    return resolve_nurture_company(company, dealname, email, associated_company)
 
 
 def _strip_poc_phrases(text: str) -> str:
@@ -1966,6 +2107,7 @@ def card_people_header(row: dict) -> str:
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
         str(row.get("email") or ""),
+        str(row.get("associated_company") or ""),
     )
     text = f"Nurture email to {name} ({company})" if company else f"Nurture email to {name}"
     return text[:150]
@@ -2006,16 +2148,13 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
     """Spec draft: opener from snippet, industry proof, meeting guarantee, Josh Osborn."""
     name = str(row.get("name") or "")
     first = _first_name(name)
-    company = display_company_name(
+    company = resolve_nurture_company(
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
         str(row.get("email") or ""),
+        str(row.get("associated_company") or ""),
     )
-    label = nurture_company_label(
-        company,
-        str(row.get("dealname") or row.get("deal_name") or ""),
-        str(row.get("email") or ""),
-    )
+    label = company
     if label:
         row = {**row, "company": label}
     industry = (row.get("industry") or "") or None
@@ -3514,8 +3653,21 @@ def collect_hubspot_nurture_rows(
                 skipped[blocked] = skipped.get(blocked, 0) + 1
                 continue
             seen.add(key)
+            assoc_name = ""
+            name_getter = getattr(hs, "associated_company_name", None)
+            if callable(name_getter):
+                assoc_name = str(
+                    name_getter(
+                        contact_id=str(contact.get("id") or ""),
+                        deal_id=str(deal.get("id") or ""),
+                    )
+                    or ""
+                )
             company = nurture_company_label(
-                fields["company"], str(props.get("dealname") or ""), fields["email"]
+                fields["company"],
+                str(props.get("dealname") or ""),
+                fields["email"],
+                assoc_name,
             )
             company_industry = ""
             getter = getattr(hs, "associated_company_industry", None)
@@ -3539,6 +3691,7 @@ def collect_hubspot_nurture_rows(
                     "name": fields["name"] or str(props.get("dealname") or "").split(" - ")[0].strip(),
                     "email": fields["email"],
                     "company": company,
+                    "associated_company": assoc_name,
                     "dealname": str(props.get("dealname") or ""),
                     "phone": fields["phone"],
                     "source": "hubspot",

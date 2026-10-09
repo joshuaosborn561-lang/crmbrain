@@ -21,8 +21,15 @@ from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport, Engagement
 
 QUERIES = [
-    "newer_than:2d (from:pandadoc.com OR from:e.pandadoc.com OR subject:PandaDoc)",
+    (
+        "newer_than:2d (from:pandadoc.com OR from:e.pandadoc.com OR from:getpandadoc.com "
+        "OR from:email.getpandadoc.com OR subject:PandaDoc)"
+    ),
     "newer_than:2d (\"You received a payment\" OR from:stripe.com OR from:quickbooks OR subject:payment received)",
+    (
+        'newer_than:2d in:sent ("payment link" OR pay.hubspot.com OR payments.hubspot.com '
+        'OR "complete your payment" OR "hubspot payment")'
+    ),
     "newer_than:2d (from:calendly.com (\"New Event\" OR Accepted OR canceled OR \"no-show\" OR \"Invitee\"))",
     "newer_than:2d (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR \"new event\")",
     "newer_than:2d (from:docusign.net OR subject:DocuSign completed)",
@@ -47,8 +54,15 @@ NOTETAKER_DOMAINS = frozenset(
 def mail_queries(settings: Settings) -> list[str]:
     after = gmail_after_clause(settings_lookback_start(settings))
     return [
-        f"{after} (from:pandadoc.com OR from:e.pandadoc.com OR subject:PandaDoc)",
+        (
+            f"{after} (from:pandadoc.com OR from:e.pandadoc.com OR from:getpandadoc.com "
+            "OR from:email.getpandadoc.com OR subject:PandaDoc)"
+        ),
         f'{after} ("You received a payment" OR from:stripe.com OR from:quickbooks OR subject:payment received)',
+        (
+            f'{after} in:sent ("payment link" OR pay.hubspot.com OR payments.hubspot.com '
+            'OR "complete your payment" OR "hubspot payment")'
+        ),
         f'{after} (from:calendly.com ("New Event" OR Accepted OR canceled OR "no-show" OR "Invitee"))',
         f'{after} (from:zoom.us OR from:calendar-notification@google.com) (invitation OR confirmed OR scheduled OR "new event")',
         f"{after} (from:docusign.net OR subject:DocuSign completed)",
@@ -115,14 +129,14 @@ def _stage_from_mail(subject: str, sender: str, snippet: str, body: str = "") ->
     if "pandadoc" in blob or "docusign" in blob:
         stage, _amount, _name = stage_from_signature_mail(subject, sender, snippet, body)
         return stage
-    if any(
+    from crmbrain.documents import is_payment_link_mail
+
+    if is_payment_link_mail(subject, sender, snippet, body) or any(
         h in blob
         for h in (
             "invoice sent",
             "sent you an invoice",
             "sent an invoice",
-            "payment link",
-            "sent a payment link",
         )
     ):
         return STAGE["contract_signed_unpaid"]
@@ -290,7 +304,7 @@ def is_josh_sent_proposal(sender: str, subject: str, body: str = "", to: str = "
     from crmbrain.intelligence import josh_new_text
 
     blob = f"{subject} {josh_new_text(body) or body}".lower()
-    if any(h in f"{sender} {subject}".lower() for h in ("pandadoc", "docusign", "calendly")):
+    if any(h in f"{sender} {subject}".lower() for h in ("pandadoc", "getpandadoc", "docusign", "calendly")):
         return False
     return any(h in blob for h in JOSH_PROPOSAL_HINTS)
 
@@ -299,7 +313,15 @@ def is_billing_or_signature_mail(sender: str, subject: str) -> bool:
     blob = f"{sender} {subject}".lower()
     return any(
         h in blob
-        for h in ("pandadoc", "stripe.com", "docusign", "quickbooks", "intuit.com", "you received a payment")
+        for h in (
+            "pandadoc",
+            "getpandadoc",
+            "stripe.com",
+            "docusign",
+            "quickbooks",
+            "intuit.com",
+            "you received a payment",
+        )
     )
 
 
@@ -369,6 +391,34 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
 
             sig_stage, sig_amount, sig_name = stage_from_signature_mail(subject, sender, snippet, body)
             ev_email = cal.get("email") or (emails[0] if emails else "")
+            if not contact and (sig_stage or is_billing_or_signature_mail(sender, subject)):
+                from crmbrain.documents import (
+                    company_from_document_name,
+                    emails_from_signature_mail,
+                    viewer_name_from_text,
+                )
+
+                viewer = viewer_name_from_text(subject, body or snippet)
+                if viewer:
+                    for body_email in emails_from_signature_mail(subject, body or snippet):
+                        found = hubspot.find_contact(email=body_email)
+                        if not found:
+                            continue
+                        props = found.get("properties") or {}
+                        full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip().lower()
+                        if not full or full == viewer.lower() or viewer.lower() in full or full in viewer.lower():
+                            contact = found
+                            ev_email = body_email
+                            break
+                    if not contact:
+                        contact = hubspot.find_contact(name=viewer)
+                if not contact:
+                    company_hint = company_from_document_name(sig_name)
+                    finder_co = getattr(hubspot, "find_contact_by_company", None)
+                    if company_hint and callable(finder_co):
+                        contact = finder_co(company_hint)
+                if contact and (not ev_email or is_system_address(ev_email)):
+                    ev_email = ((contact.get("properties") or {}).get("email") or ev_email or "")
             calendly_create = (
                 (not contact)
                 and "calendly" in f"{sender} {subject}".lower()
@@ -465,7 +515,12 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 amount_source = "payment"
                 if payer_emails and (not ev_email or is_system_address(ev_email)):
                     ev_email = payer_emails[0]
-            elif josh_proposal:
+            elif josh_proposal and write_stage not in {
+                STAGE["contract_signed_unpaid"],
+                STAGE["closed_won"],
+                STAGE["paid"],
+                STAGE["signed"],
+            }:
                 from crmbrain.intelligence import (
                     _INSTALMENT_SENT_RE,
                     _TOTAL_SENT_RE,
@@ -764,7 +819,7 @@ def scan_people(
                 headers.get("cc", ""),
             )
             email = (email or "").strip().lower()
-            if not email or is_josh_address(email) or is_system_address(email):
+            if not email or is_josh_address(email) or is_system_address(email) or is_junk_crm_email(email):
                 continue
             if email in seen_emails:
                 continue

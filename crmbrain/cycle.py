@@ -471,7 +471,12 @@ def _handle_engagement(
     if already and not policy.may_create_hubspot_contact(ev):
         meeting_evidence = prune.has_live_meeting_evidence(hs, already)
     if not policy.may_write_hubspot(ev, already is not None, meeting_evidence=meeting_evidence):
-        if already and meeting_evidence is False and not settings.dry_run:
+        if (
+            already
+            and meeting_evidence is False
+            and not settings.dry_run
+            and policy.may_prune_unengaged_from_source(ev.source)
+        ):
             prune.archive_unengaged_contact(hs, already, report, "no meeting")
         if memory.already_processed(ev.source, ev.external_id):
             report.skipped.append(f"{ev.source}:{ev.external_id} already processed")
@@ -1097,6 +1102,28 @@ def _has_reschedule(hs: HubSpot, ev: Engagement) -> bool:
     return email in upcoming
 
 
+def _amount_from_matching_held_call(
+    settings: Settings,
+    ev: Engagement,
+    contact: dict | None,
+    held_events: list[Engagement] | None,
+) -> tuple[str, dict]:
+    """Use the call's stated monthly x term when a contract-sent email has no figure."""
+    held = policy.matching_held_event(ev, contact, held_events)
+    if held is None:
+        return "", {}
+    extra = held.extra or {}
+    terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
+    if not terms:
+        facts = intelligence.extract(settings, held)
+        terms = facts.get("deal_terms") if isinstance(facts.get("deal_terms"), dict) else {}
+        amount = str(facts.get("amount_hint") or facts.get("deal_amount") or "")
+    else:
+        amount = ""
+    tcv = intelligence.tcv_from_terms(terms) if terms else ""
+    return (tcv or amount or ""), (terms or {})
+
+
 def apply_gmail_stage_update(
     ev: Engagement,
     settings: Settings,
@@ -1308,6 +1335,13 @@ def apply_gmail_stage_update(
                 deal_row = max(won, key=policy.deal_richness)
                 current = (deal_row.get("properties") or {}).get("dealstage") or ""
         amount = str((ev.extra or {}).get("amount") or "")
+        if not amount and ev.stage_hint == STAGE["contract_signed_unpaid"]:
+            amount, held_terms = _amount_from_matching_held_call(settings, ev, contact, held_events)
+            if held_terms:
+                extra_amt = dict(ev.extra or {})
+                extra_amt.setdefault("deal_terms", held_terms)
+                extra_amt.setdefault("amount_source", "held_call")
+                ev.extra = extra_amt
         write_stage, write_amount, write_reason = authorize_deal_write(
             ev,
             requested_stage=ev.stage_hint,

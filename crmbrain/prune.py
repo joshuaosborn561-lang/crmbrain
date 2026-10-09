@@ -19,6 +19,7 @@ from crmbrain.policy import (
     PRE_SALE_STAGES,
     clean_deal_name,
     contact_has_meeting_evidence,
+    contact_has_protected_deal,
     deal_has_amount,
     deal_pipeline,
     is_blank_contact,
@@ -89,10 +90,26 @@ def _contact_label(contact: dict) -> str:
     )
 
 
-def archive_unengaged_contact(hs: HubSpot, contact: dict, report: CycleReport, reason: str) -> None:
+def archive_unengaged_contact(
+    hs: HubSpot,
+    contact: dict,
+    report: CycleReport,
+    reason: str,
+    *,
+    force: bool = False,
+) -> None:
     cid = contact.get("id")
     if not cid:
         return
+    if not force:
+        email = ((contact.get("properties") or {}).get("email") or "")
+        if not is_junk_crm_email(email) and not is_notetaker_contact(contact):
+            try:
+                deals = hs.open_deals_for_contact(str(cid))
+            except Exception:
+                deals = []
+            if contact_has_protected_deal(deals):
+                return
     try:
         hs.archive_contact(str(cid))
     except Exception as exc:
@@ -252,7 +269,7 @@ def _archive_notetaker(hs: HubSpot, contact: dict, report: CycleReport) -> None:
                 drop(str(cid), deal_id)
             except Exception as exc:
                 report.errors.append(f"detach notetaker {cid} from {deal_id}: {exc}")
-    archive_unengaged_contact(hs, contact, report, "notetaker")
+    archive_unengaged_contact(hs, contact, report, "notetaker", force=True)
 
 
 def prune_notetaker_contacts(hs: HubSpot, report: CycleReport, limit: int = NOTETAKER_LIMIT) -> None:

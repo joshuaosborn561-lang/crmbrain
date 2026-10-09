@@ -536,11 +536,12 @@ def test_sample_run_starts_new_threads_and_dedupes_company(tmp_path):
         assert "Fit:" not in str(card["reason"])
         assert card["reason"] in {"met", "booked", "kicked_can"}
         assert "wrsroof.com follow up" not in card["subject"].lower()
-        assert "devx follow up" not in card["subject"].lower()
+        assert "devx.com follow up" not in card["subject"].lower()
         assert card["subject"] != "Quick follow up"
-        assert card["subject"] == "Following up" or card["subject"].endswith("follow up")
+        assert card["subject"] != "Following up"
+        assert card["subject"].endswith("follow up")
         if card["email"] == "pat@devx.com":
-            assert card["subject"] == "Following up"
+            assert card["subject"] == "Devx follow up"
         proof = card["body"].split("\n\n")[1]
         assert proof.rstrip().endswith(".")
 
@@ -630,7 +631,7 @@ def test_new_thread_subject_uses_title_case_company_not_domain():
     domain = compose_nurture_draft(
         {"name": "Pat Devx", "company": "Devx", "email": "pat@devx.com"}
     )
-    assert domain.subject == "Following up"
+    assert domain.subject == "Devx follow up"
     slug = compose_nurture_draft(
         {
             "name": "Chris",
@@ -638,7 +639,8 @@ def test_new_thread_subject_uses_title_case_company_not_domain():
             "email": "chris@wtrenovations.com",
         }
     )
-    assert slug.subject == "Following up"
+    assert slug.subject == "WT Renovations follow up"
+    assert slug.subject != "Following up"
     stored = compose_nurture_draft(
         {
             "name": "Jackie Darkazalli",

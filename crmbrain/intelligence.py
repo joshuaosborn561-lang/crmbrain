@@ -488,6 +488,16 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
             terms["quote"] = terms["quote"] or text[start:end].strip()
     if not term:
         term = _term_near_offer(text, offer_match)
+    if term and offer_match:
+        for match in _TERM_RE.finditer(text):
+            if _is_pitch_term(text, match):
+                continue
+            if _term_months_from_match(match) != term:
+                continue
+            start = max(0, min(offer_match.start(), match.start()) - 12)
+            end = min(len(text), max(offer_match.end(), match.end()) + 16)
+            terms["quote"] = text[start:end].strip()
+            break
     pkg = _PACKAGE_FOR_RE.search(text)
     if pkg and not _MONTHLY_FEE_RE.search(pkg.group(0)):
         val = _money_value(pkg.group("amt"), pkg.group("k") or "")
@@ -1048,6 +1058,10 @@ def extract(settings: Settings, ev: Engagement) -> dict[str, Any]:
         amount = ""
     elif ev.source in CALL_SOURCES:
         amount = _call_amount_from_gemini(facts, text) if gemini_ok else ""
+        if not amount:
+            quote = str(terms.get("quote") or "")
+            if quote and quote_matches_source(quote, text) and quote_states_priced_offer(quote):
+                amount = tcv_from_terms(terms)
     elif extra.get("josh_sent_proposal"):
         amount = latest_proposal_figure(text)
         if not amount and gemini_ok:

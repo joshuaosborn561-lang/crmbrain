@@ -170,7 +170,7 @@ def test_goliath_free_sow_is_not_signed_viewed_agreement_is_proposal():
         "viewed the document",
         "Dave Ackley viewed Growth Partners Agreement. Investment $21,000.",
     )
-    assert viewed == STAGE["proposal_sent"]
+    assert viewed == STAGE["contract_signed_unpaid"]
     assert viewed_amt == "21000"
     ev = Engagement(
         source="gmail",
@@ -180,10 +180,11 @@ def test_goliath_free_sow_is_not_signed_viewed_agreement_is_proposal():
         last_name="Ackley",
         company="Goliath",
         raw_subject="Dave Ackley viewed Growth Partners Agreement",
-        stage_hint=STAGE["proposal_sent"],
+        stage_hint=STAGE["contract_signed_unpaid"],
         extra={"document_name": "Growth Partners Agreement", "amount": "21000"},
     )
     assert choose_deal_action(STAGE["signed"], STAGE["proposal_sent"], ev) is None
+    assert choose_deal_action(STAGE["signed"], STAGE["contract_signed_unpaid"], ev) is None
     matched = {
         "id": "g1",
         "properties": {"dealstage": STAGE["signed"], "document_name": "Growth Partners Agreement"},
