@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from crmbrain.config import STAGE, Settings
 from crmbrain.cycle import _fire_ticker, integration_status, run as cycle_run
-from crmbrain.memory import Memory, _is_duplicate_key
+from crmbrain.memory import Memory, _is_duplicate_key, known_ticker_fields, unknown_ticker_column
 from crmbrain.models import CycleReport
 from crmbrain.ticker import (
     TickerCandidate,
@@ -303,3 +303,66 @@ def test_backfill_script_dry_run_prints_counts_without_writing(tmp_path: Path):
     assert "would_enroll: 0" in result["report"]
     assert "Nothing written" in result["report"]
     assert memory._local.get("ticker") == []
+
+
+def test_known_ticker_fields_drop_gmail_message_id_parse():
+    assert known_ticker_fields(
+        {"nurture_state": "sent", "bogus": 1, "gmail_message_id": "m1"}
+    ) == {"nurture_state": "sent", "gmail_message_id": "m1"}
+    err = RuntimeError(
+        'supabase crmbrain.ticker 400: {"code":"PGRST204",'
+        '"message":"Could not find the \'gmail_message_id\' column of \'ticker\' in the schema cache"}'
+    )
+    assert unknown_ticker_column(err) == "gmail_message_id"
+
+
+def test_sent_patch_retries_without_missing_gmail_message_id(tmp_path: Path, caplog):
+    """Approve & send must persist last_sent_at even if gmail_message_id is not on the table."""
+    settings = make_settings(supabase_key="super-secret-key", nurture_send_enabled=True)
+    memory = Memory(settings, data_dir=tmp_path)
+    memory._local["ticker"] = [
+        {
+            "id": "t-sent",
+            "name": "Josh Pugmire",
+            "email": "josh.pugmire@awardco.test",
+            "status": "active",
+            "nurture_state": "queued",
+        }
+    ]
+    patches: list[dict] = []
+
+    def fake_sb(method, table, json_body=None, params=None):
+        del table, params
+        if method == "GET":
+            return list(memory._local.get("ticker") or [])
+        if json_body and "gmail_message_id" in json_body:
+            raise RuntimeError(
+                'supabase crmbrain.ticker 400: {"code":"PGRST204",'
+                '"message":"Could not find the \'gmail_message_id\' column of \'ticker\' in the schema cache"}'
+            )
+        if json_body:
+            patches.append(dict(json_body))
+        return [json_body]
+
+    memory._sb_schema = fake_sb
+    caplog.set_level("ERROR")
+    from crmbrain.nurture_actions import send_nurture_reply
+    from tests.test_nurture_rebuild import FakeGmail, FakeSlack
+
+    out = send_nurture_reply(
+        settings,
+        memory,
+        "t-sent",
+        gmail=FakeGmail(),
+        slack=FakeSlack(),
+        channel="C",
+        ts="1",
+    )
+    assert out["ok"] is True
+    row = next(t for t in memory._local["ticker"] if t["id"] == "t-sent")
+    assert row["nurture_state"] == "sent"
+    assert row["last_sent_at"]
+    assert row["nurture_thread_id"]
+    assert any(p.get("nurture_state") == "sent" and "gmail_message_id" not in p for p in patches)
+    assert "ticker supabase update failed" in caplog.text
+    assert "gmail_message_id" in caplog.text
