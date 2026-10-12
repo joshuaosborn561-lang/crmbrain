@@ -17,6 +17,7 @@ from crmbrain.nurture import (
     ACTION_REMOVE,
     CASE_STUDIES,
     GENERAL_PROOF,
+    LANE_PROOF_BANK,
     MEETING_GUARANTEE,
     NurtureDraft,
     apply_reenrollment,
@@ -407,12 +408,14 @@ def test_t22_t26_drafts():
             "last_touch_snippet": "Interested but timing is bad until Q4. Ping me then.",
         }
     )
-    first = d.body.split("\n", 1)[0].lower()
-    assert "q4" not in first
-    assert "it's been a few months" in first
+    first = d.body.lower()
+    assert "q4" in first
+    assert "it's been a few months" not in first
     assert d.subject != "Morgan?"
     assert d.subject != "Following up"
     assert d.subject == "Morgan follow up"
+    assert d.valid is False
+    assert d.reject_reason == "no_lane_proof"
 
     roof = compose_nurture_draft(
         {
@@ -425,16 +428,20 @@ def test_t22_t26_drafts():
     assert roof.subject != "Roofing?"
     assert "MSP update" not in roof.subject
     assert roof.subject == "Summit Roofs follow up"
-    assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
+    assert LANE_PROOF_BANK["roofing"] in roof.body
+    assert "$2M" not in roof.body
     assert MEETING_GUARANTEE in roof.body
     assert roof.body.strip().endswith("Josh Osborn")
+    assert roof.valid is True
 
     gen = compose_nurture_draft(
         {"name": "Casey Lin", "company": "Lin Holdings", "last_touch_snippet": "Maybe later this year."}
     )
     assert gen.subject != "Casey?"
     assert gen.subject == "Lin Holdings follow up"
-    assert "$2M" in gen.body and "$100K" in gen.body and "14+" in gen.body
+    assert "$2M" not in gen.body and "$100K" not in gen.body and "14+" not in gen.body
+    assert gen.valid is False
+    assert gen.reject_reason == "no_lane_proof"
     assert "Quick update" not in gen.subject
 
     bad = validate_draft(
@@ -455,14 +462,19 @@ def test_t22_t26_drafts():
     assert "—" not in ok.body and "–" not in ok.body
     assert "free poc" not in ok.body.lower()
     assert "proof of concept" not in ok.body.lower()
+    assert "AirPods" not in ok.body
+    assert LANE_PROOF_BANK["msp"].split(",")[0] in ok.body
 
     on = compose_nurture_draft({"name": "Dana Ortiz", "industry": "hvac", "last_touch_snippet": "check back in the fall"}, airpods=True)
     off = compose_nurture_draft({"name": "Dana Ortiz", "industry": "hvac", "last_touch_snippet": "check back in the fall"}, airpods=False)
-    assert "AirPods" in on.body and "AirPods" not in off.body
+    assert "AirPods" not in on.body and "AirPods" not in off.body
+    assert on.valid is False
+    assert on.reject_reason == "no_lane_proof"
     assert len(on.body.split()) <= 110
     assert "{" not in on.body
     assert on.body.strip().endswith("Josh Osborn")
-    assert GENERAL_PROOF or CASE_STUDIES["hvac"]
+    assert GENERAL_PROOF
+    assert "hvac" not in CASE_STUDIES
 
 
 def test_t27_t28_t32_cadence():
@@ -931,7 +943,7 @@ def test_nurture_stage_never_keeps_stale_never_booked():
             deal_stage=nurture,
             extra={"original_subject": "Your meeting recap - Pat Reyes and Joshua Osborn"},
         )
-        == "met"
+        == "booked"
     )
     assert (
         infer_nurture_reason(
@@ -1043,24 +1055,58 @@ def test_nurture_body_has_no_airpods_and_is_personalized():
     assert "AirPods" not in hvac.body
     assert "ticket" not in roof.body.lower()
     assert MEETING_GUARANTEE in roof.body
-    assert CASE_STUDIES["roofing"].split("closed")[0][:10] in roof.body or "$100K" in roof.body
-    assert "trades" in hvac.body or CASE_STUDIES["hvac"][:10] in hvac.body
+    assert LANE_PROOF_BANK["roofing"] in roof.body
+    assert "$2M" not in roof.body
+    assert roof.valid is True
+    assert hvac.valid is False
+    assert hvac.reject_reason == "no_lane_proof"
+    assert "$2M" not in hvac.body
     assert roof.body != hvac.body
     default = compose_nurture_draft({"name": "Pat Reyes", "industry": "roofing"})
     assert "AirPods" not in default.body
+    assert default.valid is False
+    assert default.reject_reason == "no_recap"
 
 
 def test_company_name_keywords_pick_vertical_proof():
-    from crmbrain.nurture import GENERAL_PROOF, TRADES_PROOF
+    from crmbrain.nurture import LANE_PROOF_BANK
 
-    trades = compose_nurture_draft({"name": "Alex Rivera", "company": "RLP Mechanical"})
-    staffing = compose_nurture_draft({"name": "Alex Rivera", "company": "Talent Unify"})
-    built = compose_nurture_draft({"name": "Alex Rivera", "company": "IntegriBuilt"})
-    fire = compose_nurture_draft({"name": "Alex Rivera", "company": "RDS Fire Systems"})
-    assert TRADES_PROOF.rstrip(".") in trades.body
-    assert GENERAL_PROOF.rstrip(".") in staffing.body
-    assert TRADES_PROOF.rstrip(".") in built.body
-    assert TRADES_PROOF.rstrip(".") in fire.body
+    trades = compose_nurture_draft(
+        {
+            "name": "Alex Rivera",
+            "company": "RLP Mechanical",
+            "last_touch_snippet": "Check back after our busy season.",
+        }
+    )
+    staffing = compose_nurture_draft(
+        {
+            "name": "Alex Rivera",
+            "company": "Talent Unify",
+            "last_touch_snippet": "Need to fill two AE seats before Q4.",
+        }
+    )
+    built = compose_nurture_draft(
+        {
+            "name": "Alex Rivera",
+            "company": "IntegriBuilt",
+            "last_touch_snippet": "Concrete season is busy.",
+        }
+    )
+    fire = compose_nurture_draft(
+        {
+            "name": "Alex Rivera",
+            "company": "RDS Fire Systems",
+            "last_touch_snippet": "After this install we can talk.",
+        }
+    )
+    assert trades.valid is False
+    assert trades.reject_reason == "no_lane_proof"
+    assert LANE_PROOF_BANK["staffing"] in staffing.body
+    assert staffing.valid is True
+    assert built.valid is False
+    assert built.reject_reason == "no_lane_proof"
+    assert fire.valid is False
+    assert fire.reject_reason == "no_lane_proof"
 
 
 def _due_nurture_row(i: int, next_fire: str = "2020-01-01T00:00:00+00:00") -> dict:

@@ -40,7 +40,7 @@ def _roofing_row(**extra) -> dict:
         "source": "hubspot",
         "meeting_at": "2026-04-02T17:00:00+00:00",
         "hs_deal_id": "351000111",
-        "last_touch_snippet": "",
+        "last_touch_snippet": "Check back after our busy season.",
         "status": "active",
         "nurture_state": "queued",
     }
@@ -250,9 +250,8 @@ def test_edit_send_shows_edited_email(tmp_path: Path, monkeypatch):
     memory = Memory(settings, data_dir=tmp_path)
     memory._local["ticker"] = [_roofing_row()]
     slack = FakeSlack()
-    edited_body = compose_nurture_draft(_roofing_row()).body.replace(
-        "following up on our Apr 2 call", "circling back on the April walkthrough"
-    )
+    seed = compose_nurture_draft(_roofing_row())
+    edited_body = seed.body.replace(seed.body.split("\n", 1)[0], "Hey Mike, circling back on the April walkthrough.")
     out = send_nurture_reply(
         settings,
         memory,

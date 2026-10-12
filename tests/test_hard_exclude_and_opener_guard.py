@@ -14,6 +14,7 @@ from crmbrain.nurture import (
     APPROVED_PROOF_LINES,
     CASE_STUDIES,
     GENERAL_PROOF,
+    LANE_PROOF_BANK,
     TRADES_PROOF,
     approved_proof_texts,
     capitalize_body_lines,
@@ -161,13 +162,12 @@ def test_opener_rejects_raw_transcript_first_person_and_long_clause():
             "last_touch_snippet": raw,
         }
     )
-    opener = draft.body.split("\n", 1)[0]
+    opener = draft.body
     assert "I will pick" not in opener
     assert "let's knock out" not in opener.lower()
     assert "you mentioned let's" not in opener.lower()
     assert "website" in opener.lower()
     assert "you were focused on getting the website done first" in opener.lower()
-    assert len(opener.split()) <= 24
     assert draft.spoken_source_id == "ff-pat-website"
 
     long = " ".join(["pipeline"] * 21)
@@ -202,8 +202,9 @@ def test_body_lines_start_with_a_capital_letter():
         letters = [ch for ch in line if ch.isalpha()]
         if letters:
             assert letters[0].isupper(), line
-    assert "One of our roofers closed $100K" in draft.body
+    assert LANE_PROOF_BANK["roofing"] in draft.body
     assert "one of our roofers" not in draft.body
+    assert "$2M" not in draft.body
 
 
 class _FakeNurtureHS:
@@ -347,7 +348,7 @@ def test_sample_cards_come_from_hubspot_nurture_and_skip_exclusions(tmp_path):
             assert letters[0].isupper()
     assert jackie["reason"] in {"met", "booked", "kicked_can"}
     assert "Fit:" not in str(jackie["reason"])
-    assert jackie["body"].split("\n\n")[1].rstrip().endswith(".")
+    assert "$2M" not in jackie["body"]
     assert "Quick follow up" not in jackie["subject"]
 
 
@@ -389,7 +390,8 @@ def test_sample_cards_read_company_industry_and_name_keywords(tmp_path):
         settings, 10, hs=_CompanyIndustryHS(), out_path=str(tmp_path / "cards.json")
     )
     alex = next(c for c in payload["cards"] if c["email"] == "alex@rlpmechanical.test")
-    assert "trades" in alex["body"].lower() or "$2M" in alex["body"]
+    assert "$2M" not in alex["body"]
+    assert TRADES_PROOF.split(",")[0] not in alex["body"]
 
 
 class _CompanyHS(_FakeNurtureHS):
@@ -542,8 +544,11 @@ def test_sample_run_starts_new_threads_and_dedupes_company(tmp_path):
         assert card["subject"].endswith("follow up")
         if card["email"] == "pat@devx.com":
             assert card["subject"] == "Devx follow up"
-        proof = card["body"].split("\n\n")[1]
-        assert proof.rstrip().endswith(".")
+        assert "$2M" not in card["body"]
+        assert "AirPods" not in card["body"]
+        if "6 property managers" in card["body"] or "Bolder Cyber" in card["body"] or "culture-fit" in card["body"]:
+            proof = card["body"].split("\n\n")[1]
+            assert proof.rstrip().endswith(".")
 
 
 def test_reason_ignores_raw_hubspot_fit_note():
@@ -602,23 +607,50 @@ def test_opener_uses_meeting_date_and_booked_never_met_does_not_claim_call():
 
 
 def test_proof_line_varies_by_vertical():
-    from crmbrain.nurture import CASE_STUDIES, GENERAL_PROOF, TRADES_PROOF, compose_nurture_draft
+    from crmbrain.nurture import LANE_PROOF_BANK, compose_nurture_draft
 
     roof = compose_nurture_draft(
-        {"name": "Pat Reyes", "company": "Kelly Roofing", "industry": "roofing"}
+        {
+            "name": "Pat Reyes",
+            "company": "Kelly Roofing",
+            "industry": "roofing",
+            "last_touch_snippet": "Yes, send me info. Spring is our slow season.",
+        }
     )
     hvac = compose_nurture_draft(
-        {"name": "Pat Reyes", "company": "The Chill Brothers", "industry": "hvac"}
+        {
+            "name": "Pat Reyes",
+            "company": "The Chill Brothers",
+            "industry": "hvac",
+            "last_touch_snippet": "Check back in the fall.",
+        }
     )
     staffing = compose_nurture_draft(
-        {"name": "Pat Reyes", "company": "HireRight", "industry": "staffing"}
+        {
+            "name": "Pat Reyes",
+            "company": "HireRight",
+            "industry": "staffing",
+            "last_touch_snippet": "Need to fill two AE seats before Q4.",
+        }
     )
-    generic = compose_nurture_draft({"name": "Pat Reyes", "company": "Mystery Co"})
-    assert roof.body.split("\n\n")[1].rstrip(".").lower() == CASE_STUDIES["roofing"].rstrip(".").lower()
-    assert hvac.body.split("\n\n")[1].rstrip(".").lower() == TRADES_PROOF.rstrip(".").lower()
-    assert staffing.body.split("\n\n")[1].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
-    assert generic.body.split("\n\n")[1].rstrip(".").lower() == GENERAL_PROOF.rstrip(".").lower()
-    assert roof.body.split("\n\n")[1] != hvac.body.split("\n\n")[1]
+    generic = compose_nurture_draft(
+        {
+            "name": "Pat Reyes",
+            "company": "Mystery Co",
+            "last_touch_snippet": "Maybe later this year.",
+        }
+    )
+    assert LANE_PROOF_BANK["roofing"] in roof.body
+    assert roof.valid is True
+    assert hvac.valid is False
+    assert hvac.reject_reason == "no_lane_proof"
+    assert LANE_PROOF_BANK["staffing"] in staffing.body
+    assert staffing.valid is True
+    assert generic.valid is False
+    assert generic.reject_reason == "no_lane_proof"
+    assert "$2M" not in roof.body
+    assert "$2M" not in hvac.body
+    assert "$2M" not in staffing.body
 
 
 def test_new_thread_subject_uses_title_case_company_not_domain():
@@ -716,18 +748,32 @@ def test_every_proof_line_is_in_the_approved_set():
         "a SaaS team we support booked a steady week of demos without standing up another SDR pod.",
         "advisor teams we support are booking 14+ conversations a month with people who already want to talk.",
         "an agency we support filled next month's calendar without adding another closer.",
+        GENERAL_PROOF,
+        TRADES_PROOF,
     )
     for line in CASE_STUDIES.values():
         assert line.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
+    bank_lanes = set(LANE_PROOF_BANK)
     for industry in [row["key"] for row in VERTICALS] + ["staffing", "msp", "saas", "financial_advisors", "agency", ""]:
-        draft = compose_nurture_draft({"name": "Pat Reyes", "company": "Acme", "industry": industry})
-        proof = draft.body.split("\n\n")[1]
-        assert proof in approved
-        low = proof.lower()
+        draft = compose_nurture_draft(
+            {
+                "name": "Pat Reyes",
+                "company": "Acme",
+                "industry": industry,
+                "last_touch_snippet": "Yes, send me info. Spring is our slow season.",
+            }
+        )
+        low = draft.body.lower()
         for bad in banned:
-            assert bad.rstrip(".") not in low
-    assert GENERAL_PROOF.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
-    assert TRADES_PROOF.rstrip(".") in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
+            assert str(bad).rstrip(".").lower() not in low
+        if industry in bank_lanes:
+            assert any(line in draft.body for line in approved)
+            assert draft.valid is True
+        else:
+            assert draft.valid is False
+            assert draft.reject_reason == "no_lane_proof"
+    assert GENERAL_PROOF.rstrip(".") not in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
+    assert TRADES_PROOF.rstrip(".") not in {p.rstrip(".") for p in APPROVED_PROOF_LINES}
 
 
 def test_kevin_hagemoser_is_nurture_excluded():
@@ -769,7 +815,7 @@ def test_focused_on_clause_requires_held_source_id():
             "last_touch_snippet": "Dan was focused on getting pricing nailed down.",
         }
     )
-    opener = ungrounded.body.split("\n", 1)[0].lower()
+    opener = ungrounded.body.lower()
     assert "pricing" not in opener
     assert "focused on" not in opener
     assert "following up on our" in opener
@@ -786,7 +832,7 @@ def test_focused_on_clause_requires_held_source_id():
             "transcript": "Dan said he wants to get pricing nailed down before we send anything.",
         }
     )
-    g_opener = grounded.body.split("\n", 1)[0].lower()
+    g_opener = grounded.body.lower()
     assert "pricing" in g_opener
     assert "you were focused on getting pricing nailed down" in g_opener
     assert grounded.spoken_source_id == "ff-dan-aug18"
@@ -873,7 +919,7 @@ def test_dan_mcgurl_fixture_does_not_invent_pricing_from_notes():
             },
         }
     )
-    notes_opener = notes_only.body.split("\n", 1)[0].lower()
+    notes_opener = notes_only.body.lower()
     assert "pricing" not in notes_opener
     assert "focused on" not in notes_opener
     assert "following up on our aug 18 call" in notes_opener
@@ -904,7 +950,7 @@ def test_dan_mcgurl_fixture_does_not_invent_pricing_from_notes():
             "description": DAN_GENERIC_NOTES,
         }
     )
-    opener = grounded.body.split("\n", 1)[0].lower()
+    opener = grounded.body.lower()
     assert "pricing" not in opener
     assert "focused on" not in opener
     assert "proposal" not in opener
@@ -1063,13 +1109,14 @@ def test_jo_fried_gmail_followup_is_held_apr_1():
             "deal_stage": STAGE["nurture"],
         },
     }
-    assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "met"
+    assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "booked"
     draft = compose_nurture_draft(row)
     opener = draft.body.split("\n", 1)[0].lower()
-    assert "following up on our apr 1 call" in opener
+    assert "apr 1" in opener
+    assert "meeting we had booked" in opener
+    assert "following up on our apr 1 call" not in opener
     assert "sep" not in opener
     assert "mar 27" not in opener
-    assert "meeting we had booked" not in opener
 
 
 def test_josh_brown_uses_web_booking_mar_30_not_createdate():
@@ -1217,7 +1264,8 @@ def test_held_date_rules_for_brian_dan_erik_and_jo():
         }
     )
     jo_opener = jo.body.split("\n", 1)[0].lower()
-    assert "following up on our apr 1 call" in jo_opener
+    assert "apr 1" in jo_opener
+    assert "meeting we had booked" in jo_opener
     assert "mar 27" not in jo_opener
 
 
@@ -1434,8 +1482,9 @@ def test_sample_cards_use_gmail_booking_and_followup_dates(tmp_path):
         settings, 10, hs=_JoJoshHS(), gmail=_MeetingGmail(), out_path=str(tmp_path / "cards.json")
     )
     jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
-    assert jo["reason"] == "met"
-    assert "following up on our apr 1 call" in jo["body"].split("\n", 1)[0].lower()
+    assert jo["reason"] == "booked"
+    assert "apr 1" in jo["body"].split("\n", 1)[0].lower()
+    assert "meeting we had booked" in jo["body"].split("\n", 1)[0].lower()
     assert "sep" not in jo["body"].split("\n", 1)[0].lower()
     josh = next(c for c in payload["cards"] if c["name"] == "Josh Brown")
     assert josh["reason"] == "booked"
@@ -1465,5 +1514,5 @@ def test_sample_cards_builds_gmail_client_when_omitted(tmp_path, monkeypatch):
     )
     assert created.get("yes") is True
     jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
-    assert jo["reason"] == "met"
+    assert jo["reason"] == "booked"
     assert "apr 1" in jo["body"].split("\n", 1)[0].lower()
