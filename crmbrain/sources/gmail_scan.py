@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from crmbrain.config import (
     CDT,
@@ -206,32 +207,74 @@ DATE_ONLY_WHEN = re.compile(
     re.I,
 )
 ICS_DTSTART_RE = re.compile(
-    r"DTSTART(?:;TZID=[^\r\n:]+)?:(\d{8}(?:T\d{6})?)",
+    r"DTSTART(?:;TZID=([^\r\n:]+))?:(\d{8}(?:T\d{6})?)(Z)?",
     re.I,
+)
+INVITE_TZ_ABBREV = {
+    "EDT": "America/New_York",
+    "EST": "America/New_York",
+    "ET": "America/New_York",
+    "CDT": "America/Chicago",
+    "CST": "America/Chicago",
+    "CT": "America/Chicago",
+    "MDT": "America/Denver",
+    "MST": "America/Denver",
+    "MT": "America/Denver",
+    "PDT": "America/Los_Angeles",
+    "PST": "America/Los_Angeles",
+    "PT": "America/Los_Angeles",
+    "UTC": "UTC",
+    "GMT": "UTC",
+}
+_TZ_NAME_RE = (
+    (re.compile(r"eastern(?:\s+(?:daylight|standard))?\s+time|\bET\b", re.I), "America/New_York"),
+    (re.compile(r"central(?:\s+(?:daylight|standard))?\s+time|\bCT\b", re.I), "America/Chicago"),
+    (re.compile(r"mountain(?:\s+(?:daylight|standard))?\s+time|\bMT\b", re.I), "America/Denver"),
+    (re.compile(r"pacific(?:\s+(?:daylight|standard))?\s+time|\bPT\b", re.I), "America/Los_Angeles"),
 )
 
 
+def invite_timezone(text: str) -> ZoneInfo:
+    """Zone printed on the invite (EDT, Eastern Time, TZID). Default Chicago."""
+    blob = text or ""
+    paren = re.search(r"\(([A-Z]{2,4})\)", blob)
+    if paren:
+        mapped = INVITE_TZ_ABBREV.get(paren.group(1).upper())
+        if mapped:
+            return ZoneInfo(mapped)
+    abbrev = re.search(r"\b(EDT|EST|CDT|CST|MDT|MST|PDT|PST|UTC|GMT)\b", blob, re.I)
+    if abbrev:
+        mapped = INVITE_TZ_ABBREV.get(abbrev.group(1).upper())
+        if mapped:
+            return ZoneInfo(mapped)
+    for pattern, name in _TZ_NAME_RE:
+        if pattern.search(blob):
+            return ZoneInfo(name)
+    return CDT
+
+
 def parse_meeting_at(subject: str, body: str = "") -> datetime | None:
-    """Calendly / Google Calendar times on Josh's Chicago clock."""
+    """Calendly / Google Calendar times using the invite's own zone."""
     text = f"{subject}\n{body}"
+    zone = invite_timezone(text)
     m = SUBJECT_WHEN.search(subject) or SUBJECT_WHEN.search(text)
     if m:
-        stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4))
+        stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4), zone=zone)
         if stamp:
             return stamp
     m = GCAL_AT_WHEN.search(text)
     if m:
-        stamp = _parse_clock(m.group(4), m.group(1), m.group(2), m.group(3))
+        stamp = _parse_clock(m.group(4), m.group(1), m.group(2), m.group(3), zone=zone)
         if stamp:
             return stamp
     m = BODY_WHEN.search(text)
     if m:
-        stamp = _parse_clock(m.group(5), m.group(2), m.group(3), m.group(4))
+        stamp = _parse_clock(m.group(5), m.group(2), m.group(3), m.group(4), zone=zone)
         if stamp:
             return stamp
     m = CALENDLY_FLIPPED_WHEN.search(text)
     if m:
-        stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4))
+        stamp = _parse_clock(m.group(1), m.group(2), m.group(3), m.group(4), zone=zone)
         if stamp:
             return stamp
     ics = parse_ics_dtstart(text)
@@ -239,7 +282,7 @@ def parse_meeting_at(subject: str, body: str = "") -> datetime | None:
         return ics
     m = DATE_ONLY_WHEN.search(text)
     if m:
-        stamp = _parse_clock("12:00pm", m.group(1), m.group(2), m.group(3))
+        stamp = _parse_clock("12:00pm", m.group(1), m.group(2), m.group(3), zone=zone)
         if stamp:
             return stamp
     return None
@@ -249,25 +292,39 @@ def parse_ics_dtstart(text: str) -> datetime | None:
     m = ICS_DTSTART_RE.search(text or "")
     if not m:
         return None
-    raw = m.group(1)
+    tzid, raw, zulu = m.group(1), m.group(2), m.group(3)
+    zone = timezone.utc if zulu else invite_timezone(tzid or text or "")
+    if tzid and not zulu:
+        try:
+            zone = ZoneInfo(tzid)
+        except Exception:
+            zone = invite_timezone(tzid)
     for fmt in ("%Y%m%dT%H%M%S", "%Y%m%d"):
         try:
             naive = datetime.strptime(raw, fmt)
-            return naive.replace(tzinfo=CDT)
+            return naive.replace(tzinfo=zone)
         except ValueError:
             continue
     return None
 
 
-def _parse_clock(time_part: str, month: str, day: str, year: str) -> datetime | None:
+def _parse_clock(
+    time_part: str,
+    month: str,
+    day: str,
+    year: str,
+    *,
+    zone=None,
+) -> datetime | None:
     clock = re.sub(r"\s+", "", time_part or "").upper()
     if re.fullmatch(r"\d{1,2}[AP]M", clock):
         clock = f"{clock[:-2]}:00{clock[-2:]}"
     month = (month or "")[:3].title()
+    zone = zone or CDT
     for fmt in ("%I:%M%p %b %d %Y", "%I:%M%p %B %d %Y"):
         try:
             naive = datetime.strptime(f"{clock} {month} {int(day)} {year}", fmt)
-            return naive.replace(tzinfo=CDT)
+            return naive.replace(tzinfo=zone)
         except ValueError:
             continue
     return None

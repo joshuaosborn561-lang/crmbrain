@@ -931,7 +931,7 @@ def test_nurture_stage_never_keeps_stale_never_booked():
             deal_stage=nurture,
             extra={"original_subject": "Your meeting recap - Pat Reyes and Joshua Osborn"},
         )
-        == "met"
+        == "booked"
     )
     assert (
         infer_nurture_reason(

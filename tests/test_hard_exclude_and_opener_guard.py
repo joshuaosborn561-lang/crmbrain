@@ -1063,13 +1063,14 @@ def test_jo_fried_gmail_followup_is_held_apr_1():
             "deal_stage": STAGE["nurture"],
         },
     }
-    assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "met"
+    assert infer_nurture_reason(reason="booked", deal_stage=STAGE["nurture"], extra=row) == "booked"
     draft = compose_nurture_draft(row)
     opener = draft.body.split("\n", 1)[0].lower()
-    assert "following up on our apr 1 call" in opener
+    assert "apr 1" in opener
+    assert "meeting we had booked" in opener
+    assert "following up on our apr 1 call" not in opener
     assert "sep" not in opener
     assert "mar 27" not in opener
-    assert "meeting we had booked" not in opener
 
 
 def test_josh_brown_uses_web_booking_mar_30_not_createdate():
@@ -1217,7 +1218,8 @@ def test_held_date_rules_for_brian_dan_erik_and_jo():
         }
     )
     jo_opener = jo.body.split("\n", 1)[0].lower()
-    assert "following up on our apr 1 call" in jo_opener
+    assert "apr 1" in jo_opener
+    assert "meeting we had booked" in jo_opener
     assert "mar 27" not in jo_opener
 
 
@@ -1434,8 +1436,9 @@ def test_sample_cards_use_gmail_booking_and_followup_dates(tmp_path):
         settings, 10, hs=_JoJoshHS(), gmail=_MeetingGmail(), out_path=str(tmp_path / "cards.json")
     )
     jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
-    assert jo["reason"] == "met"
-    assert "following up on our apr 1 call" in jo["body"].split("\n", 1)[0].lower()
+    assert jo["reason"] == "booked"
+    assert "apr 1" in jo["body"].split("\n", 1)[0].lower()
+    assert "meeting we had booked" in jo["body"].split("\n", 1)[0].lower()
     assert "sep" not in jo["body"].split("\n", 1)[0].lower()
     josh = next(c for c in payload["cards"] if c["name"] == "Josh Brown")
     assert josh["reason"] == "booked"
@@ -1465,5 +1468,5 @@ def test_sample_cards_builds_gmail_client_when_omitted(tmp_path, monkeypatch):
     )
     assert created.get("yes") is True
     jo = next(c for c in payload["cards"] if c["name"] == "Jo Fried")
-    assert jo["reason"] == "met"
+    assert jo["reason"] == "booked"
     assert "apr 1" in jo["body"].split("\n", 1)[0].lower()
