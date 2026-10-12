@@ -298,7 +298,7 @@ def test_block_action_passes_slack_user(tmp_path: Path, monkeypatch):
         memory,
         {
             "type": "block_actions",
-            "user": {"id": "U99"},
+            "user": {"id": "U0AAX2XFJE7"},
             "channel": {"id": "C"},
             "message": {"ts": "5"},
             "actions": [{"action_id": ACTION_APPROVE, "value": "t-mike"}],
@@ -307,7 +307,7 @@ def test_block_action_passes_slack_user(tmp_path: Path, monkeypatch):
         slack=slack,
     )
     blob = "\n".join((b.get("text") or {}).get("text") or "" for b in slack.updated[0]["blocks"])
-    assert "<@U99>" in blob
+    assert "<@U0AAX2XFJE7>" in blob
 
 
 def test_outcome_blocks_sent_and_removed_copy():

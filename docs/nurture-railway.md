@@ -53,7 +53,8 @@ uvicorn crmbrain.nurture_app:app --host 0.0.0.0 --port $PORT
 |---|---|---|
 | `SLACK_SIGNING_SECRET` | (required) | HMAC-SHA256 `v0` verification for `nurture_*` actions |
 | `LEGACY_SLACK_INTERACTIONS_URL` | `https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions` | Non-nurture clicks (old Fireflies/HubSpot cards) |
-| `SLACK_BOT_TOKEN` | existing | `chat.postMessage` / `chat.update` / `views.open` |
+| `SLACK_BOT_TOKEN` | existing | `chat.postMessage` / `chat.update` / `views.open` / `chat.postEphemeral` |
+| `NURTURE_APPROVER_IDS` | `U0AAX2XFJE7,U0BL8JT75KN` | Slack user ids allowed to Approve / Edit / Remove |
 | `SLACK_NURTURE_CHANNEL` | `C0BHBDTMRFY` | #nurture |
 | `NURTURE_POST_ENABLED` | off | Cron posts Block Kit cards when `1` |
 | `NURTURE_SEND_ENABLED` | off | Approve/Edit actually send Gmail when `1` |

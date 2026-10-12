@@ -167,7 +167,11 @@ def test_legacy_timeout_still_acks_slack():
 
 def test_nurture_action_requires_valid_signature_and_is_not_forwarded():
     settings = make_settings(slack_signing_secret="test-signing-secret")
-    payload = {"type": "block_actions", "actions": [{"action_id": ACTION_APPROVE, "value": "t-1"}]}
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U0AAX2XFJE7"},
+        "actions": [{"action_id": ACTION_APPROVE, "value": "t-1"}],
+    }
     raw = _form(payload)
     forwarded: list = []
     handled: list[dict] = []
@@ -206,7 +210,13 @@ def test_nurture_action_requires_valid_signature_and_is_not_forwarded():
 
 def test_nurture_view_submission_is_local_not_legacy():
     settings = make_settings(slack_signing_secret="test-signing-secret")
-    raw = _form({"type": "view_submission", "view": {"callback_id": VIEW_EDIT}})
+    raw = _form(
+        {
+            "type": "view_submission",
+            "user": {"id": "U0AAX2XFJE7"},
+            "view": {"callback_id": VIEW_EDIT},
+        }
+    )
     ts, sig = _sign("test-signing-secret", raw)
     handled: list[dict] = []
     resp = dispatch_slack_interaction(

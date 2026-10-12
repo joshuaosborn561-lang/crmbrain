@@ -319,6 +319,14 @@ CLIENT_HINTS = (
 DEFAULT_LEGACY_SLACK_INTERACTIONS_URL = (
     "https://fireflies-webhook-production-3f5d.up.railway.app/slack/interactions"
 )
+DEFAULT_NURTURE_APPROVER_IDS = ("U0AAX2XFJE7", "U0BL8JT75KN")
+
+
+def parse_nurture_approver_ids(raw: str | None) -> tuple[str, ...]:
+    """Comma-separated Slack user ids. Blank / unset falls back to Josh + Cayden."""
+    text = "" if raw is None else str(raw)
+    ids = tuple(part.strip() for part in text.split(",") if part.strip())
+    return ids or DEFAULT_NURTURE_APPROVER_IDS
 
 
 @dataclass(frozen=True)
@@ -365,6 +373,7 @@ class Settings:
     slack_signing_secret: str = ""
     nurture_max_per_weekday: int = 5
     legacy_slack_interactions_url: str = DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
+    nurture_approver_ids: tuple[str, ...] = DEFAULT_NURTURE_APPROVER_IDS
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -417,6 +426,7 @@ class Settings:
                 os.getenv("LEGACY_SLACK_INTERACTIONS_URL", "").strip()
                 or DEFAULT_LEGACY_SLACK_INTERACTIONS_URL
             ),
+            nurture_approver_ids=parse_nurture_approver_ids(os.getenv("NURTURE_APPROVER_IDS")),
         )
 
 
