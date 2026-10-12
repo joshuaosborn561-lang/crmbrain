@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -27,6 +28,45 @@ from crmbrain.nurture import (
 from crmbrain.policy import deal_is_locked
 
 logger = logging.getLogger(__name__)
+
+NURTURE_APPROVER_DENIED = "Only Josh or Cayden can approve nurture emails."
+_GATED_ACTION_IDS = frozenset({ACTION_APPROVE, ACTION_EDIT, ACTION_REMOVE})
+
+
+def is_nurture_approver(settings: Settings, user_id: str) -> bool:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return False
+    allowed = getattr(settings, "nurture_approver_ids", ()) or ()
+    return uid in {str(item).strip() for item in allowed if str(item).strip()}
+
+
+def _channel_from_payload(payload: dict, settings: Settings) -> str:
+    channel = str((payload.get("channel") or {}).get("id") or "")
+    if channel:
+        return channel
+    view = payload.get("view") or {}
+    raw_meta = view.get("private_metadata") or "{}"
+    try:
+        meta = json.loads(raw_meta) if isinstance(raw_meta, str) else dict(raw_meta or {})
+    except (TypeError, ValueError):
+        meta = {}
+    return str(meta.get("channel") or getattr(settings, "slack_channel", "") or "")
+
+
+def deny_nurture_action(settings: Settings, payload: dict, slack=None) -> dict[str, Any]:
+    """Ephemeral refuse. Does not claim, send, edit, or remove."""
+    user_id = str((payload.get("user") or {}).get("id") or "")
+    channel = _channel_from_payload(payload, settings)
+    if slack is None:
+        from crmbrain import slack_notify
+
+        slack = slack_notify
+    try:
+        slack.post_ephemeral(settings, channel, user_id, NURTURE_APPROVER_DENIED)
+    except Exception as exc:
+        logger.warning("nurture approver deny ephemeral failed: %s", exc)
+    return {"ok": False, "outcome": "denied", "reason": "not_approver"}
 
 
 def _confirm(
@@ -329,6 +369,8 @@ def handle_block_action(
     channel = str((payload.get("channel") or {}).get("id") or "")
     ts = str((payload.get("message") or {}).get("ts") or "")
     actor_user_id = str((payload.get("user") or {}).get("id") or "")
+    if action_id in _GATED_ACTION_IDS and not is_nurture_approver(settings, actor_user_id):
+        return deny_nurture_action(settings, payload, slack=slack)
     if action_id == ACTION_EDIT:
         return open_edit_modal(
             settings,
@@ -375,7 +417,9 @@ def handle_view_submission(
     view = payload.get("view") or {}
     if view.get("callback_id") != VIEW_EDIT:
         return {"ok": False, "outcome": "unknown_view"}
-    import json
+    actor_user_id = str((payload.get("user") or {}).get("id") or "")
+    if not is_nurture_approver(settings, actor_user_id):
+        return deny_nurture_action(settings, payload, slack=slack)
 
     meta = {}
     raw_meta = view.get("private_metadata") or "{}"
@@ -389,7 +433,6 @@ def handle_view_submission(
     body = ((values.get("nurture_body") or {}).get("body") or {}).get("value") or ""
     channel = str(meta.get("channel") or "")
     ts = str(meta.get("ts") or "")
-    actor_user_id = str((payload.get("user") or {}).get("id") or "")
     return send_nurture_reply(
         settings,
         memory,

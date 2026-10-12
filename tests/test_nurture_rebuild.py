@@ -154,6 +154,7 @@ class FakeSlack:
     def __init__(self):
         self.updated: list[dict] = []
         self.modals: list[dict] = []
+        self.ephemeral: list[dict] = []
 
     def update_message(self, settings, channel, ts, text, blocks=None):
         self.updated.append({"channel": channel, "ts": ts, "text": text, "blocks": blocks})
@@ -161,6 +162,10 @@ class FakeSlack:
 
     def open_modal(self, settings, trigger_id, view):
         self.modals.append({"trigger_id": trigger_id, "view": view})
+        return {"ok": True}
+
+    def post_ephemeral(self, settings, channel, user, text):
+        self.ephemeral.append({"channel": channel, "user": user, "text": text})
         return {"ok": True}
 
     def post_blocks(self, settings, text, blocks):

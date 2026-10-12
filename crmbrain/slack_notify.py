@@ -75,6 +75,22 @@ def update_message(
     return data
 
 
+def post_ephemeral(settings: Settings, channel: str, user: str, text: str) -> dict[str, Any]:
+    """Visible only to `user` in `channel`. Used to refuse unauthorized nurture clicks."""
+    if not settings.slack_token or not channel or not user:
+        return {}
+    resp = requests.post(
+        f"{SLACK_API}/chat.postEphemeral",
+        headers=_headers(settings),
+        json={"channel": channel, "user": user, "text": text},
+        timeout=20,
+    )
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"slack ephemeral: {data}")
+    return data
+
+
 def open_modal(settings: Settings, trigger_id: str, view: dict) -> dict[str, Any]:
     if not settings.slack_token or not trigger_id:
         return {}

@@ -12,8 +12,14 @@ from fastapi import BackgroundTasks, FastAPI, Request, Response
 
 from crmbrain.config import DEFAULT_LEGACY_SLACK_INTERACTIONS_URL, Settings
 from crmbrain.memory import Memory
-from crmbrain.nurture import ACTION_EDIT, verify_slack_signature
-from crmbrain.nurture_actions import handle_block_action, handle_view_submission, open_edit_modal
+from crmbrain.nurture import ACTION_APPROVE, ACTION_EDIT, ACTION_REMOVE, VIEW_EDIT, verify_slack_signature
+from crmbrain.nurture_actions import (
+    deny_nurture_action,
+    handle_block_action,
+    handle_view_submission,
+    is_nurture_approver,
+    open_edit_modal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,12 +147,29 @@ def process_interaction(payload: dict) -> None:
         logger.exception("nurture interaction failed")
 
 
+def _gated_nurture_interaction(payload: dict) -> bool:
+    if payload.get("type") == "block_actions":
+        actions = payload.get("actions") or []
+        action_id = (actions[0] or {}).get("action_id") if actions else ""
+        return action_id in {ACTION_APPROVE, ACTION_EDIT, ACTION_REMOVE}
+    if payload.get("type") == "view_submission":
+        view = payload.get("view") if isinstance(payload.get("view"), dict) else {}
+        return str((view or {}).get("callback_id") or "") == VIEW_EDIT
+    return False
+
+
 def _handle_nurture(
     payload: dict,
     settings: Settings,
     *,
     background_add: Callable[[Any], None] | None = None,
+    slack=None,
 ) -> Response:
+    if _gated_nurture_interaction(payload):
+        actor = str((payload.get("user") or {}).get("id") or "")
+        if not is_nurture_approver(settings, actor):
+            deny_nurture_action(settings, payload, slack=slack)
+            return Response(status_code=200)
     if payload.get("type") == "block_actions":
         actions = payload.get("actions") or []
         action_id = (actions[0] or {}).get("action_id") if actions else ""
@@ -202,6 +225,7 @@ def dispatch_slack_interaction(
     *,
     background_add: Callable[[Any], None] | None = None,
     http_post: Callable[..., Any] | None = None,
+    slack=None,
 ) -> Response:
     """Route nurture_* locally (after HMAC). Everything else goes to the legacy URL."""
     payload: dict | None
@@ -214,7 +238,7 @@ def dispatch_slack_interaction(
         sig = _header(headers, "X-Slack-Signature")
         if not verify_slack_signature(settings.slack_signing_secret, ts, raw, sig):
             return Response(status_code=401, content="invalid signature")
-        return _handle_nurture(payload, settings, background_add=background_add)
+        return _handle_nurture(payload, settings, background_add=background_add, slack=slack)
     return _legacy_response(raw, headers, settings, http_post=http_post)
 
 
