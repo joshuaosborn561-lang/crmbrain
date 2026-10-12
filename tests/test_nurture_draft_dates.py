@@ -217,8 +217,8 @@ def test_invite_timezone_reads_edt():
 def test_card_post_persists_resolved_date_for_g7_approve(tmp_path: Path):
     settings = make_settings(nurture_post_enabled=True)
     memory = Memory(settings, data_dir=tmp_path)
-    row = _dan_row()
-    seed = compose_nurture_draft({**row, "industry": "staffing"})
+    row = {**_dan_row(), "industry": "staffing"}
+    seed = compose_nurture_draft(row)
     assert seed.valid is True
     row["draft_subject"] = seed.subject
     row["draft_body"] = seed.body
