@@ -49,13 +49,17 @@ NURTURE_MAX_PER_WEEKDAY = 5
 EMAILED_RECENTLY_DAYS = 60
 STALLED_DAYS = 30
 SNIPPET_MAX = 280
-MAX_BODY_WORDS = 110
+MAX_BODY_WORDS = 160
 JOSH_FROM = "joshua@salesglidergrowth.com"
 SMARTLEAD_CLIENT_ID = 345263
 POSITIVE_CATEGORY_IDS = frozenset({1, 2, 5, 131482})
 MEETING_ENROLL_SOURCES = frozenset({"fireflies", "calendly", "cube_acr", "allo"})
 REPLY_ONLY_SOURCES = frozenset({"smartlead", "heyreach", "rvm", "gmail_person", "gmail"})
+NURTURE_QUESTION = "Want to pick this back up?"
+_DASH_CHARS = ("—", "–", "−")
+_ELLIPSIS_RE = re.compile(r"\.\.\.|…")
 
+# Banned generic proof. Never post these; validate_draft rejects them.
 GENERAL_PROOF = (
     "$2M in pipeline last quarter, one client closed $100K in their first 3 months, "
     "averaging 14+ replies per month."
@@ -65,23 +69,40 @@ TRADES_PROOF = (
     "one closed $100K in their first 3 months."
 )
 ROOFING_PROOF = "one of our roofers closed $100K in his first 3 months with us."
-CASE_STUDIES = {
-    "roofing": ROOFING_PROOF,
-    "hvac": TRADES_PROOF,
-    "construction": TRADES_PROOF,
-    "plumbing": TRADES_PROOF,
-    "electrical": TRADES_PROOF,
-    "solar": TRADES_PROOF,
-    "trades": TRADES_PROOF,
-    "home_services": TRADES_PROOF,
+GENERIC_PROOF_LINES = frozenset({GENERAL_PROOF, TRADES_PROOF, ROOFING_PROOF})
+GENERIC_PROOF_MARKERS = (
+    "$2m in pipeline",
+    "$2M in pipeline",
+    "averaging 14+ replies",
+    "14+ replies per month",
+    "closed $100k in his first 3 months",
+    "closed $100k in their first 3 months",
+    "one of our roofers closed $100k",
+)
+
+# Josh-approved lane proof bank. HVAC / construction / unknown have no line.
+LANE_PROOF_BANK = {
+    "roofing": (
+        "A commercial roofer we work with in Dallas has had 6 property managers "
+        "raise their hand since mid-August"
+    ),
+    "msp": (
+        'Mike Trpkosh at Bolder Cyber Partners told us "In less than a week, '
+        "SalesGlider had calls booked with a PE partner who gave me two warm "
+        'introductions."'
+    ),
+    "staffing": (
+        "A culture-fit staffing firm we ran outreach for had 5 hiring companies "
+        "come back interested."
+    ),
 }
-APPROVED_PROOF_LINES = frozenset({GENERAL_PROOF, TRADES_PROOF, ROOFING_PROOF})
+CASE_STUDIES = dict(LANE_PROOF_BANK)
+APPROVED_PROOF_LINES = frozenset(LANE_PROOF_BANK.values())
 PROOF_ALIASES = {
     "recruiting": "staffing",
     "it": "msp",
     "cyber": "msp",
-    "trades": "construction",
-    "home_services": "construction",
+    "cybersecurity": "msp",
 }
 NURTURE_EXCLUDE_NAMES = frozenset({"kevin hagemoser"})
 NURTURE_EXCLUDE_EMAILS = frozenset({"kevin@kevinhagemoser.com"})
@@ -209,6 +230,40 @@ KNOWN_NURTURE_REASONS = frozenset(
 )
 _BARE_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z]{2,})+$", re.I)
 _FIT_NOTE_RE = re.compile(r"^fit\s*:\s*", re.I)
+_NOTE_LABEL_RE = re.compile(
+    r"^(?:"
+    r"last\s+real\s+conversation"
+    r"|last\s+conversation"
+    r"|last\s+call"
+    r"|last\s+touch"
+    r"|last\s+meeting"
+    r"|crm\s+note"
+    r"|hubspot\s+note"
+    r"|source\s+note"
+    r"|notes?"
+    r"|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}\s+call"
+    r")(?:\s*\([^)]*\))?\s*:\s*",
+    re.I,
+)
+_DATE_CALL_PREFIX_RE = re.compile(
+    r"^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+(\d{1,2})\s+call\s*:\s*",
+    re.I,
+)
+_ACTION_ITEM_RE = re.compile(
+    r"\bwill\s+take\b|\btake the proposal\b|\baction items?\b|\bto his advisor\b",
+    re.I,
+)
+_STAFFING_TERM_RE = re.compile(
+    r"recruit(?:ing|er|ers)?|staffing|nurse staffing|healthcare recruiting|"
+    r"healthcare rules|hiring-ready|\bgrn\b|qualified meeting|"
+    r"executive search|talent acquisition",
+    re.I,
+)
+_CARD_CLOSED_STATES = frozenset({"sent", "removed"})
 INDUSTRY_SUBJECTS = {row["key"]: row["subject"] for row in VERTICALS}
 INDUSTRY_SUBJECTS["financial_advisors"] = "Advisor update"
 
@@ -410,6 +465,15 @@ def nurture_daily_cap(settings: Settings | None = None) -> int:
 def next_weekday_midnight(now: datetime) -> datetime:
     nxt = next_weekday(_aware(now).astimezone(CDT) + timedelta(days=1))
     return datetime(nxt.year, nxt.month, nxt.day, tzinfo=CDT)
+
+
+def ticker_card_still_open(row: dict | None) -> bool:
+    """True when a Slack card is already posted and not sent or removed."""
+    row = row or {}
+    if not str(row.get("slack_ts") or "").strip():
+        return False
+    state = str(row.get("nurture_state") or "").strip().lower()
+    return state not in _CARD_CLOSED_STATES
 
 
 def ticker_fired_on(row: dict, day) -> bool:
@@ -744,9 +808,21 @@ def meeting_source_id(row: dict | None) -> str:
 
 def held_meeting_text(row: dict | None) -> str:
     """Summary / action items / transcript from that meeting. Generic deal notes do not count."""
-    if not _has_held_meeting_source(row) and not meeting_source_id(row):
-        return ""
     extra = _row_extra(row)
+    has_summary = bool(
+        (row or {}).get("summary")
+        or extra.get("summary")
+        or extra.get("fireflies_summary")
+        or extra.get("cube_summary")
+        or extra.get("meeting_summary")
+    )
+    if (
+        not _has_held_meeting_source(row)
+        and not meeting_source_id(row)
+        and not has_summary
+        and not _usable_recording_recaps(row)
+    ):
+        return ""
     parts: list[str] = []
     seen: set[str] = set()
     for key in _MEETING_TEXT_KEYS:
@@ -766,6 +842,169 @@ def held_meeting_text(row: dict | None) -> str:
         if nested_text and nested_text not in seen and not _FIT_NOTE_RE.match(nested_text):
             parts.append(nested_text)
     return "\n".join(parts)
+
+
+def _usable_recording_recaps(row: dict | None, *, match_at=None) -> list[str]:
+    """Summaries from usable Fireflies/Cube recordings. Silent/empty recaps are skipped."""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for rec in _iter_recordings(row):
+        if _recording_is_silent_or_empty(rec):
+            continue
+        if not _recording_source_is_held(rec, row):
+            continue
+        if match_at:
+            rec_at = parse_signal_at(
+                rec.get("at") or rec.get("held_at") or rec.get("occurred_at") or rec.get("fireflies_at")
+            )
+            if rec_at and not _same_chicago_day(rec_at, match_at):
+                continue
+        text = _as_meeting_text(
+            rec.get("summary") or rec.get("transcript") or rec.get("overview") or rec.get("action_items")
+        )
+        if not text or text in seen or _FIT_NOTE_RE.match(text):
+            continue
+        seen.add(text)
+        parts.append(text)
+    return parts
+
+
+_RECAP_SIGNAL_RE = re.compile(
+    r"\b(spam filter|cold calling|cold email|property managers?|qualified meeting|"
+    r"interested meeting|bottleneck|action items?|revisit|commercial roof|budget call|"
+    r"when we (?:last )?talked|on the call|hiring companies|new clients?|"
+    r"junior recruiters?|new verticals|cold outbound|ai agents?)\b",
+    re.I,
+)
+HELD_OPENER_MAX_WORDS = 48
+
+
+def _complete_recap_chunks(text: str) -> list[str]:
+    """Complete sentences or semicolon chunks. Drop a trailing cut-off fragment."""
+    raw = re.sub(r"\s+", " ", (text or "").strip())
+    if not raw:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+|;\s+", raw)
+    out: list[str] = []
+    for part in parts:
+        chunk = part.strip(" ;")
+        if not chunk:
+            continue
+        if chunk[-1] in ".!?":
+            out.append(chunk)
+            continue
+        if len(chunk.split()) >= 3 and not chunk.endswith((",", "-", "—")):
+            out.append(_ensure_sentence_period(chunk))
+    return out
+
+
+def _strip_note_labels(text: str) -> str:
+    """Drop CRM field labels. Never leave 'Last real conversation (...):' in copy."""
+    out = (text or "").strip()
+    for _ in range(4):
+        stripped = _NOTE_LABEL_RE.sub("", out).strip()
+        stripped = _FIT_NOTE_RE.sub("", stripped).strip()
+        if stripped == out:
+            break
+        out = stripped
+    return out
+
+
+def _has_note_label(text: str) -> bool:
+    raw = (text or "").strip()
+    return bool(_NOTE_LABEL_RE.match(raw))
+
+
+def _looks_like_meeting_recap(text: str, row: dict | None = None) -> bool:
+    """True for a real call recap, not a one-line CRM note or deal name."""
+    raw = _strip_note_labels(text)
+    if not raw:
+        return False
+    if _FIT_NOTE_RE.match(raw) or looks_like_deal_name(raw, row):
+        return False
+    if _looks_like_crm_note(raw, row) and not _has_note_label(text):
+        return False
+    if _has_note_label(text) and len(raw.split()) >= 6:
+        return True
+    if len(raw.split()) < 16 and not _RECAP_SIGNAL_RE.search(raw):
+        return False
+    if _RECAP_SIGNAL_RE.search(raw):
+        return True
+    return len(_complete_recap_chunks(raw)) >= 2
+
+
+def _held_call_recap(row: dict | None) -> str:
+    """Held-call recap: Fireflies/Cube summary or a last_touch_snippet recap.
+
+    Declined or moved invites never count as held calls.
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+    touch = resolve_last_touch(row)
+    match_at = touch.at if touch.kind == "call" and touch.at else None
+    recaps = _usable_recording_recaps(row, match_at=match_at)
+    if match_at and not recaps:
+        recaps = _usable_recording_recaps(row)
+    for text in (held_meeting_text(row), *recaps):
+        cleaned = _strip_note_labels(text)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        parts.append(cleaned)
+    extra = _row_extra(row)
+    for key in (
+        "last_touch_snippet",
+        "notes",
+        "hs_note",
+        "source_note",
+        "description",
+        "summary",
+    ):
+        raw = str((row or {}).get(key) or extra.get(key) or "")
+        if _FIT_NOTE_RE.match(raw.strip()):
+            continue
+        cleaned = _strip_note_labels(raw)
+        if not cleaned or cleaned in seen:
+            continue
+        if _looks_like_crm_note(cleaned, row) and not _has_note_label(raw):
+            continue
+        if _looks_like_meeting_recap(raw, row) or _has_note_label(raw):
+            seen.add(cleaned)
+            parts.append(cleaned)
+    return "\n".join(parts)
+
+
+def _looks_like_crm_note(text: str, row: dict | None = None) -> bool:
+    """True for third-person CRM notes about this person, not their own email."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _FIT_NOTE_RE.match(raw):
+        return True
+    first = _first_name(str((row or {}).get("name") or ""))
+    if first and first.lower() != "there":
+        if re.match(rf"^{re.escape(first)}\s+(was|is|said|talked|wants|wanted|mentioned)\b", raw, flags=re.I):
+            return True
+    return False
+
+
+def _email_recap(row: dict | None, snippet: str = "") -> str:
+    """This person's own inbound email. CRM notes and other-people speech do not count."""
+    row = row or {}
+    raw = snippet or str(row.get("last_touch_snippet") or "")
+    if _has_note_label(raw) or _looks_like_crm_note(raw, row) or _looks_like_meeting_recap(raw, row):
+        return ""
+    text = scoped_snippet(raw, row)
+    if not text:
+        return ""
+    if spoken_clause_is_raw_transcript(text) and not _short_recap_clause(text, row):
+        return ""
+    return text
+
+
+def has_nurture_recap(row: dict | None, snippet: str = "") -> bool:
+    """True when we have a held-call recap or this person's own email."""
+    return bool(_held_call_recap(row) or _email_recap(row, snippet))
 
 
 def extract_spoken_want(text: str) -> tuple[str, float]:
@@ -945,14 +1184,24 @@ def infer_industry_resolved(
     campaign: str = "",
     website_text: str = "",
     hs_industry: str = "",
+    recap: str = "",
+    title: str = "",
 ) -> tuple[str | None, str | None]:
-    """First matching basis: campaign → domain → website. Record the basis."""
+    """First matching basis: campaign → recap/title → domain → website. Record the basis."""
     from crmbrain.ticker import infer_industry
 
     if campaign:
         hit = infer_industry(campaign, extras={"campaign": campaign, "campaign_name": campaign})
         if hit:
             return hit["key"], "campaign"
+    if recap or title:
+        hit = infer_industry(
+            f"{title} {recap}".strip(),
+            extras={"title": title, "website_text": recap, "industry": hs_industry},
+            industry=hs_industry,
+        )
+        if hit:
+            return hit["key"], "recap"
     domain = ""
     if email and "@" in email:
         domain = email.rsplit("@", 1)[-1]
@@ -1043,7 +1292,7 @@ def snippet_mentions_other_person(snippet: str, row: dict | None = None) -> bool
 
 
 def _strip_crm_prefix(text: str) -> str:
-    out = _FIT_NOTE_RE.sub("", text or "").strip()
+    out = _strip_note_labels(text or "")
     out = re.sub(r"^source:\s*[^.]+\.\s*", "", out, flags=re.I).strip()
     if _CRM_FIELD_RE.match(out) and len(out.split()) < 8:
         return ""
@@ -1728,13 +1977,18 @@ def compose_nurture_subject(row: dict) -> str:
     original = stored_nurture_thread_subject(row)
     if stored and original:
         return nurture_subject(original, reply=True)
+    email = str(row.get("email") or "")
+    raw_company = str(row.get("company") or "").strip()
+    if raw_company and not is_bare_domain(raw_company):
+        label = raw_company if _has_internal_caps(raw_company) else title_company_name(raw_company)
+        return nurture_subject(f"{label} follow up", reply=False)
     company = resolve_nurture_company(
-        str(row.get("company") or ""),
+        raw_company,
         str(row.get("dealname") or row.get("deal_name") or ""),
-        str(row.get("email") or ""),
+        email,
         str(row.get("associated_company") or row.get("hs_company") or ""),
     )
-    if company:
+    if company and not is_domain_derived_company(company, email):
         return nurture_subject(f"{company} follow up", reply=False)
     first = _first_name(str(row.get("name") or ""))
     if first and first.lower() != "there":
@@ -1748,6 +2002,8 @@ def _airpods_line() -> str:
 
 def _ensure_sentence_period(text: str) -> str:
     out = (text or "").rstrip()
+    if out.endswith(('."', ".'", '!"', "!'", '?"', "?'")):
+        return out
     if out and out[-1] not in ".!?":
         out += "."
     return out
@@ -1758,16 +2014,91 @@ def _proof_industry_key(industry: str | None) -> str:
     if not key:
         return ""
     key = PROOF_ALIASES.get(key, key)
-    if key in CASE_STUDIES:
+    if key in LANE_PROOF_BANK:
         return key
     return ""
 
 
 def _proof_line(industry: str | None) -> str:
+    """Lane-matched bank line, or empty. Never a generic fallback."""
     key = _proof_industry_key(industry)
     if key:
-        return _ensure_sentence_period(CASE_STUDIES[key])
-    return _ensure_sentence_period(GENERAL_PROOF)
+        return _ensure_sentence_period(LANE_PROOF_BANK[key])
+    return ""
+
+
+def _lane_scan_blob(row: dict | None, recap: str = "") -> str:
+    """Industry clues from recap, company, dealname, and extra notes. Industry may be blank."""
+    row = row or {}
+    extra = _row_extra(row)
+    parts = [
+        recap,
+        row.get("last_touch_snippet"),
+        row.get("summary"),
+        row.get("company"),
+        row.get("dealname") or row.get("deal_name"),
+        row.get("associated_company") or row.get("hs_company"),
+        row.get("hs_industry"),
+        row.get("title") or row.get("jobtitle"),
+        row.get("website_text"),
+        row.get("campaign"),
+        extra.get("hs_industry"),
+        extra.get("industry"),
+        extra.get("company"),
+        extra.get("dealname") or extra.get("deal_name"),
+        extra.get("notes"),
+        extra.get("hs_note"),
+        extra.get("source_note"),
+        extra.get("description"),
+        extra.get("title") or extra.get("jobtitle"),
+        extra.get("campaign"),
+    ]
+    return " ".join(_strip_note_labels(str(part)) for part in parts if part)
+
+
+def resolve_nurture_lane(row: dict | None, recap: str = "") -> str:
+    """Bank lane from stored industry, then recap/company. Construction + roofing → roofing."""
+    row = row or {}
+    extra = _row_extra(row)
+    stored = _proof_industry_key(row.get("industry") or extra.get("industry"))
+    blob = _lane_scan_blob(row, recap)
+    roofing_hit = bool(re.search(r"\broof(?:ing|er|s)?\b|commercial roof", blob, flags=re.I))
+    raw_industry = str(row.get("industry") or extra.get("industry") or "").strip().lower()
+    raw_industry = PROOF_ALIASES.get(raw_industry, raw_industry)
+    if stored == "roofing" or (roofing_hit and raw_industry in {"", "construction", "trades", "home_services"}):
+        return "roofing"
+    if stored:
+        return stored
+    inferred, _basis = infer_industry_resolved(
+        email=str(row.get("email") or ""),
+        company=str(row.get("company") or extra.get("company") or ""),
+        campaign=str(row.get("campaign") or extra.get("campaign") or ""),
+        website_text=str(row.get("website_text") or recap or blob),
+        hs_industry=str(row.get("hs_industry") or extra.get("hs_industry") or ""),
+        recap=recap or blob,
+        title=str(row.get("title") or row.get("jobtitle") or extra.get("title") or ""),
+    )
+    key = _proof_industry_key(inferred)
+    if key == "roofing" or (roofing_hit and inferred in {"construction", "trades", None, ""}):
+        return "roofing"
+    if key:
+        return key
+    if roofing_hit:
+        return "roofing"
+    if _STAFFING_TERM_RE.search(blob):
+        return "staffing"
+    if re.search(r"\b(cyber|msp|infosec)\b", blob, flags=re.I):
+        return "msp"
+    return ""
+
+
+def _proof_block(lane: str) -> str:
+    line = _proof_line(lane)
+    if not line:
+        return ""
+    if lane == "msp":
+        return f"Here is what it looked like for a cyber firm like yours. {line}"
+    return line
 
 
 def approved_proof_texts() -> frozenset[str]:
@@ -1780,24 +2111,51 @@ def approved_proof_texts() -> frozenset[str]:
     return frozenset(out)
 
 
+def _has_generic_proof(text: str) -> bool:
+    low = (text or "").lower()
+    if not low:
+        return False
+    for line in GENERIC_PROOF_LINES:
+        if line.lower().rstrip(".") in low:
+            return True
+    for marker in GENERIC_PROOF_MARKERS:
+        if marker.lower() in low:
+            return True
+    return False
+
+
+def _strip_dash_chars(text: str) -> str:
+    out = text or ""
+    for dash in _DASH_CHARS:
+        out = out.replace(dash, ",")
+    return re.sub(r"\s+", " ", out).strip(" ,")
+
+
 def is_bare_domain(text: str) -> bool:
     return bool(_BARE_DOMAIN_RE.fullmatch((text or "").strip()))
+
+
+def _has_internal_caps(name: str) -> bool:
+    raw = (name or "").strip()
+    return bool(raw) and any(ch.isupper() for ch in raw[1:])
+
+
+def _dealname_company_tail(dealname: str) -> str:
+    if " - " not in (dealname or ""):
+        return ""
+    tail = dealname.split(" - ", 1)[-1].strip()
+    if not tail or is_bare_domain(tail) or _norm_topic(tail) in _STAGE_PIPELINE_NAMES:
+        return ""
+    return tail
 
 
 def display_company_name(company: str = "", dealname: str = "", email: str = "") -> str:
     """Real company label. Never a bare domain like wrsroof.com."""
     raw = (company or "").strip()
-    if raw and not is_bare_domain(raw) and not is_domain_derived_company(raw, email):
+    if raw and not is_bare_domain(raw) and (_has_internal_caps(raw) or not is_domain_derived_company(raw, email)):
         return raw
-    tail = ""
-    if " - " in (dealname or ""):
-        tail = dealname.split(" - ", 1)[-1].strip()
-    if (
-        tail
-        and not is_bare_domain(tail)
-        and not is_domain_derived_company(tail, email)
-        and _norm_topic(tail) not in _STAGE_PIPELINE_NAMES
-    ):
+    tail = _dealname_company_tail(dealname)
+    if tail and (_has_internal_caps(tail) or not is_domain_derived_company(tail, email)):
         return tail
     return ""
 
@@ -1937,6 +2295,9 @@ def is_domain_derived_company(company: str = "", email: str = "") -> bool:
     if not host:
         return False
     label = host.split(".")[0]
+    titled = title_company_name(label)
+    if _has_internal_caps(raw) and raw != titled:
+        return False
     return _norm_topic(raw) in {
         _norm_topic(label),
         _norm_topic(host),
@@ -1950,14 +2311,23 @@ def resolve_nurture_company(
     email: str = "",
     associated_company: str = "",
 ) -> str:
-    """Contact company → associated HubSpot company → cleaned email domain."""
+    """Keep stored brand caps (CyberGuard360, TalentUnify). Domain title-case is last."""
+    for candidate in (
+        (company or "").strip(),
+        _dealname_company_tail(dealname),
+        (associated_company or "").strip(),
+    ):
+        if candidate and not is_bare_domain(candidate) and _has_internal_caps(candidate):
+            return candidate
     raw = display_company_name(company, dealname, email)
     if raw:
+        if _has_internal_caps(raw):
+            return raw
         return title_company_name(raw)
     assoc = (associated_company or "").strip()
     if assoc and not is_bare_domain(assoc):
-        if not is_domain_derived_company(assoc, email):
-            return title_company_name(assoc)
+        if _has_internal_caps(assoc):
+            return assoc
         return title_company_name(assoc)
     domain_label = company_from_email_domain(email)
     if domain_label:
@@ -2105,18 +2475,202 @@ def capitalize_body_lines(body: str) -> str:
     return "\n".join(out)
 
 
+def _short_recap_clause(text: str, row: dict | None = None) -> str:
+    """Complete second-person clause from recap or email. Never a mid-sentence cut."""
+    clean = _strip_poc_phrases(_strip_crm_prefix(snippet_of(text or "")))
+    clean = _strip_dash_chars(clean)
+    if not clean or has_free_poc_offer(clean):
+        return ""
+    spoken, confidence = extract_spoken_want(clean)
+    if confidence >= WANT_CONFIDENCE_MIN and spoken and not spoken_clause_is_raw_transcript(spoken):
+        return spoken
+    chunks = _complete_recap_chunks(clean)
+    if not chunks:
+        return ""
+    sent = re.sub(r"^(hey|hi|hello)\s+\w+,?\s*", "", chunks[0], flags=re.I)
+    sent = _strip_poc_phrases(sent).rstrip(".!?")
+    if not sent or spoken_clause_is_raw_transcript(sent):
+        return ""
+    if not is_usable_speech_snippet(sent, row):
+        return ""
+    return sent
+
+
+def _snippet_date_phrase(row: dict | None) -> str:
+    raw = str((row or {}).get("last_touch_snippet") or "")
+    match = _DATE_CALL_PREFIX_RE.match(raw)
+    if not match:
+        return ""
+    month = match.group(1)[:3].title()
+    return f"{month} {int(match.group(2))}"
+
+
+def _talked_when(row: dict | None) -> str:
+    phrase = _call_date_phrase(row) or _snippet_date_phrase(row)
+    return f"on {phrase}" if phrase else ""
+
+
+def _second_personize(text: str, first: str) -> str:
+    out = text or ""
+    if first and first.lower() != "there":
+        out = re.sub(rf"\b{re.escape(first)}\s+said\b", "you said", out, flags=re.I)
+        out = re.sub(rf"\b{re.escape(first)}\s+was\b", "you were", out, flags=re.I)
+        out = re.sub(rf"\b{re.escape(first)}\s+wants\b", "you want", out, flags=re.I)
+        out = re.sub(rf"\b{re.escape(first)}\s+wanted\b", "you wanted", out, flags=re.I)
+        out = re.sub(rf"\b{re.escape(first)}'s\b", "your", out, flags=re.I)
+    out = re.sub(r"\b[Hh]e said\b", "you said", out)
+    out = re.sub(r"\b[Ss]he said\b", "you said", out)
+    out = re.sub(r"\b[Tt]hey said\b", "you said", out)
+    out = re.sub(r"^wants\s+to\b", "you want to", out, flags=re.I)
+    out = re.sub(r"^wants\b", "you want", out, flags=re.I)
+    out = re.sub(r"^needed\b", "you needed", out, flags=re.I)
+    out = re.sub(r"^needs\b", "you need", out, flags=re.I)
+    out = re.sub(r"^prefers\b", "you prefer", out, flags=re.I)
+    out = re.sub(r"^adding\b", "you are adding", out, flags=re.I)
+    out = re.sub(r"^reviewing\b", "you are reviewing", out, flags=re.I)
+    out = re.sub(r"^team\b", "your team", out, flags=re.I)
+    return out
+
+
+def _greeting_and_para(first: str, paragraph: str) -> str:
+    para = (paragraph or "").strip()
+    return f"Hey {first},\n\n{para}" if para else f"Hey {first},"
+
+
+def _held_clause_is_unusable(text: str) -> bool:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if not clean:
+        return True
+    if _has_note_label(clean) or _NOTE_LABEL_RE.search(clean):
+        return True
+    if _FIT_NOTE_RE.match(clean) or _ACTION_ITEM_RE.search(clean):
+        return True
+    if _TRANSCRIPT_FIRST_PERSON_RE.search(clean):
+        return True
+    return False
+
+
+def _voice_recap_clause(chunk: str, first: str) -> str:
+    """Second-person clause that keeps the recap's own words."""
+    sent = _second_personize(_strip_crm_prefix(chunk), first)
+    sent = _strip_dash_chars(sent).strip(" .")
+    if not sent or _held_clause_is_unusable(sent):
+        return ""
+    if re.match(r"^(you |your |when we )", sent, flags=re.I):
+        return _ensure_sentence_period(sent)
+    if re.search(r"\b(is|are|was|were|closes|underperforming)\b", sent, flags=re.I):
+        return _ensure_sentence_period(f"you said {sent[0].lower() + sent[1:]}")
+    return _ensure_sentence_period(f"you mentioned {sent}")
+
+
+def _recap_sentences(recap: str, first: str) -> list[str]:
+    rewritten: list[str] = []
+    for chunk in _complete_recap_chunks(_strip_note_labels(recap))[:3]:
+        sent = _voice_recap_clause(chunk, first)
+        if not sent or _held_clause_is_unusable(sent.rstrip(".!?")):
+            continue
+        if len(sent.split()) > HELD_OPENER_MAX_WORDS:
+            continue
+        rewritten.append(sent)
+    return rewritten
+
+
+def _spoken_want_opener(first: str, row: dict | None) -> str:
+    spoken, _source_id = grounded_spoken_want(row)
+    if not spoken:
+        return ""
+    when = _talked_when(row)
+    clause = spoken if spoken[0].islower() else spoken[0].lower() + spoken[1:]
+    if when:
+        return _greeting_and_para(first, f"When we talked {when} {clause}.")
+    return _greeting_and_para(first, f"{spoken[0].upper() + spoken[1:]}.")
+
+
+def _natural_held_opener(first: str, recap: str, row: dict | None) -> str:
+    """Complete-sentence opener from a held-call recap. Keep the recap's words."""
+    row = row or {}
+    recap = _strip_note_labels(recap)
+    when = _talked_when(row)
+    lead = f"When we talked {when} " if when else ""
+    rewritten = _recap_sentences(recap, first)
+    if rewritten:
+        first_sent = rewritten[0]
+        if lead and not first_sent.lower().startswith("when we"):
+            rest = first_sent[0].lower() + first_sent[1:] if first_sent[0].isupper() else first_sent
+            first_sent = f"{lead}{rest}"
+        rest = [sent[0].upper() + sent[1:] if sent else sent for sent in rewritten[1:]]
+        para = " ".join([first_sent, *rest])
+        return _greeting_and_para(first, para)
+    spoken = _spoken_want_opener(first, row)
+    if spoken:
+        return spoken
+    if recap and not _held_clause_is_unusable(recap):
+        clause = _voice_recap_clause(recap, first)
+        if clause:
+            rest = clause[0].lower() + clause[1:] if clause[0].isupper() else clause
+            para = f"{lead}{rest}" if lead else clause
+            return _greeting_and_para(first, para)
+    if when:
+        return f"Hey {first}, following up on our {when[3:]} call."
+    return f"Hey {first}, wanted to circle back."
+
+
+def _question_from_recap(recap: str, row: dict | None = None) -> str:
+    """Tailor the question to the recap. Fallback is the fixed pick-this-back-up line."""
+    del row
+    low = (recap or "").lower()
+    if re.search(r"\bsteve\b", low):
+        return "Where did you and Steve land?"
+    if re.search(r"\b(new clients?|finding clients|bottleneck)\b", low):
+        return "Is finding new clients still the main thing on your plate?"
+    if re.search(r"\b(new verticals?|junior recruiters?)\b", low):
+        return "Did you land on a direction for those new verticals?"
+    if "february" in low and re.search(r"\bdanny\b", low):
+        return "Still on track to revisit this with Danny in February?"
+    if "february" in low:
+        return "Still thinking February?"
+    return NURTURE_QUESTION
+
+
+def _snippet_recap(row: dict | None, snippet: str = "") -> str:
+    """Ticker last-touch recap after stripping date/label prefixes. Fit notes do not count."""
+    raw = snippet or str((row or {}).get("last_touch_snippet") or "")
+    if _FIT_NOTE_RE.match(raw.strip()):
+        return ""
+    cleaned = _strip_note_labels(raw)
+    if not cleaned:
+        return ""
+    if _looks_like_crm_note(cleaned, row) and not _has_note_label(raw) and not _DATE_CALL_PREFIX_RE.match(raw):
+        return ""
+    if _has_note_label(raw) or _DATE_CALL_PREFIX_RE.match(raw) or _looks_like_meeting_recap(raw, row):
+        return cleaned
+    return ""
+
+
 def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict | None = None) -> str:
     first = _first_name(first)
     row = row or {}
-    spoken, _source_id = grounded_spoken_want(row)
-    del snippet
+    del campaign
     met, booked = _row_meeting_flags(row)
     date_phrase = _call_date_phrase(row)
+    snippet_recap = _snippet_recap(row, snippet)
+    if snippet_recap:
+        return _natural_held_opener(first, snippet_recap, row)
+    spoken = _spoken_want_opener(first, row)
+    if spoken:
+        return spoken
+    email = _email_recap(row, snippet)
+    if email:
+        clause = _short_recap_clause(email, row)
+        if clause:
+            low = clause.lower()
+            if low.startswith("you "):
+                para = _ensure_sentence_period(clause[0].upper() + clause[1:])
+            else:
+                para = _ensure_sentence_period(f"You mentioned {clause}")
+            return _greeting_and_para(first, para)
+        return f"Hey {first},\n\nWanted to follow up on your last note."
     if met:
-        if spoken:
-            if date_phrase:
-                return f"Hey {first}, on our {date_phrase} call {spoken}."
-            return f"Hey {first}, wanted to circle back. {spoken[0].upper() + spoken[1:]}."
         if date_phrase:
             return f"Hey {first}, following up on our {date_phrase} call."
         return f"Hey {first}, wanted to circle back."
@@ -2124,17 +2678,7 @@ def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict
         if date_phrase:
             return f"Hey {first}, circling back on the {date_phrase} meeting we had booked."
         return f"Hey {first}, circling back on the call we had set up."
-    topic = ""
-    if campaign and not looks_like_deal_name(campaign, row) and not is_banned_opener_topic(campaign, row):
-        topic = re.sub(r"salesglider\s*", "", campaign, flags=re.I).strip() or ""
-    if (
-        topic
-        and not is_banned_opener_topic(topic, row)
-        and not snippet_mentions_other_person(topic, row)
-        and not _FAMILY_RE.search(topic)
-    ):
-        return f"Hey {first}, you replied a while back when we reached out about {topic}."
-    return f"Hey {first}, it's been a few months since we connected."
+    return f"Hey {first},"
 
 
 def _numbers_in(text: str) -> set[str]:
@@ -2273,40 +2817,34 @@ def _gmail_kind_label(thread_kind: str) -> str:
 
 
 def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureDraft:
-    """Spec draft: opener from snippet, industry proof, meeting guarantee, Josh Osborn."""
+    """Josh-approved draft: recap opener, lane proof, short question, guarantee, Josh Osborn."""
+    del airpods
+    row = {k: v for k, v in (row or {}).items() if k not in {"draft_body", "draft_subject"}}
     name = str(row.get("name") or "")
     first = _first_name(name)
+    email = str(row.get("email") or "")
     company = resolve_nurture_company(
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
-        str(row.get("email") or ""),
-        str(row.get("associated_company") or ""),
+        email,
+        str(row.get("associated_company") or row.get("hs_company") or ""),
     )
-    label = company
-    if label:
-        row = {**row, "company": label}
-    industry = (row.get("industry") or "") or None
+    if company and not is_domain_derived_company(company, email):
+        row = {**row, "company": company}
     campaign = str(row.get("campaign") or "")
-    if not industry:
-        industry, _basis = infer_industry_resolved(
-            email=str(row.get("email") or ""),
-            company=str(row.get("company") or ""),
-            campaign=campaign,
-            website_text=str(row.get("website_text") or ""),
-            hs_industry=str(row.get("hs_industry") or ""),
-        )
     raw_snippet = str(row.get("last_touch_snippet") or "")
     snippet = scoped_snippet(raw_snippet, row)
-    use_airpods = AIRPODS_OFFER_LIVE if airpods is None else airpods
+    recap = _held_call_recap(row) or _email_recap(row, raw_snippet)
+    lane = resolve_nurture_lane(row, recap=recap)
     spoken, spoken_source_id = grounded_spoken_want(row)
-    opener = _no_dashes(_opener_from_snippet(first, raw_snippet, campaign, row))
-    proof = _proof_line(industry)
-    cta = MEETING_GUARANTEE
-    if use_airpods:
-        cta = f"{cta} {_airpods_line()}"
-    body = capitalize_body_lines(
-        _no_dashes(f"{opener}\n\n{proof}\n\n{cta}\n\nWorth a look?\n\nJosh Osborn")
-    )
+    opener = _opener_from_snippet(first, raw_snippet, campaign, row)
+    proof = _proof_block(lane)
+    question = _question_from_recap(recap, row)
+    parts = [opener]
+    if proof:
+        parts.append(proof)
+    parts.extend([question, MEETING_GUARANTEE, "Josh Osborn"])
+    body = capitalize_body_lines("\n\n".join(part for part in parts if part))
     subject = compose_nurture_subject({**row, "last_touch_snippet": snippet})
     draft = NurtureDraft(
         subject=subject,
@@ -2314,22 +2852,46 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
         spoken_source_id=spoken_source_id if spoken else "",
         meeting_source_id=meeting_source_id(row),
     )
-    return validate_draft(draft, row)
+    checked = validate_draft(draft, row)
+    if checked.valid and not has_nurture_recap(row, raw_snippet):
+        checked.valid = False
+        checked.reject_reason = "no_recap"
+        return checked
+    if checked.valid and not proof:
+        checked.valid = False
+        checked.reject_reason = "no_lane_proof"
+        return checked
+    return checked
 
 
 def validate_draft(draft: NurtureDraft, row: dict | None = None) -> NurtureDraft:
-    body = capitalize_body_lines(_no_dashes(draft.body))
-    subject = _no_dashes(draft.subject)
-    draft.body = body
-    draft.subject = subject
-    if has_free_poc_offer(body) or has_free_poc_offer(subject):
+    raw_body = draft.body or ""
+    raw_subject = draft.subject or ""
+    blob = f"{raw_body}\n{raw_subject}"
+    if has_free_poc_offer(raw_body) or has_free_poc_offer(raw_subject):
         draft.valid = False
         draft.reject_reason = "free_poc"
         return draft
-    if any(d in body or d in subject for d in ("—", "–", "−")):
+    if any(dash in blob for dash in _DASH_CHARS):
         draft.valid = False
         draft.reject_reason = "dash"
         return draft
+    if _ELLIPSIS_RE.search(blob):
+        draft.valid = False
+        draft.reject_reason = "ellipsis"
+        return draft
+    if "airpods" in blob.lower():
+        draft.valid = False
+        draft.reject_reason = "airpods"
+        return draft
+    if _has_generic_proof(blob):
+        draft.valid = False
+        draft.reject_reason = "generic_proof"
+        return draft
+    body = capitalize_body_lines(raw_body)
+    subject = raw_subject
+    draft.body = body
+    draft.subject = subject
     words = [w for w in re.split(r"\s+", body.strip()) if w]
     if len(words) > MAX_BODY_WORDS:
         draft.valid = False
@@ -2353,11 +2915,13 @@ def validate_draft(draft: NurtureDraft, row: dict | None = None) -> NurtureDraft
         draft.reject_reason = "no_identity"
         return draft
     allowed = _numbers_in(str((row or {}).get("last_touch_snippet") or ""))
-    allowed |= _numbers_in(GENERAL_PROOF)
-    allowed |= _numbers_in(" ".join(CASE_STUDIES.values()))
+    allowed |= _numbers_in(held_meeting_text(row))
+    allowed |= _numbers_in(_held_call_recap(row))
+    allowed |= _numbers_in(str((row or {}).get("summary") or ""))
+    allowed |= _numbers_in(" ".join(LANE_PROOF_BANK.values()))
     allowed |= _allowed_meeting_date_numbers(row)
-    opener = body.split("\n", 1)[0]
-    extra_nums = _numbers_in(opener) - allowed
+    recap_block = "\n\n".join((body or "").split("\n\n")[:2])
+    extra_nums = _numbers_in(recap_block) - allowed
     if extra_nums:
         draft.valid = False
         draft.reject_reason = "invented_number"
@@ -2365,6 +2929,19 @@ def validate_draft(draft: NurtureDraft, row: dict | None = None) -> NurtureDraft
     draft.valid = True
     draft.reject_reason = ""
     return draft
+
+
+def stored_valid_nurture_draft(row: dict | None) -> NurtureDraft | None:
+    """Return the stored ticker draft when it already passes validate_draft."""
+    row = row or {}
+    body = str(row.get("draft_body") or "").strip()
+    if not body:
+        return None
+    subject = str(row.get("draft_subject") or "").strip() or compose_nurture_subject(row)
+    checked = validate_draft(NurtureDraft(subject=subject, body=body), row)
+    if checked.valid:
+        return checked
+    return None
 
 
 def nurture_row_from_candidate(c: TickerCandidate, now: datetime | None = None) -> dict:
@@ -2925,6 +3502,9 @@ def fire_due_rows(
                 memory.reschedule_ticker(_key(rest), next_day)
                 report.ticker_skipped.append(f"{_label(rest)} rolled")
             break
+        if ticker_card_still_open(row):
+            report.ticker_skipped.append(f"{_label(row)} card_open")
+            continue
         if deal_is_locked({"properties": {"crmbrain_locked": row.get("crmbrain_locked")}}):
             memory.reschedule_ticker(_key(row), next_day)
             report.ticker_skipped.append(f"{_label(row)} locked")
@@ -2963,7 +3543,18 @@ def fire_due_rows(
             booked=bool(row.get("booked") or (row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
             met=bool(row.get("met") or (row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
         )
-        row["last_touch_snippet"] = scoped_snippet(str(row.get("last_touch_snippet") or ""), row)
+        if not str(row.get("company") or "").strip() and hs is not None:
+            name_getter = getattr(hs, "associated_company_name", None)
+            if callable(name_getter):
+                assoc = str(
+                    name_getter(
+                        contact_id=str(row.get("hs_contact_id") or ""),
+                        deal_id=str(row.get("hs_deal_id") or ""),
+                    )
+                    or ""
+                ).strip()
+                if assoc:
+                    row["associated_company"] = assoc
         draft = compose_nurture_draft(row)
         if not draft.valid:
             memory.reschedule_ticker(_key(row), next_day)

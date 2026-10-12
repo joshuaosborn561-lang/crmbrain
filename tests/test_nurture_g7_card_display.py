@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from crmbrain.nurture import (
-    GENERAL_PROOF,
+    LANE_PROOF_BANK,
     MEETING_GUARANTEE,
+    NURTURE_QUESTION,
     NurtureDraft,
     build_nurture_card,
     compose_nurture_draft,
@@ -32,17 +33,27 @@ def test_george_apr_30_empty_snippet_is_not_invented_number():
     draft = compose_nurture_draft(_george_row())
     opener = draft.body.split("\n", 1)[0]
     assert "Apr 30" in opener
-    assert draft.valid is True
-    assert draft.reject_reason == ""
+    assert draft.valid is False
+    assert draft.reject_reason in {"no_recap", "no_lane_proof"}
+    body = (
+        "Hey George, following up on our Apr 30 call.\n\n"
+        f"{LANE_PROOF_BANK['roofing']}.\n\n"
+        f"{NURTURE_QUESTION}\n\n"
+        f"{MEETING_GUARANTEE}\n\n"
+        "Josh Osborn"
+    )
+    ok = validate_draft(NurtureDraft(subject="George follow up", body=body), _george_row())
+    assert ok.valid is True
+    assert ok.reject_reason == ""
 
 
 def test_random_47_meetings_claim_is_still_rejected():
     row = _george_row()
     body = (
         "Hey George, circling back on 47 meetings.\n\n"
-        f"{GENERAL_PROOF}\n\n"
+        f"{LANE_PROOF_BANK['roofing']}.\n\n"
+        f"{NURTURE_QUESTION}\n\n"
         f"{MEETING_GUARANTEE}\n\n"
-        "Worth a look?\n\n"
         "Josh Osborn"
     )
     draft = validate_draft(NurtureDraft(subject="George", body=body), row)

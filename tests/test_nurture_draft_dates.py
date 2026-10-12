@@ -126,28 +126,30 @@ def _justin_row(**extra) -> dict:
 
 def test_dan_mcgurl_held_sep_1_not_declined_sep_4():
     draft = compose_nurture_draft(_dan_row())
-    opener = draft.body.split("\n", 1)[0].lower()
+    opener = draft.body.lower()
     touch = resolve_last_touch(_dan_row())
     assert touch.kind == "call"
     assert touch.phrase == "Sep 1"
     assert "sep 1" in opener
-    assert "following up on our sep 1 call" in opener
+    assert "when we talked" in opener or "following up on our sep 1" in opener
+    assert "meeting we had booked" not in opener
     assert "sep 4" not in opener
     assert "aug 18" not in opener
-    assert draft.valid is True
+    assert draft.reject_reason in {"", "no_lane_proof"}
 
 
 def test_justin_bechtel_held_jul_30_skips_moved_invite_and_silent_recap():
     draft = compose_nurture_draft(_justin_row())
-    opener = draft.body.split("\n", 1)[0].lower()
+    opener = draft.body.lower()
     touch = resolve_last_touch(_justin_row())
     assert touch.kind == "call"
     assert touch.phrase == "Jul 30"
     assert "jul 30" in opener
-    assert "following up on our jul 30 call" in opener
+    assert "when we talked" in opener or "following up on our jul 30" in opener
+    assert "meeting we had booked" not in opener
     assert "aug 4" not in opener
     assert "aug 14" not in opener
-    assert draft.valid is True
+    assert draft.reject_reason in {"", "no_lane_proof"}
 
 
 def test_header_date_equals_body_date():
@@ -155,7 +157,7 @@ def test_header_date_equals_body_date():
         draft = compose_nurture_draft(row)
         header = last_touch_line(row)
         phrase = resolve_last_touch(row).phrase
-        opener = draft.body.split("\n", 1)[0]
+        opener = draft.body
         card = build_nurture_card(row, draft)
         context = card["blocks"][1]["elements"][0]["text"]
         assert phrase
@@ -215,7 +217,11 @@ def test_invite_timezone_reads_edt():
 def test_card_post_persists_resolved_date_for_g7_approve(tmp_path: Path):
     settings = make_settings(nurture_post_enabled=True)
     memory = Memory(settings, data_dir=tmp_path)
-    row = _dan_row()
+    row = {**_dan_row(), "industry": "staffing"}
+    seed = compose_nurture_draft(row)
+    assert seed.valid is True
+    row["draft_subject"] = seed.subject
+    row["draft_body"] = seed.body
     memory._local["ticker"] = [row]
     report = CycleReport()
     cards = fire_due_rows(

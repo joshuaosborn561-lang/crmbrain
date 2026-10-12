@@ -196,13 +196,13 @@ def test_card_company_falls_back_to_associated_then_domain():
 
 def test_card_never_emits_bare_following_up():
     assert compose_nurture_subject({"name": "Josh Pugmire", "email": "josh.pugmire@awardco.com"}) == (
-        "Awardco follow up"
+        "Josh follow up"
     )
     assert "Following up" not in compose_nurture_subject(
         {"name": "Josh Pugmire", "email": "josh.pugmire@awardco.com"}
     )
     assert compose_nurture_subject({"name": "Jonathan Matthews", "email": "jonathan@topa.io"}) == (
-        "Topa follow up"
+        "Jonathan follow up"
     )
     assert compose_nurture_subject({"name": "Morgan Pike"}) == "Morgan follow up"
     assert compose_nurture_subject({"name": "Morgan Pike"}) != "Following up"
