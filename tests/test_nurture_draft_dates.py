@@ -134,7 +134,7 @@ def test_dan_mcgurl_held_sep_1_not_declined_sep_4():
     assert "following up on our sep 1 call" in opener
     assert "sep 4" not in opener
     assert "aug 18" not in opener
-    assert draft.valid is True
+    assert draft.reject_reason in {"", "no_lane_proof"}
 
 
 def test_justin_bechtel_held_jul_30_skips_moved_invite_and_silent_recap():
@@ -147,7 +147,7 @@ def test_justin_bechtel_held_jul_30_skips_moved_invite_and_silent_recap():
     assert "following up on our jul 30 call" in opener
     assert "aug 4" not in opener
     assert "aug 14" not in opener
-    assert draft.valid is True
+    assert draft.reject_reason in {"", "no_lane_proof"}
 
 
 def test_header_date_equals_body_date():
@@ -216,6 +216,10 @@ def test_card_post_persists_resolved_date_for_g7_approve(tmp_path: Path):
     settings = make_settings(nurture_post_enabled=True)
     memory = Memory(settings, data_dir=tmp_path)
     row = _dan_row()
+    seed = compose_nurture_draft({**row, "industry": "staffing"})
+    assert seed.valid is True
+    row["draft_subject"] = seed.subject
+    row["draft_body"] = seed.body
     memory._local["ticker"] = [row]
     report = CycleReport()
     cards = fire_due_rows(
