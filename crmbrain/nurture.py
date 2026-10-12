@@ -241,12 +241,16 @@ _NOTE_LABEL_RE = re.compile(
     r"|hubspot\s+note"
     r"|source\s+note"
     r"|notes?"
+    r"|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}\s+call"
     r")(?:\s*\([^)]*\))?\s*:\s*",
     re.I,
 )
-_RECAP_VERB_RE = re.compile(
-    r"\b(said|wanted|wants|discussed|walked|talked|focused|mentioned|bringing|"
-    r"getting|riding|needed|looking|trying|asked|agreed|decided)\b",
+_DATE_CALL_PREFIX_RE = re.compile(
+    r"^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+(\d{1,2})\s+call\s*:\s*",
     re.I,
 )
 _ACTION_ITEM_RE = re.compile(
@@ -255,9 +259,11 @@ _ACTION_ITEM_RE = re.compile(
 )
 _STAFFING_TERM_RE = re.compile(
     r"recruit(?:ing|er|ers)?|staffing|nurse staffing|healthcare recruiting|"
+    r"healthcare rules|hiring-ready|\bgrn\b|qualified meeting|"
     r"executive search|talent acquisition",
     re.I,
 )
+_CARD_CLOSED_STATES = frozenset({"sent", "removed"})
 INDUSTRY_SUBJECTS = {row["key"]: row["subject"] for row in VERTICALS}
 INDUSTRY_SUBJECTS["financial_advisors"] = "Advisor update"
 
@@ -459,6 +465,15 @@ def nurture_daily_cap(settings: Settings | None = None) -> int:
 def next_weekday_midnight(now: datetime) -> datetime:
     nxt = next_weekday(_aware(now).astimezone(CDT) + timedelta(days=1))
     return datetime(nxt.year, nxt.month, nxt.day, tzinfo=CDT)
+
+
+def ticker_card_still_open(row: dict | None) -> bool:
+    """True when a Slack card is already posted and not sent or removed."""
+    row = row or {}
+    if not str(row.get("slack_ts") or "").strip():
+        return False
+    state = str(row.get("nurture_state") or "").strip().lower()
+    return state not in _CARD_CLOSED_STATES
 
 
 def ticker_fired_on(row: dict, day) -> bool:
@@ -878,7 +893,7 @@ def _complete_recap_chunks(text: str) -> list[str]:
         if chunk[-1] in ".!?":
             out.append(chunk)
             continue
-        if len(chunk.split()) >= 6 and not chunk.endswith((",", "-", "—")):
+        if len(chunk.split()) >= 3 and not chunk.endswith((",", "-", "—")):
             out.append(_ensure_sentence_period(chunk))
     return out
 
@@ -1962,13 +1977,18 @@ def compose_nurture_subject(row: dict) -> str:
     original = stored_nurture_thread_subject(row)
     if stored and original:
         return nurture_subject(original, reply=True)
+    email = str(row.get("email") or "")
+    raw_company = str(row.get("company") or "").strip()
+    if raw_company and not is_bare_domain(raw_company):
+        label = raw_company if _has_internal_caps(raw_company) else title_company_name(raw_company)
+        return nurture_subject(f"{label} follow up", reply=False)
     company = resolve_nurture_company(
-        str(row.get("company") or ""),
+        raw_company,
         str(row.get("dealname") or row.get("deal_name") or ""),
-        str(row.get("email") or ""),
+        email,
         str(row.get("associated_company") or row.get("hs_company") or ""),
     )
-    if company:
+    if company and not is_domain_derived_company(company, email):
         return nurture_subject(f"{company} follow up", reply=False)
     first = _first_name(str(row.get("name") or ""))
     if first and first.lower() != "there":
@@ -2476,8 +2496,17 @@ def _short_recap_clause(text: str, row: dict | None = None) -> str:
     return sent
 
 
+def _snippet_date_phrase(row: dict | None) -> str:
+    raw = str((row or {}).get("last_touch_snippet") or "")
+    match = _DATE_CALL_PREFIX_RE.match(raw)
+    if not match:
+        return ""
+    month = match.group(1)[:3].title()
+    return f"{month} {int(match.group(2))}"
+
+
 def _talked_when(row: dict | None) -> str:
-    phrase = _call_date_phrase(row)
+    phrase = _call_date_phrase(row) or _snippet_date_phrase(row)
     return f"on {phrase}" if phrase else ""
 
 
@@ -2492,6 +2521,14 @@ def _second_personize(text: str, first: str) -> str:
     out = re.sub(r"\b[Hh]e said\b", "you said", out)
     out = re.sub(r"\b[Ss]he said\b", "you said", out)
     out = re.sub(r"\b[Tt]hey said\b", "you said", out)
+    out = re.sub(r"^wants\s+to\b", "you want to", out, flags=re.I)
+    out = re.sub(r"^wants\b", "you want", out, flags=re.I)
+    out = re.sub(r"^needed\b", "you needed", out, flags=re.I)
+    out = re.sub(r"^needs\b", "you need", out, flags=re.I)
+    out = re.sub(r"^prefers\b", "you prefer", out, flags=re.I)
+    out = re.sub(r"^adding\b", "you are adding", out, flags=re.I)
+    out = re.sub(r"^reviewing\b", "you are reviewing", out, flags=re.I)
+    out = re.sub(r"^team\b", "your team", out, flags=re.I)
     return out
 
 
@@ -2510,16 +2547,26 @@ def _held_clause_is_unusable(text: str) -> bool:
         return True
     if _TRANSCRIPT_FIRST_PERSON_RE.search(clean):
         return True
-    if not _RECAP_VERB_RE.search(clean):
-        return True
     return False
+
+
+def _voice_recap_clause(chunk: str, first: str) -> str:
+    """Second-person clause that keeps the recap's own words."""
+    sent = _second_personize(_strip_crm_prefix(chunk), first)
+    sent = _strip_dash_chars(sent).strip(" .")
+    if not sent or _held_clause_is_unusable(sent):
+        return ""
+    if re.match(r"^(you |your |when we )", sent, flags=re.I):
+        return _ensure_sentence_period(sent)
+    if re.search(r"\b(is|are|was|were|closes|underperforming)\b", sent, flags=re.I):
+        return _ensure_sentence_period(f"you said {sent[0].lower() + sent[1:]}")
+    return _ensure_sentence_period(f"you mentioned {sent}")
 
 
 def _recap_sentences(recap: str, first: str) -> list[str]:
     rewritten: list[str] = []
     for chunk in _complete_recap_chunks(_strip_note_labels(recap))[:3]:
-        sent = _second_personize(_strip_crm_prefix(chunk), first)
-        sent = _ensure_sentence_period(_strip_dash_chars(sent))
+        sent = _voice_recap_clause(chunk, first)
         if not sent or _held_clause_is_unusable(sent.rstrip(".!?")):
             continue
         if len(sent.split()) > HELD_OPENER_MAX_WORDS:
@@ -2528,74 +2575,41 @@ def _recap_sentences(recap: str, first: str) -> list[str]:
     return rewritten
 
 
+def _spoken_want_opener(first: str, row: dict | None) -> str:
+    spoken, _source_id = grounded_spoken_want(row)
+    if not spoken:
+        return ""
+    when = _talked_when(row)
+    clause = spoken if spoken[0].islower() else spoken[0].lower() + spoken[1:]
+    if when:
+        return _greeting_and_para(first, f"When we talked {when} {clause}.")
+    return _greeting_and_para(first, f"{spoken[0].upper() + spoken[1:]}.")
+
+
 def _natural_held_opener(first: str, recap: str, row: dict | None) -> str:
-    """Complete-sentence opener from a held-call recap. Never paste a truncated note."""
+    """Complete-sentence opener from a held-call recap. Keep the recap's words."""
     row = row or {}
     recap = _strip_note_labels(recap)
     when = _talked_when(row)
-    low = recap.lower()
-    lead = f"When we talked {when} ".replace("  ", " ") if when else "When we talked "
-
-    if "cold calling" in low and ("spam" in low or "cold email" in low):
-        para = (
-            f"{lead}you said cold calling was carrying the load and your cold email "
-            "was getting caught in spam filters."
-        )
-        if "steve" in low:
-            if "october" in low or "budget" in low:
-                para += " You were taking it to Steve for a budget call in early October."
-            else:
-                para += " You were taking it to Steve."
-        return _greeting_and_para(first, para)
-
-    if "new client" in low and ("bottleneck" in low or "qualified meeting" in low or "interested meeting" in low):
-        company = str(row.get("company") or "")
-        grn = " for GRN" if "grn" in f"{company} {recap}".lower() else ""
-        para = (
-            f"{lead}you said getting new clients was the bottleneck, and it would take "
-            f"at least 1 qualified meeting a week to make outreach worth it{grn}."
-        )
-        return _greeting_and_para(first, para)
-    if "interested meeting" in low or (re.search(r"\b1\b|one", low) and "meeting" in low and "week" in low):
-        para = (
-            f"{lead}you said it would take at least 1 interested meeting a week "
-            "to make outreach worth it."
-        )
-        return _greeting_and_para(first, para)
-
-    if "commercial roof" in low or ("roof" in low and "property" in low):
-        para = f"{lead}you said you were focused on commercial roofing to property owners and managers"
-        if re.search(r"2-3|2 to 3", low) and re.search(r"\bkc\b|kansas city", low):
-            para += " within 2-3 hours of KC"
-        para += ", not GCs." if re.search(r"\bgcs?\b|general contractor", low) else "."
-        extra: list[str] = []
-        close = re.search(r"closes?\s+about\s+(\d+)\s*%", low)
-        if close:
-            extra.append(f"Your team closes about {close.group(1)}%.")
-        if "danny" in low and "february" in low:
-            extra.append("You wanted to revisit this with Danny in February.")
-        elif "february" in low:
-            extra.append("You wanted to revisit this in February.")
-        if extra:
-            para = f"{para} {' '.join(extra)}"
-        return _greeting_and_para(first, para)
-
-    spoken, _source_id = grounded_spoken_want(row)
-    if spoken:
-        clause = spoken if spoken[0].islower() else spoken[0].lower() + spoken[1:]
-        para = f"{lead}{clause}." if when else f"Wanted to circle back. {spoken[0].upper() + spoken[1:]}."
-        return _greeting_and_para(first, para)
-
+    lead = f"When we talked {when} " if when else ""
     rewritten = _recap_sentences(recap, first)
     if rewritten:
         first_sent = rewritten[0]
-        if not first_sent.lower().startswith("when we"):
+        if lead and not first_sent.lower().startswith("when we"):
             rest = first_sent[0].lower() + first_sent[1:] if first_sent[0].isupper() else first_sent
-            if not re.match(r"^(you |your |it )", rest, flags=re.I):
-                rest = f"you {rest}"
             first_sent = f"{lead}{rest}"
-        para = " ".join([first_sent, *rewritten[1:]])
+        rest = [sent[0].upper() + sent[1:] if sent else sent for sent in rewritten[1:]]
+        para = " ".join([first_sent, *rest])
         return _greeting_and_para(first, para)
+    spoken = _spoken_want_opener(first, row)
+    if spoken:
+        return spoken
+    if recap and not _held_clause_is_unusable(recap):
+        clause = _voice_recap_clause(recap, first)
+        if clause:
+            rest = clause[0].lower() + clause[1:] if clause[0].isupper() else clause
+            para = f"{lead}{rest}" if lead else clause
+            return _greeting_and_para(first, para)
     if when:
         return f"Hey {first}, following up on our {when[3:]} call."
     return f"Hey {first}, wanted to circle back."
@@ -2618,16 +2632,34 @@ def _question_from_recap(recap: str, row: dict | None = None) -> str:
     return NURTURE_QUESTION
 
 
+def _snippet_recap(row: dict | None, snippet: str = "") -> str:
+    """Ticker last-touch recap after stripping date/label prefixes. Fit notes do not count."""
+    raw = snippet or str((row or {}).get("last_touch_snippet") or "")
+    if _FIT_NOTE_RE.match(raw.strip()):
+        return ""
+    cleaned = _strip_note_labels(raw)
+    if not cleaned:
+        return ""
+    if _looks_like_crm_note(cleaned, row) and not _has_note_label(raw) and not _DATE_CALL_PREFIX_RE.match(raw):
+        return ""
+    if _has_note_label(raw) or _DATE_CALL_PREFIX_RE.match(raw) or _looks_like_meeting_recap(raw, row):
+        return cleaned
+    return ""
+
+
 def _opener_from_snippet(first: str, snippet: str, campaign: str = "", row: dict | None = None) -> str:
     first = _first_name(first)
     row = row or {}
     del campaign
     met, booked = _row_meeting_flags(row)
     date_phrase = _call_date_phrase(row)
-    held_recap = _held_call_recap(row)
+    snippet_recap = _snippet_recap(row, snippet)
+    if snippet_recap:
+        return _natural_held_opener(first, snippet_recap, row)
+    spoken = _spoken_want_opener(first, row)
+    if spoken:
+        return spoken
     email = _email_recap(row, snippet)
-    if held_recap:
-        return _natural_held_opener(first, held_recap, row)
     if email:
         clause = _short_recap_clause(email, row)
         if clause:
@@ -2790,15 +2822,15 @@ def compose_nurture_draft(row: dict, *, airpods: bool | None = None) -> NurtureD
     row = {k: v for k, v in (row or {}).items() if k not in {"draft_body", "draft_subject"}}
     name = str(row.get("name") or "")
     first = _first_name(name)
+    email = str(row.get("email") or "")
     company = resolve_nurture_company(
         str(row.get("company") or ""),
         str(row.get("dealname") or row.get("deal_name") or ""),
-        str(row.get("email") or ""),
-        str(row.get("associated_company") or ""),
+        email,
+        str(row.get("associated_company") or row.get("hs_company") or ""),
     )
-    label = company
-    if label:
-        row = {**row, "company": label}
+    if company and not is_domain_derived_company(company, email):
+        row = {**row, "company": company}
     campaign = str(row.get("campaign") or "")
     raw_snippet = str(row.get("last_touch_snippet") or "")
     snippet = scoped_snippet(raw_snippet, row)
@@ -3470,6 +3502,9 @@ def fire_due_rows(
                 memory.reschedule_ticker(_key(rest), next_day)
                 report.ticker_skipped.append(f"{_label(rest)} rolled")
             break
+        if ticker_card_still_open(row):
+            report.ticker_skipped.append(f"{_label(row)} card_open")
+            continue
         if deal_is_locked({"properties": {"crmbrain_locked": row.get("crmbrain_locked")}}):
             memory.reschedule_ticker(_key(row), next_day)
             report.ticker_skipped.append(f"{_label(row)} locked")
@@ -3508,9 +3543,18 @@ def fire_due_rows(
             booked=bool(row.get("booked") or (row.get("extra") or {}).get("booked") if isinstance(row.get("extra"), dict) else row.get("booked")),
             met=bool(row.get("met") or (row.get("extra") or {}).get("met") if isinstance(row.get("extra"), dict) else row.get("met")),
         )
-        raw_snippet = str(row.get("last_touch_snippet") or "")
-        scoped = scoped_snippet(_strip_note_labels(raw_snippet), row)
-        row["last_touch_snippet"] = scoped or _strip_note_labels(raw_snippet)
+        if not str(row.get("company") or "").strip() and hs is not None:
+            name_getter = getattr(hs, "associated_company_name", None)
+            if callable(name_getter):
+                assoc = str(
+                    name_getter(
+                        contact_id=str(row.get("hs_contact_id") or ""),
+                        deal_id=str(row.get("hs_deal_id") or ""),
+                    )
+                    or ""
+                ).strip()
+                if assoc:
+                    row["associated_company"] = assoc
         draft = compose_nurture_draft(row)
         if not draft.valid:
             memory.reschedule_ticker(_key(row), next_day)

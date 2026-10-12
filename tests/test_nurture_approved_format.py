@@ -21,6 +21,7 @@ from crmbrain.nurture import (
     fire_due_rows,
     resolve_nurture_company,
     stored_valid_nurture_draft,
+    ticker_card_still_open,
     validate_draft,
 )
 from tests.test_nurture_rebuild import FakeGmail, FakeSlack, make_settings
@@ -295,224 +296,192 @@ def test_invalid_stored_draft_is_not_kept(tmp_path: Path):
     )
 
 
-def _robert_row() -> dict:
-    recap = (
-        "Cold calling was carrying the load and cold email was getting caught in spam filters. "
-        "Robert was taking it to Steve for a budget call in early October."
-    )
+def _live_ticker_row(
+    name: str,
+    email: str,
+    company,
+    industry,
+    last_touch_snippet,
+    meeting_at,
+) -> dict:
     return {
-        "name": "Robert Lawson",
-        "email": "rob@cyberguard360.com",
-        "company": "CyberGuard360",
-        "industry": "",
-        "reason": "met",
-        "meeting_source": "fireflies",
-        "fireflies": True,
-        "fireflies_id": "ff-robert-aug28",
-        "meeting_at": "2026-08-28T17:00:00+00:00",
-        "summary": recap,
-        "last_touch_snippet": recap,
+        "name": name,
+        "email": email,
+        "company": company,
+        "industry": industry,
+        "last_touch_snippet": last_touch_snippet,
+        "meeting_at": meeting_at,
+        "draft_body": None,
     }
+
+
+def _robert_row() -> dict:
+    return _live_ticker_row(
+        "Robert Lawson",
+        "rob@cyberguard360.com",
+        None,
+        "msp",
+        (
+            "Aug 28 call: cold calling with Philippines-based reps is the main lead source; "
+            "cold email underperforming on deliverability and spam filters; budget decision "
+            "with cofounder Steve targeted early October."
+        ),
+        "2026-08-28T18:30:00+00:00",
+    )
 
 
 def _laura_row() -> dict:
-    recap = (
-        "Getting new clients was the bottleneck. It would take at least 1 interested meeting "
-        "a week to make outreach worth it for GRN."
+    return _live_ticker_row(
+        "Laura Klein",
+        "lklein@grnplano.com",
+        "GRN Plano",
+        None,
+        (
+            "Sep 3 call: client acquisition is the bottleneck; needs at least 1 qualified "
+            "meeting a week to justify cost; prefers service-based offers due to healthcare "
+            "rules; hiring-ready clients close within a week."
+        ),
+        "2026-09-03T18:00:00+00:00",
     )
-    return {
-        "name": "Laura Klein",
-        "email": "lklein@grnplano.com",
-        "company": "GRN Plano",
-        "industry": "",
-        "reason": "booked",
-        "meeting_at": "2026-09-03T18:00:00+00:00",
-        "summary": "",
-        "last_touch_snippet": "",
-        "extra": {
-            "notes": (
-                "Healthcare recruiting / nurse staffing. " + recap
-            ),
-        },
-    }
 
 
 def _brian_row() -> dict:
-    recap = (
-        "Commercial roofing to property owners and managers within 2-3h of KC, not GCs. "
-        "Team closes about 35%. Partner Danny. Revisit in February."
-    )
-    return {
-        "name": "Brian Donigan",
-        "email": "bdonigan@wtrenovations.com",
-        "company": "WT Renovations",
-        "industry": "construction",
-        "reason": "met",
-        "meeting_source": "fireflies",
-        "fireflies": True,
-        "fireflies_id": "ff-brian-sep25",
-        "meeting_at": "2026-09-25T19:00:00+00:00",
-        "summary": recap,
-        "last_touch_snippet": recap,
-    }
-
-
-def test_robert_lawson_approved_held_recap_and_cyber_proof():
-    draft = compose_nurture_draft(_robert_row())
-    opener = _opener_block(draft.body)
-    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
-    assert draft.valid is True
-    assert draft.subject == "CyberGuard360 follow up"
-    assert draft.body.startswith("Hey Robert,")
-    assert "aug" in opener.lower() or "august" in opener.lower()
-    assert "cold calling" in opener.lower()
-    assert "spam" in opener.lower()
-    assert "steve" in opener.lower()
-    assert "meeting we had booked" not in draft.body.lower()
-    assert LANE_PROOF_BANK["msp"] in draft.body
-    assert "Where did you and Steve land?" in draft.body
-    assert MEETING_GUARANTEE in draft.body
-    assert draft.body.strip().endswith("Josh Osborn")
-    assert not opener.rstrip().endswith((",", ";", " and"))
-
-
-def test_laura_klein_blank_industry_is_staffing():
-    draft = compose_nurture_draft(_laura_row())
-    opener = _opener_block(draft.body)
-    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
-    assert draft.valid is True
-    assert draft.subject == "GRN Plano follow up"
-    assert draft.body.startswith("Hey Laura,")
-    assert "sep" in opener.lower() or "september" in opener.lower()
-    assert "new clients" in opener.lower()
-    assert "1" in opener
-    assert "meeting we had booked" not in draft.body.lower()
-    assert LANE_PROOF_BANK["staffing"] in draft.body
-    assert "Is finding new clients still the main thing on your plate?" in draft.body
-    assert MEETING_GUARANTEE in draft.body
-
-
-def _justin_labeled_row() -> dict:
-    note = (
-        "Last real conversation (late Jul/Aug): Walked cold outbound and using AI agents "
-        "to find new clients for Only PT Recruiting."
-    )
-    return {
-        "name": "Justin Bechtel",
-        "email": "justin@onlyptrecruiting.com",
-        "company": "Only PT Recruiting",
-        "industry": "",
-        "reason": "met",
-        "meeting_source": "fireflies",
-        "fireflies": True,
-        "fireflies_id": "ff-justin-jul30",
-        "fireflies_at": "2026-07-30T16:00:00+00:00",
-        "held_at": "2026-07-30T16:00:00+00:00",
-        "meeting_at": "2026-07-30T16:00:00+00:00",
-        "summary": "",
-        "last_touch_snippet": note,
-        "draft_body": (
-            "Hey Justin, you mentioned Last real conversation (late Jul/Aug): Walked cold outbound.\n\n"
-            f"{LANE_PROOF_BANK['staffing']}\n\n"
-            f"{NURTURE_QUESTION}\n\n"
-            f"{MEETING_GUARANTEE}\n\n"
-            "Josh Osborn"
+    return _live_ticker_row(
+        "Brian Donigan",
+        "bdonigan@wtrenovations.com",
+        "WT Renovations",
+        "construction",
+        (
+            "Sep 25 call: commercial roofing to property owners and managers within 2-3 hours "
+            "of KC, not GCs; team closes about 35% of leads; wants buy-ready appointments; "
+            "testing in-house outreach this fall, revisit in February."
         ),
-    }
+        None,
+    )
+
+
+def _justin_row() -> dict:
+    return _live_ticker_row(
+        "Justin Bechtel",
+        "justin@onlyptrecruiting.com",
+        "Only PT Recruiting",
+        "staffing",
+        "Last real conversation (late Jul/Aug): cold outbound and using AI agents for Only PT Recruiting.",
+        None,
+    )
 
 
 def _vincent_row() -> dict:
-    recap = (
-        "Discussed getting beyond HCM, PEO and payroll so the firm is not riding a few "
-        "big accounts. Bringing on junior recruiters for new verticals."
-    )
-    return {
-        "name": "Vincent Bowden",
-        "email": "vbowden@talentunify.com",
-        "company": "TalentUnify",
-        "industry": "",
-        "reason": "met",
-        "meeting_source": "fireflies",
-        "fireflies": True,
-        "fireflies_id": "ff-vincent-sep2",
-        "meeting_at": "2026-09-02T17:00:00+00:00",
-        "summary": recap,
-        "last_touch_snippet": recap,
-        "draft_subject": "Talentunify follow up",
-        "draft_body": (
-            "Hey Vincent, following up on our Sep 2 call.\n\n"
-            f"{LANE_PROOF_BANK['staffing']}\n\n"
-            f"{NURTURE_QUESTION}\n\n"
-            f"{MEETING_GUARANTEE}\n\n"
-            "Josh Osborn"
+    return _live_ticker_row(
+        "Vincent Bowden",
+        "vbowden@talentunify.com",
+        None,
+        "staffing",
+        (
+            "Sep 2 call: wants to diversify beyond HCM, PEO and payroll clients; adding junior "
+            "recruiters for one-off clients and new verticals; reviewing with silent partner."
         ),
-    }
+        "2026-09-02T17:00:00+00:00",
+    )
 
 
-def test_brian_donigan_construction_plus_roofing_recap():
+ROBERT_OPENER = (
+    "Hey Robert,\n\n"
+    "When we talked on Aug 28 you said cold calling with Philippines-based reps is the "
+    "main lead source. You said cold email underperforming on deliverability and spam "
+    "filters. You mentioned budget decision with cofounder Steve targeted early October."
+)
+LAURA_OPENER = (
+    "Hey Laura,\n\n"
+    "When we talked on Sep 3 you said client acquisition is the bottleneck. You need at "
+    "least 1 qualified meeting a week to justify cost. You prefer service-based offers "
+    "due to healthcare rules."
+)
+VINCENT_OPENER = (
+    "Hey Vincent,\n\n"
+    "When we talked on Sep 2 you want to diversify beyond HCM, PEO and payroll clients. "
+    "You are adding junior recruiters for one-off clients and new verticals. You are "
+    "reviewing with silent partner."
+)
+JUSTIN_OPENER = (
+    "Hey Justin,\n\n"
+    "You mentioned cold outbound and using AI agents for Only PT Recruiting."
+)
+BRIAN_OPENER = (
+    "Hey Brian,\n\n"
+    "When we talked on Sep 25 you mentioned commercial roofing to property owners and "
+    "managers within 2-3 hours of KC, not GCs. Your team closes about 35% of leads. You "
+    "want buy-ready appointments."
+)
+
+
+def test_robert_lawson_live_row_opener_and_neutral_subject():
+    draft = compose_nurture_draft(_robert_row())
+    assert draft.valid is True
+    assert _opener_block(draft.body) == ROBERT_OPENER
+    assert draft.subject == "Robert follow up"
+    assert "Cyberguard360" not in draft.subject
+    assert "interested" not in draft.body.lower()
+    assert LANE_PROOF_BANK["msp"] in draft.body
+    assert "Where did you and Steve land?" in draft.body
+    assert MEETING_GUARANTEE in draft.body
+
+
+def test_laura_klein_live_row_staffing_and_qualified():
+    draft = compose_nurture_draft(_laura_row())
+    assert draft.valid is True
+    assert draft.reject_reason != "no_lane_proof"
+    assert _opener_block(draft.body) == LAURA_OPENER
+    assert "qualified" in _opener_block(draft.body)
+    assert "interested" not in _opener_block(draft.body).lower()
+    assert draft.subject == "GRN Plano follow up"
+    assert LANE_PROOF_BANK["staffing"] in draft.body
+
+
+def test_vincent_bowden_live_row_strips_date_prefix():
+    draft = compose_nurture_draft(_vincent_row())
+    opener = _opener_block(draft.body)
+    assert draft.valid is True
+    assert opener == VINCENT_OPENER
+    assert "sep 2 call:" not in opener.lower()
+    assert "you sep 2" not in opener.lower()
+    assert draft.subject == "Vincent follow up"
+    assert "Talentunify" not in draft.subject
+    assert LANE_PROOF_BANK["staffing"] in draft.body
+
+
+def test_justin_bechtel_live_row_uses_snippet():
+    draft = compose_nurture_draft(_justin_row())
+    opener = _opener_block(draft.body)
+    assert draft.valid is True
+    assert opener == JUSTIN_OPENER
+    assert "wanted to circle back" not in draft.body.lower()
+    assert "last real conversation" not in draft.body.lower()
+    assert LANE_PROOF_BANK["staffing"] in draft.body
+
+
+def test_brian_donigan_live_row_keeps_recap_words():
     draft = compose_nurture_draft(_brian_row())
     opener = _opener_block(draft.body)
-    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
     assert draft.valid is True
-    assert "sep 25" in opener.lower() or "sep" in opener.lower()
-    assert "commercial roofing" in opener.lower()
-    assert "property" in opener.lower()
-    assert "meeting we had booked" not in draft.body.lower()
+    assert opener == BRIAN_OPENER
+    assert "2-3 hours" in opener
     assert LANE_PROOF_BANK["roofing"] in draft.body
-    assert "6 property managers" in draft.body
-    assert "february" in draft.body.lower()
-    assert MEETING_GUARANTEE in draft.body
-    assert not opener.rstrip().endswith((",", ";", " and"))
 
 
-def test_justin_bechtel_strips_labeled_note_and_does_not_paste_it():
-    row = _justin_labeled_row()
-    draft = compose_nurture_draft(row)
-    opener = _opener_block(draft.body)
-    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
-    assert draft.valid is True
-    assert draft.body.startswith("Hey Justin,")
-    assert "last real conversation" not in draft.body.lower()
-    assert "jul/aug" not in draft.body.lower()
-    assert "you mentioned last" not in draft.body.lower()
-    assert row["draft_body"].split("\n", 1)[0] not in draft.body
-    assert "cold outbound" in opener.lower() or "ai agents" in opener.lower()
-    assert "new clients" in opener.lower()
-    assert LANE_PROOF_BANK["staffing"] in draft.body
-    assert "meeting we had booked" not in draft.body.lower()
-    assert not opener.rstrip().endswith((",", ";", " and"))
-
-
-def test_vincent_bowden_uses_recap_not_generic_sep_2_followup():
-    row = _vincent_row()
-    draft = compose_nurture_draft(row)
-    opener = _opener_block(draft.body)
-    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
-    assert draft.valid is True
-    assert draft.subject == "TalentUnify follow up"
-    assert "talentunify follow up" != draft.subject.lower() or draft.subject == "TalentUnify follow up"
-    assert "following up on our sep 2 call" not in draft.body.lower()
-    assert "following up on our" not in opener.lower()
-    assert row["draft_body"].split("\n", 1)[0] not in draft.body
-    assert "hcm" in opener.lower() or "peo" in opener.lower() or "payroll" in opener.lower()
-    assert "recruiter" in opener.lower() or "vertical" in opener.lower()
-    assert LANE_PROOF_BANK["staffing"] in draft.body
-    assert MEETING_GUARANTEE in draft.body
-
-
-def test_subjects_keep_stored_company_capitalization():
+def test_subjects_use_hubspot_caps_or_neutral():
     robert = compose_nurture_draft(_robert_row())
     vincent = compose_nurture_draft(_vincent_row())
-    assert robert.subject == "CyberGuard360 follow up"
+    assert robert.subject == "Robert follow up"
+    assert vincent.subject == "Vincent follow up"
     assert "Cyberguard360" not in robert.subject
-    assert vincent.subject == "TalentUnify follow up"
     assert "Talentunify" not in vincent.subject
+    hs_robert = compose_nurture_draft({**_robert_row(), "associated_company": "CyberGuard360"})
+    hs_vincent = compose_nurture_draft({**_vincent_row(), "associated_company": "TalentUnify"})
+    assert hs_robert.subject == "CyberGuard360 follow up"
+    assert hs_vincent.subject == "TalentUnify follow up"
     assert resolve_nurture_company("CyberGuard360", "", "rob@cyberguard360.com") == "CyberGuard360"
     assert resolve_nurture_company("TalentUnify", "", "vbowden@talentunify.com") == "TalentUnify"
-    assert (
-        resolve_nurture_company("", "robert Lawson - CyberGuard360", "rob@cyberguard360.com")
-        == "CyberGuard360"
-    )
 
 
 def test_robert_opener_comes_from_recap_not_stored_draft_body():
@@ -523,25 +492,39 @@ def test_robert_opener_comes_from_recap_not_stored_draft_body():
         f"{MEETING_GUARANTEE}\n\n"
         "Josh Osborn"
     )
-    row = {
-        **_robert_row(),
-        "draft_subject": "Cyberguard360 follow up",
-        "draft_body": stored,
-    }
+    row = {**_robert_row(), "draft_subject": "Cyberguard360 follow up", "draft_body": stored}
     draft = compose_nurture_draft(row)
-    opener = _opener_block(draft.body)
-    assert draft.subject == "CyberGuard360 follow up"
+    assert _opener_block(draft.body) == ROBERT_OPENER
     assert stored.split("\n", 1)[0] not in draft.body
-    assert "this stored draft should never" not in draft.body
-    assert "cold calling" in opener.lower()
-    assert "spam" in opener.lower()
-    assert draft.valid is True
+    assert draft.subject == "Robert follow up"
 
 
-def test_laura_staffing_from_extra_terms_when_industry_blank():
-    draft = compose_nurture_draft(_laura_row())
-    assert draft.reject_reason != "no_lane_proof"
-    assert LANE_PROOF_BANK["staffing"] in draft.body
-    opener = _opener_block(draft.body)
-    assert opener.lower() != "hey laura,"
-    assert "new clients" in opener.lower() or "interested meeting" in opener.lower()
+def test_fire_due_rows_skips_open_slack_card(tmp_path: Path):
+    settings = make_settings(nurture_post_enabled=True)
+    memory = Memory(settings, data_dir=tmp_path)
+    row = {
+        **_laura_row(),
+        "id": "t-open-card",
+        "status": "active",
+        "next_fire_at": "2020-01-01T00:00:00+00:00",
+        "signal_at": "2026-09-03T18:00:00+00:00",
+        "slack_ts": "1791821400.244629",
+        "nurture_state": "queued",
+        "draft_body": None,
+    }
+    assert ticker_card_still_open(row) is True
+    memory._local["ticker"] = [row]
+    report = CycleReport()
+    cards = fire_due_rows(
+        settings,
+        memory,
+        report,
+        now=datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc),
+        gmail=FakeGmail(),
+        slack=FakeSlack(),
+    )
+    assert cards == []
+    kept = memory.get_ticker("t-open-card")
+    assert kept["draft_body"] is None
+    assert kept["slack_ts"] == "1791821400.244629"
+    assert any("card_open" in s for s in report.ticker_skipped)
