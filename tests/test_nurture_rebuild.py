@@ -408,7 +408,7 @@ def test_t22_t26_drafts():
             "last_touch_snippet": "Interested but timing is bad until Q4. Ping me then.",
         }
     )
-    first = d.body.split("\n", 1)[0].lower()
+    first = d.body.lower()
     assert "q4" in first
     assert "it's been a few months" not in first
     assert d.subject != "Morgan?"

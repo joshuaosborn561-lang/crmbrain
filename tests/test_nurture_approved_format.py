@@ -7,6 +7,8 @@ from pathlib import Path
 
 from crmbrain.memory import Memory
 from crmbrain.models import CycleReport
+import re
+
 from crmbrain.nurture import (
     GENERAL_PROOF,
     LANE_PROOF_BANK,
@@ -53,27 +55,46 @@ def _email_row(**extra) -> dict:
     return row
 
 
+def _opener_block(body: str) -> str:
+    parts = [p for p in (body or "").split("\n\n") if p.strip()]
+    if len(parts) >= 2 and parts[0].lower().startswith("hey "):
+        return f"{parts[0]}\n\n{parts[1]}"
+    return parts[0] if parts else ""
+
+
+def _assert_complete_sentences(text: str) -> None:
+    blob = re.sub(r"\s+", " ", (text or "").strip())
+    assert blob
+    assert not blob.endswith((",", ";", " and", " the", " to", " of"))
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", blob) if s.strip() and s.strip()[-1:] in ".!?"]
+    assert sentences, text
+    for sent in sentences:
+        assert sent[0].isupper() or sent.startswith("Hey")
+        assert sent[-1] in ".!?"
+
+
 def test_approved_format_order_from_held_recap():
     draft = compose_nurture_draft(_held_row())
     parts = [p for p in draft.body.split("\n\n") if p.strip()]
     assert draft.valid is True
-    assert parts[0].startswith("Hey Pat")
-    assert "website" in parts[0].lower()
-    assert parts[1].startswith(LANE_PROOF_BANK["roofing"][:20])
-    assert parts[2] == NURTURE_QUESTION
-    assert parts[3] == MEETING_GUARANTEE
-    assert parts[4] == "Josh Osborn"
+    opener = _opener_block(draft.body)
+    assert opener.lower().startswith("hey pat")
+    assert "website" in opener.lower()
+    assert LANE_PROOF_BANK["roofing"][:20] in draft.body
+    assert MEETING_GUARANTEE in draft.body
+    assert parts[-1] == "Josh Osborn"
     assert "Worth a look?" not in draft.body
     assert "AirPods" not in draft.body
     assert "$2M" not in draft.body
+    assert "meeting we had booked" not in draft.body.lower()
 
 
 def test_opener_from_own_email_not_generic_months():
     draft = compose_nurture_draft(_email_row())
-    opener = draft.body.split("\n", 1)[0].lower()
+    opener = _opener_block(draft.body).lower()
     assert "sdr" in opener
     assert "it's been a few months" not in opener
-    assert LANE_PROOF_BANK["msp"].split(",")[0] in draft.body
+    assert LANE_PROOF_BANK["msp"] in draft.body
     assert draft.valid is True
 
 
@@ -271,3 +292,115 @@ def test_invalid_stored_draft_is_not_kept(tmp_path: Path):
     assert stored_valid_nurture_draft(
         {"draft_body": stored["draft_body"], "draft_subject": stored["draft_subject"], "name": "Pat Reyes"}
     )
+
+
+def _robert_row() -> dict:
+    recap = (
+        "Cold calling was carrying the load and cold email was getting caught in spam filters. "
+        "Robert was taking it to Steve for a budget call in early October."
+    )
+    return {
+        "name": "Robert Lawson",
+        "email": "rob@cyberguard360.com",
+        "company": "CyberGuard360",
+        "industry": "",
+        "reason": "met",
+        "meeting_source": "fireflies",
+        "fireflies": True,
+        "fireflies_id": "ff-robert-aug28",
+        "meeting_at": "2026-08-28T17:00:00+00:00",
+        "summary": recap,
+        "last_touch_snippet": recap,
+    }
+
+
+def _laura_row() -> dict:
+    recap = (
+        "Getting new clients was the bottleneck. It would take at least 1 qualified meeting "
+        "a week to make outreach worth it for GRN. Healthcare recruiting."
+    )
+    return {
+        "name": "Laura Klein",
+        "email": "lklein@grnplano.com",
+        "company": "GRN Plano",
+        "industry": "",
+        "hs_industry": "healthcare recruiting",
+        "reason": "met",
+        "meeting_source": "fireflies",
+        "fireflies": True,
+        "fireflies_id": "ff-laura-sep",
+        "meeting_at": "2026-09-03T18:00:00+00:00",
+        "summary": recap,
+        "last_touch_snippet": recap,
+    }
+
+
+def _brian_row() -> dict:
+    recap = (
+        "Commercial roofing to property owners and managers within 2-3h of KC, not GCs. "
+        "Team closes about 35%. Partner Danny. Revisit in February."
+    )
+    return {
+        "name": "Brian Donigan",
+        "email": "bdonigan@wtrenovations.com",
+        "company": "WT Renovations",
+        "industry": "construction",
+        "reason": "met",
+        "meeting_source": "fireflies",
+        "fireflies": True,
+        "fireflies_id": "ff-brian-sep25",
+        "meeting_at": "2026-09-25T19:00:00+00:00",
+        "summary": recap,
+        "last_touch_snippet": recap,
+    }
+
+
+def test_robert_lawson_approved_held_recap_and_cyber_proof():
+    draft = compose_nurture_draft(_robert_row())
+    opener = _opener_block(draft.body)
+    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
+    assert draft.valid is True
+    assert draft.subject == "CyberGuard360 follow up"
+    assert draft.body.startswith("Hey Robert,")
+    assert "aug" in opener.lower() or "august" in opener.lower()
+    assert "cold calling" in opener.lower()
+    assert "spam" in opener.lower()
+    assert "steve" in opener.lower()
+    assert "meeting we had booked" not in draft.body.lower()
+    assert LANE_PROOF_BANK["msp"] in draft.body
+    assert "Where did you and Steve land?" in draft.body
+    assert MEETING_GUARANTEE in draft.body
+    assert draft.body.strip().endswith("Josh Osborn")
+    assert not opener.rstrip().endswith((",", ";", " and"))
+
+
+def test_laura_klein_blank_industry_is_staffing():
+    draft = compose_nurture_draft(_laura_row())
+    opener = _opener_block(draft.body)
+    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
+    assert draft.valid is True
+    assert draft.subject == "GRN Plano follow up"
+    assert draft.body.startswith("Hey Laura,")
+    assert "sep" in opener.lower() or "september" in opener.lower()
+    assert "new clients" in opener.lower()
+    assert "1" in opener
+    assert "meeting we had booked" not in draft.body.lower()
+    assert LANE_PROOF_BANK["staffing"] in draft.body
+    assert "Is finding new clients still the main thing on your plate?" in draft.body
+    assert MEETING_GUARANTEE in draft.body
+
+
+def test_brian_donigan_construction_plus_roofing_recap():
+    draft = compose_nurture_draft(_brian_row())
+    opener = _opener_block(draft.body)
+    _assert_complete_sentences(opener.split("\n\n", 1)[-1])
+    assert draft.valid is True
+    assert "sep 25" in opener.lower() or "sep" in opener.lower()
+    assert "commercial roofing" in opener.lower()
+    assert "property" in opener.lower()
+    assert "meeting we had booked" not in draft.body.lower()
+    assert LANE_PROOF_BANK["roofing"] in draft.body
+    assert "6 property managers" in draft.body
+    assert "february" in draft.body.lower()
+    assert MEETING_GUARANTEE in draft.body
+    assert not opener.rstrip().endswith((",", ";", " and"))
