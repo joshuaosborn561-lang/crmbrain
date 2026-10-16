@@ -156,6 +156,28 @@ def test_vincent_4k_x_3_is_12000():
     assert tcv_from_terms(terms) == "12000"
 
 
+def test_installment_count_times_size_is_not_tcv():
+    from crmbrain.intelligence import deal_amount_to_write
+
+    schedule = "paid in 9 net-60 installments of about $2,333 starting Dec 28"
+    assert tcv_from_terms(heuristic_deal_terms(schedule)) == ""
+    assert parse_deal_amount(schedule) == ""
+    count_first = "9 x $2,333 starting Dec 28"
+    assert tcv_from_terms(heuristic_deal_terms(count_first)) == ""
+    mixed = "$3,500/mo for 6 months, paid in 9 net-60 installments of about $2,333"
+    terms = heuristic_deal_terms(mixed)
+    assert terms["monthly_fee"] == "3500"
+    assert terms["term_months"] == "6"
+    assert tcv_from_terms(terms) == "21000"
+    deal = {"properties": {"amount": "21000", "monthly_fee": "3500", "contract_months": "6"}}
+    ev = Engagement(
+        source="gmail",
+        external_id="pd-keep",
+        extra={"amount_from_held_call": True, "amount_source": "call", "completed_doc": True},
+    )
+    assert deal_amount_to_write(deal, "20997", ev=ev) == ""
+
+
 def test_price_next_to_meeting_guarantee_is_valid():
     text = "I'll guarantee meetings. The fee is $20,000 for the engagement."
     assert parse_deal_amount(text) == "20000"

@@ -1347,17 +1347,16 @@ def apply_gmail_stage_update(
             or ev.stage_hint
             in {STAGE["contract_signed_unpaid"], STAGE["signed"], STAGE["paid"], STAGE["closed_won"]}
         )
-        if needs_call_amount:
+        if needs_call_amount and not intelligence.deal_has_amount_or_fee(deal_row):
             amount, held_terms = _amount_from_matching_held_call(settings, ev, contact, held_events)
             if amount or held_terms:
                 extra_amt = dict(ev.extra or {})
                 if held_terms:
                     extra_amt["deal_terms"] = held_terms
-                extra_amt["amount_source"] = (
-                    "completed_doc"
-                    if extra_amt.get("completed_doc")
-                    else extra_amt.get("amount_source") or "doc"
-                )
+                # Held-call TCV stays call-rank. Never stamp completed_doc so a
+                # non-empty HubSpot amount / monthly_fee cannot be overwritten.
+                extra_amt["amount_source"] = "call"
+                extra_amt["amount_from_held_call"] = True
                 if amount:
                     extra_amt["amount"] = amount
                 ev.extra = extra_amt

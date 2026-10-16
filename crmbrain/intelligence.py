@@ -131,6 +131,21 @@ _TIMES_RE = re.compile(
     r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:x|×)\s*(\d+)(?:\s*(?:month|mo)s?)?\b",
     re.I,
 )
+# Count-first ("9 x $2,333") is an installment schedule, not monthly × term.
+_COUNT_TIMES_AMOUNT_RE = re.compile(
+    r"(?<!\$)\b(\d{1,2})\s*(?:x|×)\s*\$\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\b",
+    re.I,
+)
+_TIMES_THEN_INSTALLMENTS_RE = re.compile(
+    r"\$?\s*\d[\d,]*(?:\.\d+)?\s*[kK]?\s*(?:x|×)\s*\d+\s+install?ments?\b",
+    re.I,
+)
+_INSTALLMENT_OF_RE = re.compile(
+    r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+    r"(?:net[-\s]?\d+\s+)?install?ments?\s+(?:of\s+)?(?:about\s+|approx(?:imately)?\s+)?"
+    r"\$?\s*\d",
+    re.I,
+)
 _MONTHLY_FEE_RE = re.compile(
     r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?\s*(?:/\s*mo|/month|per\s*month|a\s*month|monthly)",
     re.I,
@@ -359,13 +374,59 @@ def _is_stated_package_total(quote: str) -> bool:
     return _MONTHLY_FEE_RE.search(match.group(0)) is None
 
 
+def _times_match_is_installment(text: str, match: re.Match[str]) -> bool:
+    """True when `$amount x N` is installment count, not term months."""
+    trailing = (text or "")[match.end() : match.end() + 24]
+    if re.match(r"\s+install?ments?\b", trailing, re.I):
+        return True
+    raw = match.group(0) or ""
+    if re.search(r"(?:month|mo)s?\s*$", raw, re.I):
+        return False
+    return False
+
+
+def priced_times_search(text: str) -> re.Match[str] | None:
+    """`$3,500 x 6` / `$3,500 x 6 months` is TCV. `9 x $2,333` is not."""
+    for match in _TIMES_RE.finditer(text or ""):
+        if _times_match_is_installment(text or "", match):
+            continue
+        return match
+    return None
+
+
+def looks_like_installment_schedule(text: str) -> bool:
+    """Installment count × size / net-N installments of $Y — payment schedule, not TCV."""
+    blob = text or ""
+    if not blob:
+        return False
+    return bool(
+        _COUNT_TIMES_AMOUNT_RE.search(blob)
+        or _TIMES_THEN_INSTALLMENTS_RE.search(blob)
+        or _INSTALLMENT_OF_RE.search(blob)
+    )
+
+
+def installment_schedule_only(text: str) -> bool:
+    """Schedule language with no monthly × term or `$amount x N` offer."""
+    if not looks_like_installment_schedule(text):
+        return False
+    q = text or ""
+    if _MONTHLY_FEE_RE.search(q) and _TERM_RE.search(q):
+        return False
+    if priced_times_search(q):
+        return False
+    if _is_stated_package_total(q):
+        return False
+    return True
+
+
 def quote_is_monthly_only(quote: str) -> bool:
     """Monthly/range with no literal term, times, or package total — never invent TCV."""
     q = quote or ""
     has_monthly = bool(_MONTHLY_FEE_RE.search(q) or _RANGE_MO_RE.search(q))
     if not has_monthly:
         return False
-    if _TERM_RE.search(q) or _TIMES_RE.search(q) or _is_stated_package_total(q):
+    if _TERM_RE.search(q) or priced_times_search(q) or _is_stated_package_total(q):
         return False
     return True
 
@@ -375,11 +436,13 @@ def quote_states_priced_offer(quote: str) -> bool:
     q = (quote or "").strip()
     if not q:
         return False
-    if _is_generic_client_range(q) and not _TERM_RE.search(q) and not _TIMES_RE.search(q):
+    if installment_schedule_only(q):
+        return False
+    if _is_generic_client_range(q) and not _TERM_RE.search(q) and not priced_times_search(q):
         return False
     if quote_is_monthly_only(q):
         return False
-    if _TIMES_RE.search(q):
+    if priced_times_search(q):
         return True
     has_monthly = bool(_MONTHLY_FEE_RE.search(q) or _RANGE_MO_RE.search(q))
     has_term = bool(_TERM_RE.search(q))
@@ -442,7 +505,7 @@ def heuristic_deal_terms(text: str) -> dict[str, Any]:
     low = text.lower()
     offer_match: re.Match[str] | None = None
     term = None
-    times = _TIMES_RE.search(text)
+    times = priced_times_search(text)
     if times:
         val = _money_value(times.group(1), times.group(2) or "")
         try:
@@ -552,7 +615,7 @@ def tcv_from_terms(terms: dict[str, Any] | None) -> str:
     term = _as_int(terms.get("term_months"))
     quote_allows_multiply = bool(
         not quote
-        or _TIMES_RE.search(quote)
+        or priced_times_search(quote)
         or (
             (_MONTHLY_FEE_RE.search(quote) or _RANGE_MO_RE.search(quote))
             and _TERM_RE.search(quote)
@@ -637,6 +700,8 @@ def parse_deal_amount(text: str) -> str:
     hits: list[str] = []
     for sentence in priced:
         if _window_has(sentence.lower(), _PITCH_HINTS):
+            continue
+        if installment_schedule_only(sentence):
             continue
         terms = heuristic_deal_terms(sentence)
         computed = tcv_from_terms(terms)
@@ -887,6 +952,32 @@ def amount_forbidden_from_engagement(ev: Engagement | None) -> bool:
     return False
 
 
+def deal_prop_filled(raw: object) -> bool:
+    """True when HubSpot amount / monthly_fee / contract_months already has a value."""
+    text = str(raw or "").strip()
+    return bool(text) and text not in {"0", "0.0", "0.00"}
+
+
+def deal_has_amount_or_fee(deal: dict | None) -> bool:
+    """Non-empty amount or monthly_fee — fallback must not overwrite these."""
+    props = (deal or {}).get("properties") or {}
+    return deal_prop_filled(props.get("amount")) or deal_prop_filled(props.get("monthly_fee"))
+
+
+def deal_term_props_to_write(deal: dict | None, terms: dict[str, Any] | None) -> dict[str, str]:
+    """Fill empty monthly_fee / contract_months from TCV terms. Never overwrite."""
+    terms = terms if isinstance(terms, dict) else {}
+    props = (deal or {}).get("properties") or {}
+    out: dict[str, str] = {}
+    monthly = _as_amount(terms.get("monthly_fee"))
+    months = _as_int(terms.get("term_months"))
+    if monthly and not deal_prop_filled(props.get("monthly_fee")):
+        out["monthly_fee"] = monthly
+    if months and not deal_prop_filled(props.get("contract_months")):
+        out["contract_months"] = str(months)
+    return out
+
+
 def deal_amount_to_write(deal: dict | None, amount: str, ev: Engagement | None = None) -> str:
     if not amount:
         return ""
@@ -894,6 +985,9 @@ def deal_amount_to_write(deal: dict | None, amount: str, ev: Engagement | None =
         return ""
     props = (deal or {}).get("properties") or {}
     extra = (ev.extra if ev else {}) or {}
+    occupied = deal_has_amount_or_fee(deal)
+    if extra.get("amount_from_held_call") and occupied:
+        return ""
     terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
     quote = str(terms.get("quote") or "")
     if ev is not None and not quote_states_priced_offer(quote):

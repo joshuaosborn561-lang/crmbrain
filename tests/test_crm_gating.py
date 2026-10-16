@@ -341,14 +341,33 @@ class FakeHubSpot:
                 deal.setdefault("properties", {}).update(properties)
 
     def fill_deal_amount(self, deal, amount, ev=None, contact=None):
-        from crmbrain.intelligence import amount_citation_note, deal_amount_to_write
+        from crmbrain.intelligence import (
+            amount_citation_note,
+            amounts_equal,
+            deal_amount_to_write,
+            deal_has_amount_or_fee,
+            deal_term_props_to_write,
+        )
+        from crmbrain.policy import event_predates_manual_edit
 
-        hint = deal_amount_to_write(deal, amount, ev=ev)
-        if not hint or not deal.get("id"):
+        if ev and deal_has_amount_or_fee(deal) and event_predates_manual_edit(ev, deal):
             return False
-        self.patch_deal(str(deal["id"]), {"amount": hint})
-        deal.setdefault("properties", {})["amount"] = hint
-        if ev and contact and contact.get("id"):
+        hint = deal_amount_to_write(deal, amount, ev=ev)
+        if not deal.get("id"):
+            return False
+        extra = (ev.extra if ev else {}) or {}
+        terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
+        props = deal.get("properties") or {}
+        patch = {}
+        if hint and not amounts_equal(props.get("amount"), hint):
+            patch["amount"] = hint
+        if hint:
+            patch.update(deal_term_props_to_write(deal, terms))
+        if not patch:
+            return False
+        self.patch_deal(str(deal["id"]), patch)
+        deal.setdefault("properties", {}).update(patch)
+        if "amount" in patch and ev and contact and contact.get("id"):
             self.add_note(contact["id"], amount_citation_note(ev, hint), ev=ev, contact=contact)
         return True
 
