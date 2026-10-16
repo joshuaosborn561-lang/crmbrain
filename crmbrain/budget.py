@@ -21,6 +21,8 @@ def _kind(action: str, current: str, target: str) -> str:
         return "archive_regression"
     if target in {STAGE["nurture"], STAGE["closed_lost"]}:
         return "archive_regression"
+    if current == STAGE["poc"] and target == STAGE["contract_signed_unpaid"]:
+        return "stage_move"
     if current and STAGE_RANK.get(target, 0) < STAGE_RANK.get(current, 0):
         return "archive_regression"
     if current in {STAGE["signed"], STAGE["proposal_sent"]} or target in {

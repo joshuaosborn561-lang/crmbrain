@@ -215,6 +215,80 @@ def _mac_mc_key(last: str) -> str:
     return low
 
 
+_COMPANY_NOISE = frozenset(
+    {
+        "group",
+        "llc",
+        "inc",
+        "ltd",
+        "corp",
+        "co",
+        "the",
+        "and",
+        "of",
+        "company",
+        "partners",
+        "holdings",
+        "services",
+        "solutions",
+        "security",
+        "cyber",
+        "technology",
+        "technologies",
+        "consulting",
+        "digital",
+        "media",
+        "international",
+    }
+)
+
+
+def _company_alnum(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def company_core_tokens(name: str) -> list[str]:
+    """Distinctive words: Goliath360 → goliath; drop llc/group/cyber noise."""
+    out: list[str] = []
+    for word in re.findall(r"[a-z0-9]+", (name or "").lower()):
+        stem = re.sub(r"\d+$", "", word)
+        if len(stem) < 4 or stem in _COMPANY_NOISE:
+            continue
+        if stem not in out:
+            out.append(stem)
+    return out
+
+
+def company_search_tokens(name: str) -> list[str]:
+    """HubSpot CONTAINS_TOKEN values: original plus digit-stripped cores."""
+    raw = re.sub(r"\s+", " ", (name or "").strip())
+    tokens: list[str] = []
+    if len(raw) >= 3:
+        tokens.append(raw)
+    for stem in company_core_tokens(raw):
+        if stem not in {t.lower() for t in tokens}:
+            tokens.append(stem)
+    stripped = re.sub(r"\d+$", "", raw).strip()
+    if len(stripped) >= 3 and stripped.lower() not in {t.lower() for t in tokens}:
+        tokens.append(stripped)
+    return tokens
+
+
+def companies_fuzzy_match(left: str, right: str) -> bool:
+    """True when document 'Goliath360' is the HubSpot 'Goliath Cyber Security Group'."""
+    a = re.sub(r"\s+", " ", (left or "").strip().lower())
+    b = re.sub(r"\s+", " ", (right or "").strip().lower())
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    aa, bb = _company_alnum(a), _company_alnum(b)
+    if aa and bb and min(len(aa), len(bb)) >= 5 and (aa in bb or bb in aa):
+        return True
+    ta, tb = set(company_core_tokens(a)), set(company_core_tokens(b))
+    return bool(ta and tb and ta & tb)
+
+
 def names_fuzzy_match(left: str, right: str) -> bool:
     """True when two display names are the same person (prefix / Mac-Mc / typo)."""
     a = " ".join((left or "").lower().split())

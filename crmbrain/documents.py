@@ -79,6 +79,14 @@ def is_signature_mail(subject: str, sender: str) -> bool:
     return any(h in blob for h in ("pandadoc", "getpandadoc", "docusign"))
 
 
+def is_completed_signature(subject: str, sender: str, snippet: str = "", body: str = "") -> bool:
+    """True for a completed/signed PandaDoc or DocuSign notification."""
+    if not is_signature_mail(subject, sender):
+        return False
+    blob = f"{subject} {sender} {snippet} {body}".lower()
+    return any(h in blob for h in COMPLETED_HINTS)
+
+
 def is_payment_link_mail(subject: str, sender: str, snippet: str = "", body: str = "") -> bool:
     blob = f"{subject} {sender} {snippet} {body}".lower()
     return any(h in blob for h in PAYMENT_LINK_HINTS)

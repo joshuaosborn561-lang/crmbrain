@@ -444,31 +444,27 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 if contact:
                     break
             stage = _stage_from_mail(subject, sender, snippet, body)
-            from crmbrain.documents import stage_from_signature_mail
+            from crmbrain.documents import (
+                company_from_document_name,
+                emails_from_signature_mail,
+                is_completed_signature,
+                stage_from_signature_mail,
+                viewer_name_from_text,
+            )
 
             sig_stage, sig_amount, sig_name = stage_from_signature_mail(subject, sender, snippet, body)
             ev_email = cal.get("email") or (emails[0] if emails else "")
             if not contact and (sig_stage or is_billing_or_signature_mail(sender, subject)):
-                from crmbrain.documents import (
-                    company_from_document_name,
-                    emails_from_signature_mail,
-                    viewer_name_from_text,
-                )
-
+                for body_email in emails_from_signature_mail(subject, body or snippet):
+                    found = hubspot.find_contact(email=body_email)
+                    if not found:
+                        continue
+                    contact = found
+                    ev_email = body_email
+                    break
                 viewer = viewer_name_from_text(subject, body or snippet)
-                if viewer:
-                    for body_email in emails_from_signature_mail(subject, body or snippet):
-                        found = hubspot.find_contact(email=body_email)
-                        if not found:
-                            continue
-                        props = found.get("properties") or {}
-                        full = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip().lower()
-                        if not full or full == viewer.lower() or viewer.lower() in full or full in viewer.lower():
-                            contact = found
-                            ev_email = body_email
-                            break
-                    if not contact:
-                        contact = hubspot.find_contact(name=viewer)
+                if not contact and viewer:
+                    contact = hubspot.find_contact(name=viewer)
                 if not contact:
                     company_hint = company_from_document_name(sig_name)
                     finder_co = getattr(hubspot, "find_contact_by_company", None)
@@ -614,6 +610,10 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                 body = new_text
             if sig_stage == STAGE["signed"] or (sig_name and write_stage == STAGE["signed"]):
                 amount_source = amount_source or "doc"
+            completed_doc = is_completed_signature(subject, sender, snippet, body)
+            if completed_doc:
+                amount_source = amount_source or "completed_doc"
+            doc_company = company_from_document_name(sig_name) if sig_name else ""
             out.append(
                 Engagement(
                     source="gmail",
@@ -623,7 +623,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                     first_name=first,
                     last_name=last,
                     name=cal.get("name") or "",
-                    company=cal.get("company") or props.get("company") or "",
+                    company=cal.get("company") or doc_company or props.get("company") or "",
                     domain=domain,
                     raw_subject=subject,
                     summary=f"{snippet}\n{cal.get('when') or ''}\n{extra_event}".strip(),
@@ -645,6 +645,7 @@ def scan(settings: Settings, gmail: Gmail, hubspot: HubSpot, report: CycleReport
                         "payment": payment_mail,
                         "deal_terms": extra_terms,
                         "payer_emails": payer_emails,
+                        "completed_doc": completed_doc,
                     },
                 )
             )

@@ -21,7 +21,7 @@ from crmbrain.config import (
     is_zoom_room_address,
 )
 from crmbrain.models import Engagement
-from crmbrain.names import names_fuzzy_match, prefer_contact_name
+from crmbrain.names import companies_fuzzy_match, company_search_tokens, names_fuzzy_match, prefer_contact_name
 from crmbrain import intelligence, policy
 
 logger = logging.getLogger(__name__)
@@ -735,13 +735,23 @@ class HubSpot:
         raw = (company or "").strip()
         if len(raw) < 3:
             return None
-        rows = self._search(
-            "contacts",
-            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw}],
-            CONTACT_SEARCH_PROPS,
-        )
-        if len(rows) == 1:
-            return rows[0]
+        seen: dict[str, dict] = {}
+        for token in company_search_tokens(raw):
+            rows = self._search(
+                "contacts",
+                [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": token}],
+                CONTACT_SEARCH_PROPS,
+            )
+            for row in rows:
+                other = str((row.get("properties") or {}).get("company") or "")
+                if not companies_fuzzy_match(raw, other):
+                    continue
+                cid = str(row.get("id") or "")
+                if cid:
+                    seen[cid] = row
+        hits = list(seen.values())
+        if len(hits) == 1:
+            return hits[0]
         return None
 
     def find_deal_by_amount(self, amount: str) -> dict | None:
@@ -918,15 +928,31 @@ class HubSpot:
             return False
         if not ev and policy.deal_is_locked(deal):
             return False
+        # Signature evidence may still move stage; it must not clobber a
+        # non-empty amount/monthly_fee that Josh set later.
+        if (
+            ev
+            and intelligence.deal_has_amount_or_fee(deal)
+            and policy.event_predates_manual_edit(ev, deal)
+        ):
+            return False
         hint = intelligence.deal_amount_to_write(deal, amount, ev=ev)
-        if not hint or not deal.get("id"):
+        if not deal.get("id"):
             return False
-        if intelligence.amounts_equal((deal.get("properties") or {}).get("amount"), hint):
+        extra = (ev.extra if ev else {}) or {}
+        terms = extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else {}
+        props = deal.get("properties") or {}
+        patch: dict[str, str] = {}
+        if hint and not intelligence.amounts_equal(props.get("amount"), hint):
+            patch["amount"] = hint
+        if hint:
+            patch.update(intelligence.deal_term_props_to_write(deal, terms))
+        if not patch:
             return False
-        self.patch_deal(str(deal["id"]), {"amount": hint})
-        deal.setdefault("properties", {})["amount"] = hint
-        if contact and contact.get("id"):
-            extra = (ev.extra if ev else {}) or {}
+        self.patch_deal(str(deal["id"]), patch)
+        deal.setdefault("properties", {}).update(patch)
+        wrote_amount = "amount" in patch
+        if wrote_amount and contact and contact.get("id"):
             note = intelligence.amount_citation_note(
                 ev, hint, extra.get("deal_terms") if isinstance(extra.get("deal_terms"), dict) else None
             )

@@ -28,6 +28,7 @@ from crmbrain.config import (
 from crmbrain.intelligence import stage_id
 from crmbrain.models import Engagement
 from crmbrain.names import (
+    companies_fuzzy_match,
     format_deal_name,
     is_confident_person_name,
     is_room_or_bot_name,
@@ -384,6 +385,16 @@ def has_paperwork_evidence(ev: Engagement) -> bool:
     return False
 
 
+def is_signature_evidence(ev: Engagement) -> bool:
+    """PandaDoc / DocuSign sent or completed — freeze must not drop this evidence."""
+    extra = ev.extra or {}
+    if extra.get("completed_doc") or extra.get("document_id") or extra.get("document_name"):
+        return True
+    sender = str(extra.get("from") or "")
+    blob = f"{ev.raw_subject or ''} {sender}".lower()
+    return any(h in blob for h in ("pandadoc", "getpandadoc", "docusign"))
+
+
 def is_new_completed_paperwork(ev: Engagement) -> bool:
     """Completed PandaDoc / DocuSign for a new engagement — the only create on a Paid client."""
     extra = ev.extra or {}
@@ -643,6 +654,9 @@ def should_move_stage(
     held_floor = STAGE_RANK[STAGE["discovery_held"]]
     if target == STAGE["nurture"] and STAGE_RANK.get(current, 0) >= held_floor:
         return False
+    # Signed contract supersedes an in-flight POC even though POC ranks higher.
+    if current == STAGE["poc"] and target in {STAGE["contract_signed_unpaid"], STAGE["closed_won"]}:
+        return True
     if is_protected_regression(current, target) and not newer_negative:
         return False
     if current == STAGE["proposal_sent"] and target == STAGE["needs_stakeholder_approval"]:
@@ -770,6 +784,8 @@ def deal_is_locked(deal: dict | None) -> bool:
 
 
 def event_predates_freeze(ev: Engagement, settings: Settings | None) -> bool:
+    if is_signature_evidence(ev):
+        return False
     freeze = getattr(settings, "manual_freeze_at", None) if settings else None
     if not freeze or not ev.occurred_at:
         return False
@@ -936,6 +952,8 @@ def may_mutate_existing_deal(
         return True
     if deal_is_locked(deal):
         return False
+    if is_signature_evidence(ev):
+        return True
     if event_predates_freeze(ev, settings):
         return False
     if deal_has_post_freeze_manual_edit(deal, settings):
@@ -1512,7 +1530,7 @@ def prospect_matches_held(
         return held_near_scheduled(held.occurred_at, scheduled_at)
     held_company = _prospect_company(held)
     prospect_company = _prospect_company(prospect, contact)
-    if held_company and prospect_company and held_company == prospect_company:
+    if held_company and prospect_company and companies_fuzzy_match(held_company, prospect_company):
         return held_near_scheduled(held.occurred_at, scheduled_at)
     if held_emails and prospect_emails:
         return False
