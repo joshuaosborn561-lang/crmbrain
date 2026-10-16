@@ -29,6 +29,7 @@ from crmbrain.policy import (
     deal_is_locked,
     event_predates_freeze,
     event_predates_manual_edit,
+    is_signature_evidence,
     may_mutate_existing_deal,
     may_open_new_deal,
     row_has_not_deal_note,
@@ -93,6 +94,8 @@ def authorize_deal_lifecycle(
         return False, "no_deal"
     if deal_is_locked(deal):
         return False, "locked"
+    if ev is not None and is_signature_evidence(ev):
+        return True, ""
     if deal_has_post_freeze_manual_edit(deal, settings):
         return False, "post_freeze_manual_edit"
     if ev is not None and event_predates_freeze(ev, settings):

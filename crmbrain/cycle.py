@@ -1108,7 +1108,7 @@ def _amount_from_matching_held_call(
     contact: dict | None,
     held_events: list[Engagement] | None,
 ) -> tuple[str, dict]:
-    """Use the call's stated monthly x term when a contract-sent email has no figure."""
+    """Use the call/recording TCV when a sent or completed contract email has no figure."""
     held = policy.matching_held_event(ev, contact, held_events)
     if held is None:
         return "", {}
@@ -1187,13 +1187,17 @@ def apply_gmail_stage_update(
         from crmbrain import renewals
 
         deals_ren = _contact_deals(hs, contact)
-        moved = renewals.maybe_schedule_renewal_call(hs, deals_ren, ev)
-        if moved:
+        scheduled = renewals.maybe_schedule_renewal_call(hs, deals_ren, ev)
+        completed = None if scheduled else renewals.maybe_complete_renewal(hs, deals_ren, ev)
+        hit = scheduled or completed
+        if hit:
+            kind = "call_scheduled" if scheduled else "renewed"
+            skip = "renewal_call" if scheduled else "renewal_completed"
             report.deals_moved.append(
-                f"{ev.email or ev.display_name()} renewal -> call_scheduled ({moved.get('id')})"
+                f"{ev.email or ev.display_name()} renewal -> {kind} ({hit.get('id')})"
             )
             if not already:
-                memory.mark_processed(ev.source, ev.external_id, {"skip": "renewal_call"})
+                memory.mark_processed(ev.source, ev.external_id, {"skip": skip})
                 report.processed.append(f"gmail:{ev.raw_subject[:60]}")
             return
     if ev.stage_hint in {NO_SHOW_HINT, "no_show"}:
@@ -1335,12 +1339,27 @@ def apply_gmail_stage_update(
                 deal_row = max(won, key=policy.deal_richness)
                 current = (deal_row.get("properties") or {}).get("dealstage") or ""
         amount = str((ev.extra or {}).get("amount") or "")
-        if not amount and ev.stage_hint == STAGE["contract_signed_unpaid"]:
+        extra_now = ev.extra or {}
+        needs_call_amount = not amount and (
+            extra_now.get("completed_doc")
+            or extra_now.get("document_name")
+            or extra_now.get("document_id")
+            or ev.stage_hint
+            in {STAGE["contract_signed_unpaid"], STAGE["signed"], STAGE["paid"], STAGE["closed_won"]}
+        )
+        if needs_call_amount:
             amount, held_terms = _amount_from_matching_held_call(settings, ev, contact, held_events)
-            if held_terms:
+            if amount or held_terms:
                 extra_amt = dict(ev.extra or {})
-                extra_amt.setdefault("deal_terms", held_terms)
-                extra_amt.setdefault("amount_source", "held_call")
+                if held_terms:
+                    extra_amt["deal_terms"] = held_terms
+                extra_amt["amount_source"] = (
+                    "completed_doc"
+                    if extra_amt.get("completed_doc")
+                    else extra_amt.get("amount_source") or "doc"
+                )
+                if amount:
+                    extra_amt["amount"] = amount
                 ev.extra = extra_amt
         write_stage, write_amount, write_reason = authorize_deal_write(
             ev,

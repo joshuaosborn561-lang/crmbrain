@@ -199,13 +199,15 @@ class FakeHubSpot:
         return row
 
     def find_contact_by_company(self, company=""):
-        raw = (company or "").strip().lower()
+        from crmbrain.names import companies_fuzzy_match
+
+        raw = (company or "").strip()
         if len(raw) < 3:
             return None
         hits = []
         for row in self.contacts:
-            other = ((row.get("properties") or {}).get("company") or "").strip().lower()
-            if other and (raw in other or other in raw):
+            other = ((row.get("properties") or {}).get("company") or "").strip()
+            if other and companies_fuzzy_match(raw, other):
                 hits.append(row)
         return hits[0] if len(hits) == 1 else None
 
@@ -214,14 +216,16 @@ class FakeHubSpot:
         return None
 
     def deals_for_company(self, company=""):
-        raw = (company or "").strip().lower()
+        from crmbrain.names import companies_fuzzy_match
+
+        raw = (company or "").strip()
         if len(raw) < 3:
             return []
         deals = []
         seen = set()
         for row in self.contacts:
-            other = ((row.get("properties") or {}).get("company") or "").strip().lower()
-            if not other or (raw not in other and other not in raw):
+            other = ((row.get("properties") or {}).get("company") or "").strip()
+            if not other or not companies_fuzzy_match(raw, other):
                 continue
             for deal in self.open_deals_for_contact(row["id"]):
                 did = str(deal.get("id") or "")

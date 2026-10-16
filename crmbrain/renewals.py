@@ -165,6 +165,53 @@ def is_evidenced_renewal_call(ev: Engagement) -> bool:
     return False
 
 
+def is_completed_pandadoc(ev: Engagement) -> bool:
+    extra = ev.extra or {}
+    if extra.get("completed_doc"):
+        return True
+    sender = str(extra.get("from") or "")
+    blob = f"{ev.raw_subject or ''} {ev.summary or ''} {ev.transcript or ''} {sender}".lower()
+    if not any(h in blob for h in ("pandadoc", "getpandadoc", "docusign")):
+        return False
+    return any(
+        h in blob
+        for h in (
+            "has been completed",
+            "has been signed",
+            "document completed",
+            "completed the document",
+            "signing is complete",
+            "fully executed",
+        )
+    )
+
+
+def maybe_complete_renewal(hs, deals: list[dict] | None, ev: Engagement) -> dict | None:
+    """Completed PandaDoc on a Client Renewals deal → Renewed. Sales POC deals win if open."""
+    if not is_completed_pandadoc(ev):
+        return None
+    from crmbrain.policy import live_open_deals
+
+    sales_open = []
+    for deal in live_open_deals(deals):
+        if is_renewal_deal(deal):
+            continue
+        stage = canonicalize_stage((deal.get("properties") or {}).get("dealstage") or "")
+        if stage and stage not in CLOSED_WON_STAGES:
+            sales_open.append(deal)
+    if sales_open:
+        return None
+    for deal in open_renewal_deals(deals):
+        if deal_is_locked(deal):
+            continue
+        evidence = f"{ev.source}:{ev.external_id}" if ev else "renewals:renewed"
+        if not commit_deal_move(hs, deal, RENEWAL_STAGE["renewed"], evidence=evidence, ev=ev):
+            continue
+        deal.setdefault("properties", {})["dealstage"] = RENEWAL_STAGE["renewed"]
+        return deal
+    return None
+
+
 def maybe_schedule_renewal_call(hs, deals: list[dict] | None, ev: Engagement) -> dict | None:
     if not is_evidenced_renewal_call(ev):
         return None

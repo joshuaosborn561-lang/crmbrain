@@ -21,7 +21,7 @@ from crmbrain.config import (
     is_zoom_room_address,
 )
 from crmbrain.models import Engagement
-from crmbrain.names import names_fuzzy_match, prefer_contact_name
+from crmbrain.names import companies_fuzzy_match, company_search_tokens, names_fuzzy_match, prefer_contact_name
 from crmbrain import intelligence, policy
 
 logger = logging.getLogger(__name__)
@@ -735,13 +735,23 @@ class HubSpot:
         raw = (company or "").strip()
         if len(raw) < 3:
             return None
-        rows = self._search(
-            "contacts",
-            [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": raw}],
-            CONTACT_SEARCH_PROPS,
-        )
-        if len(rows) == 1:
-            return rows[0]
+        seen: dict[str, dict] = {}
+        for token in company_search_tokens(raw):
+            rows = self._search(
+                "contacts",
+                [{"propertyName": "company", "operator": "CONTAINS_TOKEN", "value": token}],
+                CONTACT_SEARCH_PROPS,
+            )
+            for row in rows:
+                other = str((row.get("properties") or {}).get("company") or "")
+                if not companies_fuzzy_match(raw, other):
+                    continue
+                cid = str(row.get("id") or "")
+                if cid:
+                    seen[cid] = row
+        hits = list(seen.values())
+        if len(hits) == 1:
+            return hits[0]
         return None
 
     def find_deal_by_amount(self, amount: str) -> dict | None:
