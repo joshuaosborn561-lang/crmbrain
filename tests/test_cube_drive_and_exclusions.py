@@ -3,7 +3,15 @@
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
-from crmbrain.config import CDT, is_non_deal_person, is_personal, now_utc, personal_numbers
+from crmbrain.config import (
+    CDT,
+    chicago_dates_inclusive,
+    is_non_deal_person,
+    is_personal,
+    now_cdt,
+    now_utc,
+    personal_numbers,
+)
 from crmbrain.cycle import (
     _backfill_hubspot_invites,
     _handle_engagement,
@@ -26,10 +34,13 @@ from crmbrain.policy import (
 from crmbrain.config import STAGE
 from crmbrain.sources import cube_acr, gmail_scan
 from crmbrain.sources.cube_acr import (
+    CUBE_CELL_BACKFILL_START,
     CubeAuthError,
     DriveAuth,
+    call_key_from_title,
     cube_call_key,
     docx_text,
+    list_day_folders,
     list_transcript_candidates,
     parse_cube_title,
     resolve_drive_auth,
@@ -86,12 +97,14 @@ def test_cube_lists_past_html_50_folder_cap(monkeypatch):
         params = params or {}
         q = params.get("q") or ""
         token = params.get("pageToken") or ""
-        if f"'{ROOT}' in parents" in q:
+        if f"'{ROOT}' in parents" in q and "mimeType" in q and "folder" in q:
             calls["pages"] += 1
             if not token:
                 return {"files": folders[:50], "nextPageToken": "page-2"}
             assert token == "page-2"
             return {"files": folders[50:], "nextPageToken": ""}
+        if f"'{ROOT}' in parents" in q:
+            return {"files": []}
         if f"'{late_id}' in parents" in q:
             calls["children"].append(late_id)
             return {
@@ -547,6 +560,7 @@ def test_cube_backfill_uses_14d_until_freshness(tmp_path, monkeypatch):
     later = Memory(settings, data_dir=tmp_path / "later")
     later.dry_run = False
     later.record_freshness("cube_acr", last_item_at=now_utc())
+    later.mark_cube_cell_backfill_done()
     later.dry_run = True
     later_hs = FakeHubSpot()
     later_report = run_once(later, later_hs)
@@ -1013,3 +1027,332 @@ def test_classify_runs_once_per_event(monkeypatch):
     second = intent_mod.classify(settings, ev)
     assert first is second
     assert n["c"] == 1
+
+
+OTHER_AMR_TITLE = "Pat Lee (+1 555-777-0000) ↗ (phone) 2026-09-30 15-01-22.amr"
+TYLER_AMR_TITLE = "Tyler Cook (+1 419-705-5122) ↗ (phone) 2026-09-30 13-17-54.amr"
+SALES_TEXT = "SalesGlider discovery call about their roofing pipeline and the monthly retainer."
+
+
+def _amr_item(fid: str, name: str, day: str = "2026-09-30") -> cube_acr.DriveFile:
+    return cube_acr.DriveFile(
+        file_id=fid,
+        name=name,
+        mime_type="audio/amr",
+        modified_time=datetime(2026, 9, 30, 20, tzinfo=timezone.utc),
+        md5=fid,
+        folder_date=day,
+    )
+
+
+def _docx_item(fid: str, name: str, day: str = "2026-09-30") -> cube_acr.DriveFile:
+    return cube_acr.DriveFile(
+        file_id=fid,
+        name=name,
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        modified_time=datetime(2026, 9, 30, 19, tzinfo=timezone.utc),
+        md5=fid,
+        folder_date=day,
+    )
+
+
+def test_scan_amr_dedupes_per_call_not_per_day(monkeypatch):
+    items = [_docx_item(LATE_FILE, TYLER_TITLE), _amr_item("amr-pat", OTHER_AMR_TITLE)]
+    monkeypatch.setattr(cube_acr, "resolve_drive_auth", lambda settings: DriveAuth("api_key", {}, "k"))
+    monkeypatch.setattr(cube_acr, "list_transcript_candidates", lambda *a, **k: items)
+    monkeypatch.setattr(cube_acr, "_load_text", lambda *a, **k: SALES_TEXT)
+    monkeypatch.setattr(cube_acr, "download_bytes", lambda *a, **k: b"amr-bytes")
+    monkeypatch.setattr(
+        cube_acr,
+        "transcribe_amr_gemini",
+        lambda settings, content: (SALES_TEXT + " Cell call follow-up.", ""),
+    )
+    evs = cube_acr.scan(make_settings(cube_folder=ROOT, google_api_key="k", gemini_key="g"))
+    ids = {e.external_id for e in evs}
+    assert LATE_FILE in ids
+    assert "amr-pat" in ids
+    assert evs[-1].extra.get("transcript_kind") == "amr_gemini" or any(
+        e.extra.get("transcript_kind") == "amr_gemini" for e in evs
+    )
+
+
+def test_scan_amr_skips_same_call_key_when_transcript_exists(monkeypatch):
+    items = [_docx_item(LATE_FILE, TYLER_TITLE), _amr_item("amr-tyler", TYLER_AMR_TITLE)]
+    monkeypatch.setattr(cube_acr, "resolve_drive_auth", lambda settings: DriveAuth("api_key", {}, "k"))
+    monkeypatch.setattr(cube_acr, "list_transcript_candidates", lambda *a, **k: items)
+    monkeypatch.setattr(cube_acr, "_load_text", lambda *a, **k: SALES_TEXT)
+    called = {"n": 0}
+
+    def transcribe(*_a, **_k):
+        called["n"] += 1
+        return SALES_TEXT, ""
+
+    monkeypatch.setattr(cube_acr, "transcribe_amr_gemini", transcribe)
+    monkeypatch.setattr(cube_acr, "download_bytes", lambda *a, **k: b"amr-bytes")
+    evs = cube_acr.scan(make_settings(cube_folder=ROOT, google_api_key="k", gemini_key="g"))
+    assert [e.external_id for e in evs] == [LATE_FILE]
+    assert called["n"] == 0
+
+
+def test_scan_amr_skips_known_hubspot_call_key(monkeypatch):
+    items = [_amr_item("amr-tyler", TYLER_AMR_TITLE)]
+    known = {cube_call_key(parse_cube_title(TYLER_AMR_TITLE))}
+    monkeypatch.setattr(cube_acr, "resolve_drive_auth", lambda settings: DriveAuth("api_key", {}, "k"))
+    monkeypatch.setattr(cube_acr, "list_transcript_candidates", lambda *a, **k: items)
+    monkeypatch.setattr(cube_acr, "download_bytes", lambda *a, **k: b"amr-bytes")
+    called = {"n": 0}
+    monkeypatch.setattr(
+        cube_acr,
+        "transcribe_amr_gemini",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or (SALES_TEXT, ""),
+    )
+    evs = cube_acr.scan(
+        make_settings(cube_folder=ROOT, google_api_key="k", gemini_key="g"),
+        known_call_keys=known,
+    )
+    assert evs == []
+    assert called["n"] == 0
+
+
+def test_scan_counts_amr_drop_reasons(monkeypatch):
+    items = [
+        _amr_item("amr-dl", "Dana Lee (+1 555-111-2222) ↗ (phone) 2026-09-30 10-00-00.amr"),
+        _amr_item("amr-503", "Evan Roe (+1 555-111-3333) ↗ (phone) 2026-09-30 10-05-00.amr"),
+        _amr_item("amr-empty", "Fran Roe (+1 555-111-4444) ↗ (phone) 2026-09-30 10-10-00.amr"),
+        _amr_item("amr-short", "Glen Roe (+1 555-111-5555) ↗ (phone) 2026-09-30 10-15-00.amr"),
+        _amr_item("amr-html", "Hank Roe (+1 555-111-6666) ↗ (phone) 2026-09-30 10-20-00.amr"),
+        _amr_item("amr-personal", NONNA_TITLE.replace("transcript", "") + ".amr"),
+    ]
+
+    def download(_auth, fid):
+        if fid == "amr-dl":
+            raise RuntimeError("drive 500")
+        return b"amr-bytes"
+
+    def transcribe(_settings, _content, item_id=None):
+        return SALES_TEXT, ""
+
+    reasons = {
+        "amr-503": ("", "gemini_http_503"),
+        "amr-empty": ("", "empty"),
+        "amr-short": ("hi", ""),
+        "amr-html": ("<html><body>not a transcript</body></html>", ""),
+    }
+    order = {"i": 0}
+    ids = ["amr-503", "amr-empty", "amr-short", "amr-html"]
+
+    def transcribe_seq(_settings, _content):
+        fid = ids[order["i"]]
+        order["i"] += 1
+        return reasons[fid]
+
+    monkeypatch.setattr(cube_acr, "resolve_drive_auth", lambda settings: DriveAuth("api_key", {}, "k"))
+    monkeypatch.setattr(cube_acr, "list_transcript_candidates", lambda *a, **k: items)
+    monkeypatch.setattr(cube_acr, "download_bytes", download)
+    monkeypatch.setattr(cube_acr, "transcribe_amr_gemini", transcribe_seq)
+    drops: dict[str, int] = {}
+    evs = cube_acr.scan(
+        make_settings(cube_folder=ROOT, google_api_key="k", gemini_key="g"),
+        drops=drops,
+    )
+    assert evs == []
+    assert drops["download_fail"] == 1
+    assert drops["gemini_http_503"] == 1
+    assert drops["empty"] == 1
+    assert drops["short"] == 1
+    assert drops["html"] == 1
+    assert drops["personal"] == 1
+
+
+def test_transcribe_amr_gemini_retries_429_and_logs_redacted_body(monkeypatch, caplog):
+    import logging
+
+    class FakeResp:
+        def __init__(self, status, text="", payload=None):
+            self.status_code = status
+            self.text = text
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    calls = {"n": 0}
+
+    def fake_post(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeResp(429, "quota https://generativelanguage.googleapis.com/v1?key=supersecret")
+        return FakeResp(
+            200,
+            "{}",
+            {"candidates": [{"content": {"parts": [{"text": SALES_TEXT}]}}]},
+        )
+
+    monkeypatch.setattr(cube_acr.requests, "post", fake_post)
+    with caplog.at_level(logging.WARNING, logger="crmbrain.sources.cube_acr"):
+        text, reason = cube_acr.transcribe_amr_gemini(
+            make_settings(gemini_key="g"),
+            b"amr-bytes",
+        )
+    assert text == SALES_TEXT
+    assert reason == ""
+    assert calls["n"] == 2
+    joined = " ".join(r.message for r in caplog.records)
+    assert "http 429" in joined
+    assert "supersecret" not in joined
+
+
+def test_transcribe_amr_gemini_counts_503_after_retry(monkeypatch, caplog):
+    import logging
+
+    class FakeResp:
+        def __init__(self, status, text=""):
+            self.status_code = status
+            self.text = text
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(
+        cube_acr.requests,
+        "post",
+        lambda *_a, **_k: FakeResp(503, "upstream key=abcd1234"),
+    )
+    with caplog.at_level(logging.WARNING, logger="crmbrain.sources.cube_acr"):
+        text, reason = cube_acr.transcribe_amr_gemini(make_settings(gemini_key="g"), b"x")
+    assert text == ""
+    assert reason == "gemini_http_503"
+    assert "http 503" in " ".join(r.message for r in caplog.records)
+
+
+def test_chicago_dates_inclusive_oct1_through_today():
+    days = chicago_dates_inclusive(CUBE_CELL_BACKFILL_START)
+    assert days[0] == "2026-10-01"
+    assert days[-1] == now_cdt().date().isoformat()
+    assert "2026-10-01" in days
+
+
+def test_list_day_folders_paginates_fully(monkeypatch):
+    start = date(2026, 8, 1)
+    folders = [_folder((start + timedelta(days=i)).isoformat()) for i in range(66)]
+    pages = {"n": 0}
+
+    def fake_get(auth, url, params=None):
+        params = params or {}
+        q = params.get("q") or ""
+        token = params.get("pageToken") or ""
+        assert "mimeType" in q and "folder" in q
+        pages["n"] += 1
+        if not token:
+            return {"files": folders[:50], "nextPageToken": "p2"}
+        return {"files": folders[50:], "nextPageToken": ""}
+
+    monkeypatch.setattr(cube_acr, "drive_get", fake_get)
+    found = list_day_folders(DriveAuth("api_key", {}, "k"), ROOT, page_size=50)
+    assert pages["n"] == 2
+    names = {item.folder_date for item in found}
+    assert "2026-08-01" in names
+    assert "2026-10-05" in names
+    assert len(found) == 66
+
+
+def test_report_cube_day_gaps_skips_today_chicago():
+    from crmbrain.sources.cube_acr import report_cube_day_gaps
+
+    today = now_cdt().date().isoformat()
+    warnings: list[str] = []
+    report_cube_day_gaps([], {today}, set(), warnings)
+    assert warnings == []
+
+
+def _cycle_with_scan(tmp_path, monkeypatch, settings, hs, fake_scan, memory=None):
+    class Snap:
+        upcoming = set()
+        recent = set()
+        create_engagements = []
+        events = []
+        calendar_api_ok = True
+        calendar_api_error = ""
+
+        def protect_emails(self):
+            return set()
+
+    memory = memory or Memory(settings, data_dir=tmp_path)
+    monkeypatch.setattr("crmbrain.cycle.HubSpot", lambda settings: hs)
+    monkeypatch.setattr("crmbrain.cycle.Memory", lambda settings: memory)
+    monkeypatch.setattr("crmbrain.cycle.Gmail", lambda settings: object())
+    monkeypatch.setattr("crmbrain.cycle.calendar_events.load_calendar", lambda *a, **k: Snap())
+    monkeypatch.setattr("crmbrain.cycle.has_drive_access", lambda *a, **k: True)
+    monkeypatch.setattr("crmbrain.cycle.cube_acr.scan", fake_scan)
+    monkeypatch.setattr("crmbrain.cycle.fireflies.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.smartlead.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.rvm.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan_people", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.gmail_scan.scan", lambda *a, **k: [])
+    monkeypatch.setattr("crmbrain.cycle.prune.run", lambda *a, **k: None)
+    return cycle_run(settings), memory, hs
+
+
+def test_cell_backfill_runs_once_and_is_idempotent(tmp_path, monkeypatch):
+    settings = make_settings(dry_run=False, hubspot_token="tok", google_api_key="k")
+    seen: list[dict] = []
+
+    def fake_scan(*_a, **k):
+        seen.append(dict(k))
+        return []
+
+    hs = FakeHubSpot()
+    hs.meeting_rows = [
+        {"id": "m1", "properties": {"hs_meeting_title": TYLER_TITLE}},
+    ]
+    memory = Memory(settings, data_dir=tmp_path)
+    first, memory, _ = _cycle_with_scan(tmp_path, monkeypatch, settings, hs, fake_scan, memory=memory)
+    assert seen
+    assert "2026-10-01" in set(seen[0].get("dates") or [])
+    tyler_key = cube_call_key(parse_cube_title(TYLER_TITLE))
+    assert tyler_key in set(seen[0].get("known_call_keys") or [])
+    assert any("cell-call backfill" in w for w in first.warnings)
+    assert memory.cube_cell_backfill_done()
+
+    second, _, _ = _cycle_with_scan(tmp_path, monkeypatch, settings, hs, fake_scan, memory=memory)
+    assert len(seen) == 2
+    assert seen[1].get("dates") is None
+    assert not any("cell-call backfill" in w for w in second.warnings)
+
+
+def test_cell_backfill_not_marked_done_on_dry_run(tmp_path, monkeypatch):
+    settings = make_settings(dry_run=True, hubspot_token="tok", google_api_key="k")
+    seen = {"dates": None}
+
+    def fake_scan(*_a, **k):
+        seen["dates"] = k.get("dates")
+        return []
+
+    memory = Memory(settings, data_dir=tmp_path)
+    _cycle_with_scan(tmp_path, monkeypatch, settings, FakeHubSpot(), fake_scan, memory=memory)
+    assert "2026-10-01" in set(seen["dates"] or [])
+    assert not memory.cube_cell_backfill_done()
+
+
+def test_cycle_report_includes_amr_drops(tmp_path, monkeypatch):
+    settings = make_settings(dry_run=True, hubspot_token="tok", google_api_key="k")
+
+    def fake_scan(*_a, **k):
+        drops = k.get("drops")
+        if drops is not None:
+            drops["personal"] = 2
+            drops["gemini_http_429"] = 1
+        return []
+
+    memory = Memory(settings, data_dir=tmp_path)
+    report, _, _ = _cycle_with_scan(
+        tmp_path, monkeypatch, settings, FakeHubSpot(), fake_scan, memory=memory
+    )
+    assert report.cube_amr_drops["personal"] == 2
+    assert report.cube_amr_drops["gemini_http_429"] == 1
+    assert "cube_amr_drops: gemini_http_429=1 personal=2" in report.summary_text()
+
+
+def test_call_key_from_title_matches_phone_date_time():
+    assert call_key_from_title(TYLER_TITLE) == "4197055122|2026-09-30|13:17:54"
+    assert call_key_from_title("random meeting") == ""

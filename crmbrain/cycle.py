@@ -19,9 +19,11 @@ from crmbrain import (
 )
 from crmbrain.budget import WriteBudget
 from crmbrain.config import (
+    CDT,
     NO_SHOW_HINT,
     STAGE,
     Settings,
+    chicago_dates_inclusive,
     compute_lookback_start,
     is_excluded_contact,
     is_josh_address,
@@ -41,7 +43,13 @@ from crmbrain.policy import INCREMENT_NO_SHOW
 from crmbrain.models import CycleReport, Engagement
 from crmbrain.identity import should_skip_email, usable_linkedin
 from crmbrain.sources import cube_acr, fireflies, gmail_scan, rvm, smartlead
-from crmbrain.sources.cube_acr import CubeAuthError
+from crmbrain.sources.cube_acr import (
+    CUBE_CELL_BACKFILL_START,
+    CubeAuthError,
+    call_key_from_cube_row,
+    call_key_from_title,
+    cube_listing_dates,
+)
 from crmbrain.sources.gmail_scan import is_junk_crm_email
 
 logger = logging.getLogger(__name__)
@@ -63,6 +71,51 @@ def _in_window(ev: Engagement, settings: Settings) -> bool:
     if ev.occurred_at and ev.occurred_at < start:
         return False
     return True
+
+
+def _cube_known_call_keys(memory: Memory, hs: HubSpot) -> set[str]:
+    keys: set[str] = set()
+    rows = []
+    if hasattr(memory, "list_cube_calls"):
+        try:
+            rows = memory.list_cube_calls() or []
+        except Exception as exc:
+            logger.warning("cube memory call keys failed: %s", exc)
+    else:
+        rows = list((getattr(memory, "_local", {}) or {}).get("cube_acr_calls") or [])
+    for row in rows:
+        key = call_key_from_cube_row(row)
+        if key:
+            keys.add(key)
+    for method, title_prop in (
+        ("iter_meetings", "hs_meeting_title"),
+        ("iter_calls", "hs_call_title"),
+    ):
+        walker = getattr(hs, method, None)
+        if not callable(walker):
+            continue
+        try:
+            for row in walker():
+                title = str(((row or {}).get("properties") or {}).get(title_prop) or "")
+                key = call_key_from_title(title)
+                if key:
+                    keys.add(key)
+        except Exception as exc:
+            logger.warning("cube hubspot %s keys failed: %s", method, exc)
+    return keys
+
+
+def _cube_event_day(ev: Engagement) -> str:
+    extra = ev.extra or {}
+    day = str(extra.get("folder_date") or "")
+    if day:
+        return day
+    if ev.occurred_at:
+        try:
+            return ev.occurred_at.astimezone(CDT).date().isoformat()
+        except Exception:
+            return ""
+    return ""
 
 
 def _release_gmail_people_overflow(memory: Memory, ev: Engagement) -> None:
@@ -1538,7 +1591,28 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
             skip_cube_freshness = True
     if has_drive_access(settings):
         try:
-            cube_events = cube_acr.scan(settings, backfill=cube_backfill, warnings=report.warnings)
+            cell_backfill = False
+            if hasattr(memory, "cube_cell_backfill_done"):
+                try:
+                    cell_backfill = not memory.cube_cell_backfill_done()
+                except Exception as exc:
+                    logger.warning("cube cell-backfill flag read failed: %s", exc)
+                    cell_backfill = True
+            scan_dates = None
+            if cell_backfill:
+                scan_dates = chicago_dates_inclusive(CUBE_CELL_BACKFILL_START)
+                scan_dates = sorted(
+                    set(scan_dates) | set(cube_listing_dates(settings, backfill=cube_backfill))
+                )
+            known_keys = _cube_known_call_keys(memory, hs)
+            cube_events = cube_acr.scan(
+                settings,
+                dates=scan_dates,
+                backfill=cube_backfill,
+                warnings=report.warnings,
+                known_call_keys=known_keys,
+                drops=report.cube_amr_drops,
+            )
             if cube_backfill:
                 report.warnings.append(
                     f"cube_acr: one-time backfill ({getattr(settings, 'cube_lookback_days', 14)}d)"
@@ -1546,6 +1620,21 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
                 for ev in cube_events:
                     ev.extra["skip_lookback"] = True
                     ev.extra["cube_backfill"] = True
+            if cell_backfill:
+                report.warnings.append(
+                    f"cube_acr: one-time cell-call backfill {CUBE_CELL_BACKFILL_START.isoformat()}..today"
+                )
+                cell_days = set(chicago_dates_inclusive(CUBE_CELL_BACKFILL_START))
+                for ev in cube_events:
+                    if _cube_event_day(ev) in cell_days:
+                        ev.extra["skip_lookback"] = True
+                        ev.extra["cube_cell_backfill"] = True
+                transient = any(
+                    key.startswith("gemini_http_") or key == "download_fail"
+                    for key in report.cube_amr_drops
+                )
+                if not settings.dry_run and not transient:
+                    memory.mark_cube_cell_backfill_done()
             engagements += cube_events
             if hasattr(memory, "upsert_cube_call"):
                 for ev in cube_events:

@@ -68,6 +68,7 @@ class CycleReport:
     reconcile_aborted: bool = False
     would_abort: bool = False
     gmail_people_overflow: int = 0
+    cube_amr_drops: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +99,7 @@ class CycleReport:
             "reconcile_aborted": self.reconcile_aborted,
             "would_abort": self.would_abort,
             "gmail_people_overflow": self.gmail_people_overflow,
+            "cube_amr_drops": dict(self.cube_amr_drops),
         }
 
     def summary_text(self) -> str:
@@ -109,6 +111,9 @@ class CycleReport:
                 lines.append("would_abort: true")
         if self.gmail_people_overflow:
             lines.append(f"gmail_people_overflow: {self.gmail_people_overflow}")
+        if self.cube_amr_drops:
+            bits = " ".join(f"{k}={v}" for k, v in sorted(self.cube_amr_drops.items()))
+            lines.append(f"cube_amr_drops: {bits}")
         for key, values in self.as_dict().items():
             if not isinstance(values, list):
                 continue

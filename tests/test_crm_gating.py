@@ -306,6 +306,14 @@ class FakeHubSpot:
     def contact_has_meetings(self, contact_id):
         return bool(getattr(self, "meetings", {}).get(str(contact_id)))
 
+    def iter_meetings(self, properties=None):
+        del properties
+        yield from getattr(self, "meeting_rows", None) or []
+
+    def iter_calls(self, properties=None):
+        del properties
+        yield from getattr(self, "call_rows", None) or []
+
     def contact_has_future_meetings(self, contact_id, now=None):
         del now
         return str(contact_id) in set(getattr(self, "future_meetings", set()) or set())

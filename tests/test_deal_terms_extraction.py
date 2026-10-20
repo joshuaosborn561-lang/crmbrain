@@ -379,13 +379,17 @@ def test_gemini_missing_key_logs_warning(caplog):
 
 
 def test_cube_warns_amr_without_transcript_or_missing_folder():
+    from crmbrain.config import now_cdt
+
     warnings: list[str] = []
+    today = now_cdt().date().isoformat()
     files = [
         DriveFile(file_id="a1", name="call.amr", mime_type="audio/amr", folder_date="2026-09-30"),
     ]
-    report_cube_day_gaps(files, {"2026-09-30", "2026-10-01"}, {"2026-09-30"}, warnings)
+    report_cube_day_gaps(files, {"2026-09-30", "2026-10-01", today}, {"2026-09-30"}, warnings)
     assert any("amr with no transcript" in w for w in warnings)
     assert any("missing day-folder 2026-10-01" in w for w in warnings)
+    assert not any(f"missing day-folder {today}" in w for w in warnings)
 
 
 def test_reextract_since_honors_lookback_and_source():

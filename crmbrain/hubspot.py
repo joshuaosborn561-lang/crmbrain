@@ -1040,6 +1040,52 @@ class HubSpot:
         """Meetings in HubSpot engagements if available; otherwise empty (Gmail/Calendly fills this)."""
         return []
 
+    def iter_meetings(self, properties: list[str] | None = None):
+        """Page HubSpot meeting engagements (titles used for Cube call-key dedupe)."""
+        props = properties or ["hs_meeting_title", "hs_meeting_start_time", "hs_timestamp"]
+        after = None
+        while True:
+            params: dict[str, Any] = {"limit": 100, "properties": ",".join(props)}
+            if after:
+                params["after"] = after
+            resp = self._request(
+                "GET",
+                "/crm/v3/objects/meetings",
+                params=params,
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for row in data.get("results") or []:
+                yield row
+            after = (data.get("paging") or {}).get("next", {}).get("after")
+            if not after:
+                break
+
+    def iter_calls(self, properties: list[str] | None = None):
+        """Page HubSpot call engagements (titles used for Cube call-key dedupe)."""
+        props = properties or ["hs_call_title", "hs_timestamp"]
+        after = None
+        while True:
+            params: dict[str, Any] = {"limit": 100, "properties": ",".join(props)}
+            if after:
+                params["after"] = after
+            resp = self._request(
+                "GET",
+                "/crm/v3/objects/calls",
+                params=params,
+                retry=True,
+                timeout=READ_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for row in data.get("results") or []:
+                yield row
+            after = (data.get("paging") or {}).get("next", {}).get("after")
+            if not after:
+                break
+
     def iter_deals(self, properties: list[str], stage: str = ""):
         after = None
         while True:

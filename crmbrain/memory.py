@@ -965,6 +965,34 @@ class Memory:
                     return
                 self._record_error("upsert_allo_call", exc)
 
+    def list_cube_calls(self) -> list[dict]:
+        local = list(self._local.get("cube_acr_calls") or [])
+        if self.use_supabase:
+            try:
+                rows = self._sb_schema(
+                    "GET",
+                    "cube_acr_calls",
+                    params={"select": "id,raw_subject,extra,phone,name", "limit": "1000"},
+                )
+                if rows:
+                    return list(rows)
+            except Exception as exc:
+                self._record_error("list_cube_calls", exc)
+        return local
+
+    def cube_cell_backfill_done(self) -> bool:
+        if (self._local.get("flags") or {}).get("cube_cell_backfill_2026_10_01"):
+            return True
+        return self.latest_freshness("cube_cell_backfill_2026_10_01") is not None
+
+    def mark_cube_cell_backfill_done(self) -> None:
+        if self._skip_side_write("flags"):
+            return
+        flags = self._local.setdefault("flags", {})
+        flags["cube_cell_backfill_2026_10_01"] = True
+        self.save_local()
+        self.record_freshness("cube_cell_backfill_2026_10_01", last_item_at=now_utc())
+
     def upsert_cube_call(self, ev) -> None:
         if self._skip_side_write("cube_acr_calls"):
             return
