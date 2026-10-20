@@ -43,6 +43,7 @@ from crmbrain.prune import (
     has_live_meeting_evidence,
     prune_notetaker_contacts,
     prune_replied_deals,
+    run as prune_run,
 )
 from crmbrain.sources.fireflies import counterpart_from_fireflies
 from tests.test_crm_gating import FakeHubSpot, make_settings
@@ -317,7 +318,7 @@ def test_lookback_falls_back_without_prior_run_and_caps():
     assert (now - capped).total_seconds() / 3600 == 24 * 7
 
 
-def test_notetaker_archived_in_any_stage():
+def test_notetaker_deal_archived_contact_kept_as_bot():
     hs = FakeHubSpot(
         [
             {
@@ -346,10 +347,56 @@ def test_notetaker_archived_in_any_stage():
     report = CycleReport()
     prune_notetaker_contacts(hs, report)
     assert hs.deals == []
-    assert hs.contacts == []
+    assert len(hs.contacts) == 1
+    assert hs.contacts[0]["id"] == "fred"
+    assert str(hs.contacts[0]["properties"].get("crmbrain_bot") or "").lower() == "true"
     assert any(w[0] == "archive_deal" and w[1] == "fred-live" for w in hs.writes)
-    assert any(w[0] == "archive_contact" and w[1] == "fred" for w in hs.writes)
-    assert any("fred@fireflies.ai" in x for x in report.contacts_pruned)
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
+    assert not any("fred@fireflies.ai" in x for x in report.contacts_pruned)
+
+
+def test_fireflies_notetaker_two_cycles_keeps_one_contact_no_deals():
+    """Fireflies app reuses the live bot contact; workflow deals are pruned each cycle."""
+    hs = FakeHubSpot(
+        [
+            {
+                "id": "fred",
+                "properties": {
+                    "email": "fred@fireflies.ai",
+                    "firstname": "Fireflies",
+                    "lastname": "Notetaker",
+                },
+            }
+        ]
+    )
+
+    def add_workflow_deal(deal_id: str) -> None:
+        hs.deals.append(
+            {
+                "id": deal_id,
+                "contact_id": "fred",
+                "properties": {
+                    "dealstage": STAGE["replied"],
+                    "dealname": "Fireflies Notetaker - ",
+                    "pipeline": "default",
+                },
+            }
+        )
+
+    add_workflow_deal("nt-1")
+    prune_run(hs, CycleReport())
+    assert len(hs.contacts) == 1
+    assert hs.contacts[0]["id"] == "fred"
+    assert hs.deals == []
+    assert str(hs.contacts[0]["properties"].get("crmbrain_bot") or "").lower() == "true"
+
+    add_workflow_deal("nt-2")
+    prune_run(hs, CycleReport())
+    assert len(hs.contacts) == 1
+    assert hs.contacts[0]["id"] == "fred"
+    assert hs.contacts[0]["properties"]["email"] == "fred@fireflies.ai"
+    assert hs.deals == []
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
 
 
 def test_memory_reads_last_finished_cycle_start(tmp_path):
@@ -429,7 +476,7 @@ def test_duplicate_collapse_skips_signed_paid_and_other_pipeline():
     assert not any(w[0] == "archive_deal" for w in hs.writes)
 
 
-def test_notetaker_keeps_paid_and_shared_discovery_deals():
+def test_notetaker_archives_bot_only_deals_keeps_shared_and_contact():
     hs = FakeHubSpot(
         [
             {
@@ -478,11 +525,11 @@ def test_notetaker_keeps_paid_and_shared_discovery_deals():
     report = CycleReport()
     prune_notetaker_contacts(hs, report)
     ids = {d["id"] for d in hs.deals}
-    assert ids == {"paid-deal", "shared-disco"}
-    assert not any(c["id"] == "fred" for c in hs.contacts)
+    assert ids == {"shared-disco"}
+    assert any(c["id"] == "fred" for c in hs.contacts)
     assert any(c["id"] == "pat" for c in hs.contacts)
-    assert any(w[0] == "archive_contact" and w[1] == "fred" for w in hs.writes)
-    assert not any(w[0] == "archive_deal" for w in hs.writes)
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
+    assert any(w[0] == "archive_deal" and w[1] == "paid-deal" for w in hs.writes)
     assert any(w[0] == "disassociate" and w[1] == "fred" for w in hs.writes)
 
 

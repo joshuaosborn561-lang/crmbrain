@@ -1820,7 +1820,11 @@ def contact_has_protected_deal(deals: list[dict] | None = None) -> bool:
 
 
 def is_bot_or_junk_identity(email: str = "", name: str = "") -> bool:
-    """Fireflies/Otter notetakers and system addresses must never become contacts."""
+    """Fireflies/Otter notetakers and system addresses must never own a deal.
+
+    crmbrain never creates these contacts. A live fred@fireflies.ai bot row is
+    kept so the Fireflies HubSpot app reuses it instead of recreating it.
+    """
     if email and (is_notetaker_email_local(email) or is_system_address_local(email)):
         return True
     blob = f"{name or ''} {email or ''}".lower()

@@ -3,7 +3,11 @@
 When a junk deal is pruned, also archive the associated contact if it has no
 meeting held/scheduled evidence and is not otherwise engaged (no other open
 deals). System addresses (Fireflies Notetaker, calendar bots) never count as
-meeting evidence. Notetaker/bot contacts are archived in every stage.
+meeting evidence.
+
+Notetaker/bot contacts stay live (marked crmbrain_bot) so the Fireflies HubSpot
+app reuses fred@fireflies.ai instead of recreating it. Deals attached only to a
+contact that is_bot_or_junk_identity rejects are archived the same cycle.
 """
 
 from __future__ import annotations
@@ -14,15 +18,13 @@ from crmbrain.hubspot import HubSpot
 from crmbrain.models import CycleReport
 from crmbrain.deal_write import commit_deal_archive, commit_deal_move
 from crmbrain.policy import (
-    DEFAULT_PIPELINE,
     MEETING_STAGES,
-    PRE_SALE_STAGES,
     clean_deal_name,
     contact_has_meeting_evidence,
     contact_has_protected_deal,
-    deal_has_amount,
-    deal_pipeline,
+    deal_is_locked,
     is_blank_contact,
+    is_bot_or_junk_identity,
     promote_replied_stage,
 )
 from crmbrain.sources.gmail_scan import (
@@ -90,6 +92,14 @@ def _contact_label(contact: dict) -> str:
     )
 
 
+def contact_is_bot_or_junk(contact: dict) -> bool:
+    """True when HubSpot should keep this row as a bot, never as a person/deal owner."""
+    props = contact.get("properties") or {}
+    email = (props.get("email") or "").strip()
+    name = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+    return is_bot_or_junk_identity(email, name) or is_notetaker_contact(contact)
+
+
 def archive_unengaged_contact(
     hs: HubSpot,
     contact: dict,
@@ -100,6 +110,8 @@ def archive_unengaged_contact(
 ) -> None:
     cid = contact.get("id")
     if not cid:
+        return
+    if contact_is_bot_or_junk(contact):
         return
     if not force:
         email = ((contact.get("properties") or {}).get("email") or "")
@@ -223,25 +235,35 @@ def _deal_has_real_contact(hs: HubSpot, deal_id: str, bot_id: str) -> bool:
     for other in hs.contacts_for_deal(deal_id):
         if str(other.get("id") or "") == str(bot_id):
             continue
-        if not is_notetaker_contact(other):
+        if not contact_is_bot_or_junk(other):
             return True
     return False
 
 
 def may_archive_notetaker_deal(hs: HubSpot, deal: dict, bot_id: str) -> bool:
-    """Only drop bot-only pre-sale stubs. Keep paid/signed/shared deals."""
-    props = deal.get("properties") or {}
-    stage = props.get("dealstage") or ""
-    if deal_pipeline(deal) != DEFAULT_PIPELINE:
-        return False
-    if stage not in PRE_SALE_STAGES:
-        return False
-    if deal_has_amount(deal):
+    """Archive every bot-only deal. Keep deals that also have a real person."""
+    if deal_is_locked(deal):
         return False
     deal_id = str(deal.get("id") or "")
     if deal_id and _deal_has_real_contact(hs, deal_id, bot_id):
         return False
     return True
+
+
+def _bot_already_marked(contact: dict) -> bool:
+    raw = str((contact.get("properties") or {}).get("crmbrain_bot") or "").strip().lower()
+    return raw in {"true", "1", "yes"}
+
+
+def _mark_bot_contact(hs: HubSpot, contact: dict, report: CycleReport) -> None:
+    cid = contact.get("id")
+    if not cid or _bot_already_marked(contact):
+        return
+    try:
+        hs.patch_contact(str(cid), {"crmbrain_bot": "true"}, contact=contact)
+        contact.setdefault("properties", {})["crmbrain_bot"] = "true"
+    except Exception as exc:
+        report.errors.append(f"mark bot {cid}: {exc}")
 
 
 def _archive_notetaker(hs: HubSpot, contact: dict, report: CycleReport) -> None:
@@ -269,14 +291,17 @@ def _archive_notetaker(hs: HubSpot, contact: dict, report: CycleReport) -> None:
                 drop(str(cid), deal_id)
             except Exception as exc:
                 report.errors.append(f"detach notetaker {cid} from {deal_id}: {exc}")
-    archive_unengaged_contact(hs, contact, report, "notetaker", force=True)
+    _mark_bot_contact(hs, contact, report)
 
 
 def prune_notetaker_contacts(hs: HubSpot, report: CycleReport, limit: int = NOTETAKER_LIMIT) -> None:
-    """Always soft-archive Fireflies/Otter/etc. bots.
+    """Keep one live Fireflies/Otter bot contact; archive deals on junk identities.
 
-    Attached deals are archived only when they are default-pipeline pre-sale
-    stubs with no amount and no real (non-notetaker) contact.
+    The Fireflies HubSpot app recreates fred@fireflies.ai when that contact is
+    archived, and the 'Create deal for new contacts' workflow then opens a
+    'Fireflies Notetaker - ' deal. Leaving the contact live (crmbrain_bot)
+    stops the loop. Deals attached only to is_bot_or_junk_identity contacts
+    are archived the same cycle.
     """
     found: dict[str, dict] = {}
     search = getattr(hs, "search_contacts_by_email_token", None)
@@ -291,21 +316,19 @@ def prune_notetaker_contacts(hs: HubSpot, report: CycleReport, limit: int = NOTE
                 report.errors.append(f"notetaker search {token}: {exc}")
     scanned = 0
     for contact in hs.iter_contacts(
-        ["email", "firstname", "lastname", "phone", "company", "crm_source"]
+        ["email", "firstname", "lastname", "phone", "company", "crm_source", "crmbrain_bot"]
     ):
         scanned += 1
         if scanned > 400:
             break
         cid = str(contact.get("id") or "")
-        if cid and is_notetaker_contact(contact):
+        if cid and contact_is_bot_or_junk(contact):
             found[cid] = contact
-    archived = 0
+    handled = 0
     for contact in found.values():
-        if archived >= limit:
+        if handled >= limit:
             break
-        if not is_notetaker_contact(contact):
+        if not contact_is_bot_or_junk(contact):
             continue
-        before = len(report.contacts_pruned)
         _archive_notetaker(hs, contact, report)
-        if len(report.contacts_pruned) > before:
-            archived += 1
+        handled += 1
