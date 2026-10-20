@@ -263,6 +263,9 @@ class FakeHubSpot:
 
     def patch_contact(self, contact_id, properties, ev=None, contact=None):
         self.patches.append((contact_id, properties))
+        for row in self.contacts:
+            if str(row.get("id")) == str(contact_id):
+                row.setdefault("properties", {}).update(properties)
 
     def add_note(self, contact_id, body, ev=None, contact=None):
         self.notes.append((contact_id, body))
@@ -1186,11 +1189,12 @@ def test_prune_junk_deal_archives_junk_contact():
     report = CycleReport()
     prune_replied_deals(hs, report)
     assert hs.deals == []
-    assert hs.contacts == []
+    assert len(hs.contacts) == 1
+    assert hs.contacts[0]["id"] == "fred"
     assert any("Fireflies" in x for x in report.deals_pruned)
-    assert any("fred@fireflies.ai" in x for x in report.contacts_pruned)
+    assert not any("fred@fireflies.ai" in x for x in report.contacts_pruned)
     assert any(w[0] == "archive_deal" and w[1] == "fred-deal" for w in hs.writes)
-    assert any(w[0] == "archive_contact" and w[1] == "fred" for w in hs.writes)
+    assert not any(w[0] == "archive_contact" for w in hs.writes)
 
 
 def test_prune_skips_junk_contact_when_other_open_deal_exists():

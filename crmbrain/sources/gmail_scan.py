@@ -675,7 +675,7 @@ def is_system_address(email: str) -> bool:
 
 
 def is_notetaker_email(email: str) -> bool:
-    """Fireflies / Otter / Fathom style bots. Always archive, any deal stage."""
+    """Fireflies / Otter / Fathom style bots. Keep the contact; archive its deals."""
     low = (email or "").strip().lower()
     if not low or "@" not in low:
         return False

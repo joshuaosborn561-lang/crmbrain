@@ -90,6 +90,14 @@ CONTACT_PROPS = [
         "description": "How this person earned a HubSpot record: call, meeting, reply, LinkedIn, Allo, RVM.",
     },
     {
+        "name": "crmbrain_bot",
+        "label": "CRMBrain bot",
+        "type": "bool",
+        "fieldType": "booleancheckbox",
+        "groupName": "contactinformation",
+        "description": "Notetaker/system identity. Kept live so Fireflies reuses this contact; attached deals are pruned.",
+    },
+    {
         "name": "nurture_thread_id",
         "label": "Nurture thread id",
         "type": "string",
@@ -223,6 +231,7 @@ CONTACT_SEARCH_PROPS = [
     "website",
     "hs_linkedin_url",
     "crm_source",
+    "crmbrain_bot",
     "personal_details",
     "family_notes",
     "relationship_hooks",
@@ -728,7 +737,7 @@ class HubSpot:
         return self._search(
             "contacts",
             [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": token}],
-            ["email", "firstname", "lastname", "phone", "company", "crm_source"],
+            ["email", "firstname", "lastname", "phone", "company", "crm_source", "crmbrain_bot"],
         )
 
     def find_contact_by_company(self, company: str) -> dict | None:
