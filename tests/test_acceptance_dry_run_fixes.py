@@ -59,8 +59,8 @@ DONIGAN_CALL = Engagement(
 
 
 def test_gemini_lite_coerces_to_flash():
-    assert resolve_gemini_model("gemini-2.5-flash-lite") == "gemini-2.5-flash"
-    assert resolve_gemini_model("") == "gemini-2.5-flash"
+    assert resolve_gemini_model("gemini-2.5-flash-lite") == "gemini-3.8-flash"
+    assert resolve_gemini_model("") == "gemini-3.8-flash"
     assert resolve_gemini_model("gemini-2.5-flash") == "gemini-2.5-flash"
 
 

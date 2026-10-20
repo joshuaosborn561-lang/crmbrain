@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 _SECRET_KEY_RE = re.compile(r"([?&](?:key|api_key|apikey|token|access_token)=)[^&\s#]+", re.I)
 _URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?[^\s]*", re.I)
 
