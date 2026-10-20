@@ -611,6 +611,14 @@ def date_window_cdt(days: int) -> list[str]:
     return [(end - timedelta(days=i)).isoformat() for i in range(span, -1, -1)]
 
 
+def chicago_dates_inclusive(start: date, end: date | None = None) -> list[str]:
+    """Inclusive YYYY-MM-DD strings in America/Chicago from start through end."""
+    last = end or now_cdt().date()
+    if start > last:
+        return []
+    return [(start + timedelta(days=i)).isoformat() for i in range((last - start).days + 1)]
+
+
 def is_archived_hs_row(row: dict | None) -> bool:
     """True when a HubSpot contact or deal is archived."""
     if not isinstance(row, dict) or not row:
