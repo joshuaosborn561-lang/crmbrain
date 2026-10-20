@@ -44,6 +44,11 @@ RETRYABLE_STATUS = frozenset({429, 503})
 # HubSpot meeting engagements only. Associated emails are NOT meetings.
 MEETING_ASSOCIATION_OBJECTS = ("meetings",)
 
+BOOL_OPTIONS = [
+    {"label": "Yes", "value": "true", "displayOrder": 0},
+    {"label": "No", "value": "false", "displayOrder": 1},
+]
+
 CONTACT_PROPS = [
     {
         "name": "personal_details",
@@ -94,6 +99,7 @@ CONTACT_PROPS = [
         "label": "CRMBrain bot",
         "type": "bool",
         "fieldType": "booleancheckbox",
+        "options": BOOL_OPTIONS,
         "groupName": "contactinformation",
         "description": "Notetaker/system identity. Kept live so Fireflies reuses this contact; attached deals are pruned.",
     },
@@ -135,6 +141,7 @@ DEAL_PROPS = [
         "label": "CRMBrain locked",
         "type": "bool",
         "fieldType": "booleancheckbox",
+        "options": BOOL_OPTIONS,
         "groupName": "dealinformation",
         "description": "When true, CRMBrain will not change stage or amount on this deal.",
     },
@@ -241,6 +248,12 @@ CONTACT_SEARCH_PROPS = [
 ]
 
 
+def _already_exists(resp) -> bool:
+    if resp.status_code == 409:
+        return True
+    return "already exists" in (getattr(resp, "text", "") or "").lower()
+
+
 class HubSpot:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -318,7 +331,7 @@ class HubSpot:
                 created = self._request(
                     "POST", "/crm/v3/properties/contacts", json=prop, timeout=WRITE_TIMEOUT
                 )
-                if created.status_code >= 400:
+                if created.status_code >= 400 and not _already_exists(created):
                     raise RuntimeError(f"create prop {prop['name']}: {created.text[:300]}")
         for prop in DEAL_PROPS:
             resp = self._request(
@@ -328,7 +341,7 @@ class HubSpot:
                 created = self._request(
                     "POST", "/crm/v3/properties/deals", json=prop, timeout=WRITE_TIMEOUT
                 )
-                if created.status_code >= 400:
+                if created.status_code >= 400 and not _already_exists(created):
                     logger.warning("create deal prop %s: %s", prop["name"], created.text[:300])
 
     def _search(self, object_name: str, filters: list[dict], properties: list[str]) -> list[dict]:
