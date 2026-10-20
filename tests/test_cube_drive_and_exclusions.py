@@ -97,7 +97,7 @@ def test_cube_lists_past_html_50_folder_cap(monkeypatch):
         params = params or {}
         q = params.get("q") or ""
         token = params.get("pageToken") or ""
-        if f"'{ROOT}' in parents" in q and "mimeType" in q and "folder" in q:
+        if f"'{ROOT}' in parents" in q and "mimeType =" in q and "!=" not in q:
             calls["pages"] += 1
             if not token:
                 return {"files": folders[:50], "nextPageToken": "page-2"}
