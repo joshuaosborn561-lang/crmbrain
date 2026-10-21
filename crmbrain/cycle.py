@@ -269,7 +269,51 @@ def _handle_would_write(ev: Engagement, hs: HubSpot, memory: Memory | None) -> b
         return policy.is_cube_business_discovery(ev)
     if ev.source == "fireflies":
         return policy.held_call_may_open_deal(ev)
+    if ev.source == "calendly":
+        return calendar_booking_would_write(ev, hs)
     return True
+
+
+# Bookings with these person intents never open a deal and never count toward the cap.
+NO_DEAL_BOOKING_INTENTS = frozenset({"networking", "mentor", "personal", "podcast", "client_ops", "day_job", "vendor", "recruiter"})
+# Deal stages a calendar booking must never pull back to Meeting Booked.
+TERMINAL_CLIENT_STAGES = frozenset({STAGE["closed_won"], "4392753853", "4392753854"})  # Closed Won, Renewed, Churned
+
+
+def booking_is_no_deal(ev: Engagement) -> bool:
+    """Podcast, networking, mentor and personal bookings are notes/skip only."""
+    from crmbrain.calendar_events import looks_like_non_sales_meeting
+
+    title = f"{ev.raw_subject or ''} {(ev.extra or {}).get('event_type') or ''}"
+    if "podcast" in title.lower() or looks_like_non_sales_meeting(title):
+        return True
+    decision = getattr(ev, "_person_intent", None)
+    return bool(decision is not None and (getattr(decision, "intent", "") or "") in NO_DEAL_BOOKING_INTENTS)
+
+
+def booking_stage_change(target: str, deals: list[dict]) -> bool:
+    """True only if a booking at `target` would really create a deal or move one forward."""
+    stages = [str((d.get("properties") or {}).get("dealstage") or "") for d in deals or []]
+    if any(s in TERMINAL_CLIENT_STAGES for s in stages):
+        return False
+    open_stages = [s for s in stages if s and s != STAGE["closed_lost"]]
+    if not open_stages:
+        return True
+    target_rank = policy.STAGE_RANK.get(target, 0)
+    return all(policy.STAGE_RANK.get(policy.canonicalize_stage(s), 0) < target_rank for s in open_stages)
+
+
+def calendar_booking_would_write(ev: Engagement, hs: HubSpot) -> bool:
+    """Notes-only, skipped and same-stage/backward bookings do not count toward the 15% cap."""
+    if booking_is_no_deal(ev):
+        return False
+    target = ev.stage_hint or STAGE["meeting_booked"]
+    try:
+        contact = hs.find_contact(email=ev.email or "") if ev.email else None
+        deals = hs.open_deals_for_contact(str(contact.get("id"))) if contact and contact.get("id") else []
+    except Exception:
+        return True
+    return booking_stage_change(target, deals)
 
 
 def _planned_unique_people(

@@ -117,6 +117,8 @@ STAGE_RANK = {
     STAGE["closed_won"]: 8,
 }
 BACK_STAGES = {STAGE["nurture"], STAGE["closed_lost"]}
+# Closed Won plus Client Renewals Renewed / Churned.
+CLIENT_TERMINAL_STAGES = frozenset({STAGE["closed_won"], "4392753853", "4392753854"})
 WEAK_STAGES = {STAGE["initial_interest"], STAGE["nurture"]}
 MONEY_STAGES = {
     STAGE["proposal_sent"],
@@ -649,8 +651,17 @@ def should_move_stage(
     """Advance on stronger evidence. Never regress protected late stages from older re-extraction."""
     if not target or current == target:
         return False
+    raw_current = str(current or "")
     current = canonicalize_stage(current)
     target = canonicalize_stage(target)
+    # A booking never pulls a deal back to Meeting Booked once it is past it,
+    # or once it is a client (Closed Won, Renewed, Churned).
+    if target == STAGE["meeting_booked"] and (
+        current in CLIENT_TERMINAL_STAGES
+        or raw_current in CLIENT_TERMINAL_STAGES
+        or STAGE_RANK.get(current, 0) > STAGE_RANK[STAGE["meeting_booked"]]
+    ):
+        return False
     held_floor = STAGE_RANK[STAGE["discovery_held"]]
     if target == STAGE["nurture"] and STAGE_RANK.get(current, 0) >= held_floor:
         return False
