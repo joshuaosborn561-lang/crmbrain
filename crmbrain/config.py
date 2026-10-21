@@ -293,6 +293,7 @@ NON_SALES_TITLE_HINTS = (
     "josh/mark",
     "mentor",
     "seo partner",
+    "podcast",
 )
 
 # Josh's clients. Talk to them, but do not open a new SalesGlider deal.
