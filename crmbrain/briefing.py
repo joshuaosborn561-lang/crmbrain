@@ -236,6 +236,10 @@ def send_due(
     memory: Memory,
     report: CycleReport,
 ) -> None:
+    # EA owns meeting briefs now. Off unless BRIEFS_ENABLED=1; nothing is scanned or sent.
+    if not getattr(settings, "briefs_enabled", False):
+        report.skipped.append("briefing disabled (BRIEFS_ENABLED off)")
+        return
     try:
         meetings = collect_upcoming(settings, gmail)
     except Exception as exc:

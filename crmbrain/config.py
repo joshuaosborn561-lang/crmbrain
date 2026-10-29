@@ -358,6 +358,8 @@ class Settings:
     lookback_start_at: datetime | None = None
     lookback_override: bool = False
     dry_run: bool = False
+    # Meeting briefs (briefing.send_due) are retired: EA owns briefs. Opt-in only.
+    briefs_enabled: bool = False
     intent_min_confidence: float = 0.75
     calendar_upcoming_days: int = 30
     max_archives_regressions: int = 10
@@ -408,6 +410,7 @@ class Settings:
             lookback_start_at=_parse_lookback_start(os.getenv("CRMBRAIN_LOOKBACK_START", "")),
             lookback_override=bool(os.getenv("CRMBRAIN_LOOKBACK_START", "").strip()),
             dry_run=os.getenv("CRMBRAIN_DRY_RUN", "").strip().lower() in {"1", "true", "yes"},
+            briefs_enabled=os.getenv("BRIEFS_ENABLED", "").strip().lower() in {"1", "true", "yes"},
             intent_min_confidence=float(os.getenv("INTENT_MIN_CONFIDENCE", "0.75")),
             calendar_upcoming_days=int(os.getenv("CALENDAR_UPCOMING_DAYS", "30")),
             max_archives_regressions=int(os.getenv("MAX_ARCHIVES_REGRESSIONS", "10")),
