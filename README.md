@@ -98,7 +98,7 @@ Recommended cron: `0 12,22 * * *` UTC — 7am and 5pm America/Chicago.
 
 HubSpot is meeting-held/scheduled only. Cold outbound stays in Supabase.
 
-One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump. Dedup is not hourly-cron-only: a Gmail Sent-folder check stops repeats even if a run fires twice.
+**Off by default (EA owns briefs): set `BRIEFS_ENABLED=1` to turn it back on.** One brief per call, about two hours before, emailed to `joshua@salesglidergrowth.com`. Same shape as the Laura Klein brief. Never a week-ahead dump. Dedup is not hourly-cron-only: a Gmail Sent-folder check stops repeats even if a run fires twice.
 
 Full cycle:
 
