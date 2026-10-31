@@ -22,7 +22,7 @@ from crmbrain.config import (
 )
 from crmbrain.models import Engagement
 from crmbrain.names import companies_fuzzy_match, company_search_tokens, names_fuzzy_match, prefer_contact_name
-from crmbrain import intelligence, policy
+from crmbrain import intelligence, lead_source, policy
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,34 @@ BOOL_OPTIONS = [
     {"label": "No", "value": "false", "displayOrder": 1},
 ]
 
+_LEAD_SOURCE_OPTIONS = [
+    {"label": v, "value": v, "displayOrder": i, "hidden": False}
+    for i, v in enumerate(lead_source.LEAD_SOURCES)
+]
+_LEAD_SOURCE_CONFIDENCE_OPTIONS = [
+    {"label": v, "value": v, "displayOrder": i, "hidden": False}
+    for i, v in enumerate((lead_source.CONFIRMED, lead_source.INFERRED))
+]
+
 CONTACT_PROPS = [
+    {
+        "name": "sg_lead_source",
+        "label": "SalesGlider lead source",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "contactinformation",
+        "description": "Channel that produced the booking. Set by crmbrain at booking time or backfilled.",
+        "options": _LEAD_SOURCE_OPTIONS,
+    },
+    {
+        "name": "sg_lead_source_confidence",
+        "label": "SalesGlider lead source confidence",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "contactinformation",
+        "description": "confirmed = a dated record names the channel; inferred = circumstantial evidence.",
+        "options": _LEAD_SOURCE_CONFIDENCE_OPTIONS,
+    },
     {
         "name": "personal_details",
         "label": "Personal details",
@@ -136,6 +163,24 @@ def _enum_options(values: tuple[str, ...] | list[str]) -> list[dict]:
 
 
 DEAL_PROPS = [
+    {
+        "name": "sg_lead_source",
+        "label": "SalesGlider lead source",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "description": "Channel that produced the booking. Set by crmbrain at booking time or backfilled.",
+        "options": _LEAD_SOURCE_OPTIONS,
+    },
+    {
+        "name": "sg_lead_source_confidence",
+        "label": "SalesGlider lead source confidence",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "description": "confirmed = a dated record names the channel; inferred = circumstantial evidence.",
+        "options": _LEAD_SOURCE_CONFIDENCE_OPTIONS,
+    },
     {
         "name": "crmbrain_locked",
         "label": "CRMBrain locked",
@@ -270,6 +315,8 @@ class HubSpot:
         self.recent_attendee_emails: set[str] = set()
         self.dry_run = bool(getattr(settings, "dry_run", False))
         self.proposed: list[str] = []
+        # Set by the cycle so booking-time lead source can look up channel evidence.
+        self.lead_source_memory: Any = None
 
     def _request(
         self,
@@ -934,6 +981,61 @@ class HubSpot:
             except Exception as exc:
                 logger.warning("amount note failed %s: %s", contact_id, exc)
         return created
+
+    def stamp_lead_source(self, deal: dict | None, contact: dict | None, ev: Engagement) -> tuple[str, str] | None:
+        """Set sg_lead_source (+ confidence) on the deal and contact when still blank.
+
+        Never overwrites a value someone already set. Returns (source, confidence) when something
+        was written, else None. Failures are logged and swallowed so a booking never breaks on this.
+        """
+        if self.dry_run:
+            return None
+        try:
+            found = lead_source.resolve_lead_source(ev, self.lead_source_memory, contact)
+            if not found:
+                return None
+            source, confidence = found
+            wrote = False
+            for kind, obj in (("deals", deal), ("contacts", contact)):
+                obj_id = str((obj or {}).get("id") or "")
+                if not obj_id:
+                    continue
+                props = (obj or {}).get("properties") or {}
+                current = props.get(lead_source.SOURCE_PROP)
+                if current is None:
+                    resp = self._request(
+                        "GET",
+                        f"/crm/v3/objects/{kind}/{obj_id}",
+                        params={"properties": lead_source.SOURCE_PROP},
+                        retry=True,
+                        timeout=20,
+                    )
+                    if resp.status_code >= 400:
+                        continue
+                    current = ((resp.json() or {}).get("properties") or {}).get(lead_source.SOURCE_PROP)
+                if current:
+                    continue
+                resp = self._request(
+                    "PATCH",
+                    f"/crm/v3/objects/{kind}/{obj_id}",
+                    json={
+                        "properties": {
+                            lead_source.SOURCE_PROP: source,
+                            lead_source.CONFIDENCE_PROP: confidence,
+                        }
+                    },
+                    timeout=WRITE_TIMEOUT,
+                )
+                if resp.status_code < 400:
+                    props[lead_source.SOURCE_PROP] = source
+                    obj.setdefault("properties", {}).update(props)
+                    wrote = True
+                else:
+                    logger.warning("sg_lead_source %s %s: %s", kind, obj_id, (resp.text or "")[:200])
+            return (source, confidence) if wrote else None
+        except Exception as exc:
+            logger.warning("stamp_lead_source failed: %s", exc)
+            return None
 
     def fill_deal_amount(
         self,

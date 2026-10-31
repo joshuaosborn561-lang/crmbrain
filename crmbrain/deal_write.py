@@ -260,7 +260,11 @@ def propose_deal_write(
 
 
 def commit_deal_write(hs: HubSpot, contact: dict, ev: Engagement, stage: str, amount: str = "") -> dict:
-    return hs.upsert_deal(contact, ev, stage, amount=amount)
+    deal = hs.upsert_deal(contact, ev, stage, amount=amount)
+    stamp = getattr(hs, "stamp_lead_source", None)
+    if deal and callable(stamp):
+        stamp(deal, contact, ev)
+    return deal
 
 
 def commit_amount_write(

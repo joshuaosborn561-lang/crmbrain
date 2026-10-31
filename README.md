@@ -146,3 +146,7 @@ Gemini 2.5 Flash when `GEMINI_API_KEY` is set. Heuristics still run without it.
 - Emailing prospects except Josh-approved #nurture thread replies (gated, never Smartlead)
 - Creating HubSpot tasks
 - Using the master SmartLead key
+
+## Lead source (sg_lead_source)
+
+At booking time (`commit_deal_write`) the cycle stamps `sg_lead_source` and `sg_lead_source_confidence` on the deal and contact when they are still blank. Channel comes from the engagement itself (Smartlead, HeyReach, Allo, RVM = confirmed), a Smartlead `send_id` on the Calendly `booking_events` row (Cold email, confirmed), or earlier ticker / `lead_source_platofrm` touches (inferred). No evidence leaves it blank. Existing values are never overwritten. Referral, Live leads, Partner play and Inbound/other are set by hand.

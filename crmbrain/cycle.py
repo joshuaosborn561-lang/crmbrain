@@ -1566,6 +1566,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
         settings = replace(settings, lookback_start_at=lookback)
     budget = WriteBudget.from_settings(settings)
     hs = HubSpot(settings)
+    hs.lead_source_memory = memory
     if not briefs_only and not settings.dry_run:
         hs.ensure_properties()
     gmail = Gmail(settings) if settings.gmail_refresh_token else None
