@@ -315,8 +315,8 @@ class HubSpot:
         self.recent_attendee_emails: set[str] = set()
         self.dry_run = bool(getattr(settings, "dry_run", False))
         self.proposed: list[str] = []
-        # Set by the cycle so booking-time lead source can look up channel evidence.
-        self.lead_source_memory: Any = None
+        # Set by the cycle (memory, gmail, settings) so booking-time lead source can look up channel evidence.
+        self.lead_source_ctx: lead_source.LeadSourceContext | None = None
 
     def _request(
         self,
@@ -982,6 +982,18 @@ class HubSpot:
                 logger.warning("amount note failed %s: %s", contact_id, exc)
         return created
 
+    def _lead_source_props(self, kind: str, obj_id: str, extra: tuple[str, ...] = ()) -> dict | None:
+        resp = self._request(
+            "GET",
+            f"/crm/v3/objects/{kind}/{obj_id}",
+            params={"properties": ",".join((lead_source.SOURCE_PROP, *extra))},
+            retry=True,
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            return None
+        return (resp.json() or {}).get("properties") or {}
+
     def stamp_lead_source(self, deal: dict | None, contact: dict | None, ev: Engagement) -> tuple[str, str] | None:
         """Set sg_lead_source (+ confidence) on the deal and contact when still blank.
 
@@ -991,30 +1003,28 @@ class HubSpot:
         if self.dry_run:
             return None
         try:
-            found = lead_source.resolve_lead_source(ev, self.lead_source_memory, contact)
-            if not found:
-                return None
-            source, confidence = found
-            wrote = False
+            targets: list[tuple[str, str, dict]] = []
+            fresh_contact: dict | None = contact
             for kind, obj in (("deals", deal), ("contacts", contact)):
                 obj_id = str((obj or {}).get("id") or "")
                 if not obj_id:
                     continue
-                props = (obj or {}).get("properties") or {}
-                current = props.get(lead_source.SOURCE_PROP)
-                if current is None:
-                    resp = self._request(
-                        "GET",
-                        f"/crm/v3/objects/{kind}/{obj_id}",
-                        params={"properties": lead_source.SOURCE_PROP},
-                        retry=True,
-                        timeout=20,
-                    )
-                    if resp.status_code >= 400:
-                        continue
-                    current = ((resp.json() or {}).get("properties") or {}).get(lead_source.SOURCE_PROP)
-                if current:
+                extra = lead_source.CONTACT_EVIDENCE_PROPS + ("email",) if kind == "contacts" else ()
+                props = self._lead_source_props(kind, obj_id, extra)
+                if props is None:
                     continue
+                if kind == "contacts":
+                    fresh_contact = {"id": obj_id, "properties": {**((contact or {}).get("properties") or {}), **props}}
+                if not props.get(lead_source.SOURCE_PROP):
+                    targets.append((kind, obj_id, obj or {}))
+            if not targets:
+                return None
+            found = lead_source.resolve_lead_source(ev, self.lead_source_ctx, fresh_contact)
+            if not found:
+                return None
+            source, confidence = found
+            wrote = False
+            for kind, obj_id, obj in targets:
                 resp = self._request(
                     "PATCH",
                     f"/crm/v3/objects/{kind}/{obj_id}",
@@ -1027,8 +1037,7 @@ class HubSpot:
                     timeout=WRITE_TIMEOUT,
                 )
                 if resp.status_code < 400:
-                    props[lead_source.SOURCE_PROP] = source
-                    obj.setdefault("properties", {}).update(props)
+                    obj.setdefault("properties", {})[lead_source.SOURCE_PROP] = source
                     wrote = True
                 else:
                     logger.warning("sg_lead_source %s %s: %s", kind, obj_id, (resp.text or "")[:200])
