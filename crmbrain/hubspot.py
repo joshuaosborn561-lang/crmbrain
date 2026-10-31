@@ -22,7 +22,7 @@ from crmbrain.config import (
 )
 from crmbrain.models import Engagement
 from crmbrain.names import companies_fuzzy_match, company_search_tokens, names_fuzzy_match, prefer_contact_name
-from crmbrain import intelligence, policy
+from crmbrain import intelligence, lead_source, policy
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,34 @@ BOOL_OPTIONS = [
     {"label": "No", "value": "false", "displayOrder": 1},
 ]
 
+_LEAD_SOURCE_OPTIONS = [
+    {"label": v, "value": v, "displayOrder": i, "hidden": False}
+    for i, v in enumerate(lead_source.LEAD_SOURCES)
+]
+_LEAD_SOURCE_CONFIDENCE_OPTIONS = [
+    {"label": v, "value": v, "displayOrder": i, "hidden": False}
+    for i, v in enumerate((lead_source.CONFIRMED, lead_source.INFERRED))
+]
+
 CONTACT_PROPS = [
+    {
+        "name": "sg_lead_source",
+        "label": "SalesGlider lead source",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "contactinformation",
+        "description": "Channel that produced the booking. Set by crmbrain at booking time or backfilled.",
+        "options": _LEAD_SOURCE_OPTIONS,
+    },
+    {
+        "name": "sg_lead_source_confidence",
+        "label": "SalesGlider lead source confidence",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "contactinformation",
+        "description": "confirmed = a dated record names the channel; inferred = circumstantial evidence.",
+        "options": _LEAD_SOURCE_CONFIDENCE_OPTIONS,
+    },
     {
         "name": "personal_details",
         "label": "Personal details",
@@ -136,6 +163,24 @@ def _enum_options(values: tuple[str, ...] | list[str]) -> list[dict]:
 
 
 DEAL_PROPS = [
+    {
+        "name": "sg_lead_source",
+        "label": "SalesGlider lead source",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "description": "Channel that produced the booking. Set by crmbrain at booking time or backfilled.",
+        "options": _LEAD_SOURCE_OPTIONS,
+    },
+    {
+        "name": "sg_lead_source_confidence",
+        "label": "SalesGlider lead source confidence",
+        "type": "enumeration",
+        "fieldType": "select",
+        "groupName": "dealinformation",
+        "description": "confirmed = a dated record names the channel; inferred = circumstantial evidence.",
+        "options": _LEAD_SOURCE_CONFIDENCE_OPTIONS,
+    },
     {
         "name": "crmbrain_locked",
         "label": "CRMBrain locked",
@@ -270,6 +315,8 @@ class HubSpot:
         self.recent_attendee_emails: set[str] = set()
         self.dry_run = bool(getattr(settings, "dry_run", False))
         self.proposed: list[str] = []
+        # Set by the cycle (memory, gmail, settings) so booking-time lead source can look up channel evidence.
+        self.lead_source_ctx: lead_source.LeadSourceContext | None = None
 
     def _request(
         self,
@@ -934,6 +981,70 @@ class HubSpot:
             except Exception as exc:
                 logger.warning("amount note failed %s: %s", contact_id, exc)
         return created
+
+    def _lead_source_props(self, kind: str, obj_id: str, extra: tuple[str, ...] = ()) -> dict | None:
+        resp = self._request(
+            "GET",
+            f"/crm/v3/objects/{kind}/{obj_id}",
+            params={"properties": ",".join((lead_source.SOURCE_PROP, *extra))},
+            retry=True,
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            return None
+        return (resp.json() or {}).get("properties") or {}
+
+    def stamp_lead_source(self, deal: dict | None, contact: dict | None, ev: Engagement) -> tuple[str, str] | None:
+        """Set sg_lead_source (+ confidence) on the deal and contact when still blank.
+
+        Never overwrites a value someone already set. Returns (source, confidence) when something
+        was written, else None. Failures are logged and swallowed so a booking never breaks on this.
+        """
+        if self.dry_run:
+            return None
+        try:
+            targets: list[tuple[str, str, dict]] = []
+            fresh_contact: dict | None = contact
+            for kind, obj in (("deals", deal), ("contacts", contact)):
+                obj_id = str((obj or {}).get("id") or "")
+                if not obj_id:
+                    continue
+                extra = lead_source.CONTACT_EVIDENCE_PROPS + ("email",) if kind == "contacts" else ()
+                props = self._lead_source_props(kind, obj_id, extra)
+                if props is None:
+                    continue
+                if kind == "contacts":
+                    fresh_contact = {"id": obj_id, "properties": {**((contact or {}).get("properties") or {}), **props}}
+                if not props.get(lead_source.SOURCE_PROP):
+                    targets.append((kind, obj_id, obj or {}))
+            if not targets:
+                return None
+            found = lead_source.resolve_lead_source(ev, self.lead_source_ctx, fresh_contact)
+            if not found:
+                return None
+            source, confidence = found
+            wrote = False
+            for kind, obj_id, obj in targets:
+                resp = self._request(
+                    "PATCH",
+                    f"/crm/v3/objects/{kind}/{obj_id}",
+                    json={
+                        "properties": {
+                            lead_source.SOURCE_PROP: source,
+                            lead_source.CONFIDENCE_PROP: confidence,
+                        }
+                    },
+                    timeout=WRITE_TIMEOUT,
+                )
+                if resp.status_code < 400:
+                    obj.setdefault("properties", {})[lead_source.SOURCE_PROP] = source
+                    wrote = True
+                else:
+                    logger.warning("sg_lead_source %s %s: %s", kind, obj_id, (resp.text or "")[:200])
+            return (source, confidence) if wrote else None
+        except Exception as exc:
+            logger.warning("stamp_lead_source failed: %s", exc)
+            return None
 
     def fill_deal_amount(
         self,

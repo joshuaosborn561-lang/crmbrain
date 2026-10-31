@@ -89,6 +89,19 @@ def campaigns(settings: Settings) -> list[dict]:
     return rows if isinstance(rows, list) else []
 
 
+def lead_campaigns(settings: Settings, email: str) -> list[dict]:
+    """Every campaign a lead sits in (read-only). One row per campaign with campaign_id, campaign_name,
+    last_sent_at, last_reply_at and lead_category_id. Raises on HTTP errors so callers can tell
+    "no campaigns" from "lookup failed"."""
+    if not email or not settings.smartlead_key:
+        return []
+    payload = _get(settings, "api/v1/leads/", {"email": email})
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("lead_campaign_data") or []
+    return [r for r in rows if isinstance(r, dict)]
+
+
 def _last_reply_at(settings: Settings, campaign_id: int, lead_id: int) -> datetime | None:
     try:
         payload = _get(

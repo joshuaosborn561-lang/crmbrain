@@ -146,3 +146,19 @@ Gemini 2.5 Flash when `GEMINI_API_KEY` is set. Heuristics still run without it.
 - Emailing prospects except Josh-approved #nurture thread replies (gated, never Smartlead)
 - Creating HubSpot tasks
 - Using the master SmartLead key
+
+## Lead source (sg_lead_source)
+
+At booking time (`commit_deal_write` -> `HubSpot.stamp_lead_source`) the cycle fills `sg_lead_source` and `sg_lead_source_confidence` on the deal and contact when blank. It never overwrites a value, is skipped in dry run, and a failed lookup is logged and swallowed. Signals, first hit wins (details in `crmbrain/lead_source.py`):
+
+| Source | Confirmed | Inferred |
+|---|---|---|
+| Referral | known referral account (`REFERRAL_ACCOUNTS` + culture-fits, parlaytech, bpltg, boldercyberpartners) or intro wording naming the prospect, on their earliest Gmail thread or in a third party's intro message; `SG Referral Hosts` campaign reply | third party on their first thread, or intro wording without the prospect named |
+| Cold call | Allo call to their phone in the 21 days before booking; `Cold Call Followup` campaign reply; allo/rvm engagement | Allo call matched by name only |
+| LinkedIn/HeyReach | heyreach engagement or a HeyReach row in `crmbrain.ticker` | contact `lead_source_platofrm` = HeyReach |
+| Live leads | reply in a `LiveLeads | ...` Smartlead campaign (or a booking with a Smartlead send_id) | lead only sent to a LiveLeads campaign |
+| Partner play | reply in an `Influencer Partnerships` / partnership campaign | only sent to one |
+| Cold email | reply in any other Smartlead campaign, or booking row with a Smartlead send_id | only sent to a campaign, ticker/platform history, lead in a client's campaign |
+| Inbound/other | HubSpot form conversion, or booking whose referrer is our site | direct Calendly booking with no outbound touch, web-analytics source, Warm Web Visitors / RB2B campaigns |
+
+Blank when nothing matches, or when a lookup failed (so "no outbound touch" is never guessed). Allo calls are read from `allo.calls`, falling back to `public.allo_calls_v`; if neither is reachable the direct-booking Inbound guess is skipped.

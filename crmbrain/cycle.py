@@ -38,6 +38,7 @@ from crmbrain.google_auth import drive_auth_detail, has_drive_access
 from crmbrain.heyreach import HeyReach
 from crmbrain.hubspot import HubSpot
 from crmbrain.memory import Memory
+from crmbrain.lead_source import LeadSourceContext
 from crmbrain.deal_write import authorize_deal_write, commit_amount_write, commit_deal_write, propose_deal_write
 from crmbrain.policy import INCREMENT_NO_SHOW
 from crmbrain.models import CycleReport, Engagement
@@ -1569,6 +1570,7 @@ def run(settings: Settings | None = None, briefs_only: bool = False) -> CycleRep
     if not briefs_only and not settings.dry_run:
         hs.ensure_properties()
     gmail = Gmail(settings) if settings.gmail_refresh_token else None
+    hs.lead_source_ctx = LeadSourceContext(settings=settings, memory=memory, gmail=gmail)
     calendar_creates: list[Engagement] = []
     calendar_last: datetime | None = None
     calendar_error = ""
