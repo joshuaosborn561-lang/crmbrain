@@ -473,3 +473,31 @@ def test_dave_ackley_deal_holder_not_day_job():
     decision = heuristic_intent(ev)
     assert decision.intent != "day_job"
     assert decision.verdict != "no"
+
+
+def test_prior_non_sales_lookup_quotes_comma_names_for_postgrest(tmp_path):
+    settings = make_settings()
+    memory = Memory(settings, data_dir=tmp_path)
+    memory.use_supabase = True
+    calls = []
+
+    def fake_sb_schema(method, table, params=None, **kwargs):
+        calls.append((method, table, dict(params or {})))
+        return []
+
+    memory._sb_schema = fake_sb_schema
+    errors = []
+    memory._record_error = lambda where, exc: errors.append((where, exc))
+    ev = _cube(
+        external_id="anthropic-invoice", name="Anthropic, PBC", phone="+12145550311",
+        email="invoice+statements@mail.anthropic.com", transcript="Your invoice is attached.",
+    )
+    assert memory.lookup_prior_non_sales_intent(ev) is None
+    assert errors == []
+    assert calls and calls[0][1] == "review_queue"
+    flt = calls[0][2]["or"]
+    assert 'name.ilike."*anthropic,*pbc*"' in flt
+    assert 'person_key.ilike."*anthropic,*pbc*"' in flt
+    assert 'name.ilike.*anthropic,' not in flt
+    assert 'email.eq."invoice+statements@mail.anthropic.com"' in flt
+    assert Memory._pgrst_quote('a"b\\c') == '"a\\"b\\\\c"'

@@ -672,6 +672,17 @@ class Memory:
             _push(item)
         return keys
 
+    @staticmethod
+    def _pgrst_quote(val) -> str:
+        """Quote a value for a PostgREST logic-tree filter (or=/and=).
+
+        Commas, parentheses, dots and colons are reserved in or=(...); wrapping
+        the value in double quotes (escaping backslash and double quote) keeps
+        it a single operand. ilike wildcards (*) still work inside the quotes.
+        """
+        text = str(val).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{text}"'
+
     def _prior_non_sales_row_matches(self, ev, row: dict) -> bool:
         """day_job/personal sticks if email, last-10 phone, or normalized name overlaps."""
         if (row.get("intent") or "") not in {"day_job", "personal"}:
@@ -779,15 +790,15 @@ class Memory:
                 }
                 ors: list[str] = []
                 for tail in ev_phones:
-                    ors.append(f"phone.ilike.*{tail}*")
-                    ors.append(f"person_key.ilike.*{tail}*")
+                    ors.append(f"phone.ilike.{self._pgrst_quote(f'*{tail}*')}")
+                    ors.append(f"person_key.ilike.{self._pgrst_quote(f'*{tail}*')}")
                 for mail in ev_emails:
-                    ors.append(f"email.eq.{mail}")
+                    ors.append(f"email.eq.{self._pgrst_quote(mail)}")
                 for named in ev_names:
                     token = "*".join(part for part in named.split() if part)
                     if token:
-                        ors.append(f"name.ilike.*{token}*")
-                        ors.append(f"person_key.ilike.*{token}*")
+                        ors.append(f"name.ilike.{self._pgrst_quote(f'*{token}*')}")
+                        ors.append(f"person_key.ilike.{self._pgrst_quote(f'*{token}*')}")
                 if ors:
                     params["or"] = f"({','.join(ors)})"
                 for row in self._sb_schema("GET", "review_queue", params=params) or []:
